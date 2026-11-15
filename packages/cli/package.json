@@ -1,0 +1,57 @@
+{
+  "name": "@limccn/tokimeki",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Share and attach to TUI terminal sessions through Cloudflare relay, P2P, or TURN",
+  "bin": {
+    "tokimeki": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "0.15.0",
+    "@limccn/tokimeki-protocol": "0.1.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/headless": "6.0.0",
+    "commander": "15.1.0",
+    "node-datachannel": "0.33.6",
+    "ws": "8.22.2",
+    "zod": "4.6.7"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/limccn/tokimeki.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/limccn/tokimeki#readme",
+  "bugs": {
+    "url": "https://github.com/limccn/tokimeki/issues"
+  },
+  "keywords": [
+    "terminal",
+    "tui",
+    "remote",
+    "cloudflare",
+    "webrtc",
+    "p2p",
+    "turn",
+    "relay",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a capability or documentation improvement
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what is missing?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Keep it focused; v1.1+ items are welcome but may be scheduled later.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: input
+    id: context
+    attributes:
+      label: Environment / context
+      description: OS, relay type, host program, and any relevant versions

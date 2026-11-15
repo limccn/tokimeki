@@ -1,0 +1,133 @@
+import type { IceTransportPolicy } from "@limccn/tokimeki-protocol";
+
+/** coturn URL configuration: JSON string array or legacy comma-separated string. */
+export type CoturnUrlConfig = string | readonly string[];
+
+/**
+ * Environment bindings for the tokimeki relay Worker and SessionDO.
+ *
+ * Secrets are provided with `wrangler secret put`:
+ * - `TOKIMEKI_MASTER_TOKEN`
+ * - `TOKIMEKI_COTURN_SECRET`
+ * - `TOKIMEKI_TURN_API_TOKEN`
+ *
+ * Everything else may live in `wrangler.jsonc` `vars`. No secret is ever
+ * included in a response, URL, or log record.
+ */
+export interface RelayEnv {
+  readonly SESSIONS: DurableObjectNamespace;
+  readonly TOKIMEKI_MASTER_TOKEN?: string;
+  readonly TOKIMEKI_SESSION_TTL_SECONDS?: string;
+  readonly TOKIMEKI_MAX_CLIENTS_PER_SESSION?: string;
+  readonly TOKIMEKI_STUN_URLS?: string;
+  readonly TOKIMEKI_TURN_PROVIDER?: string;
+  readonly TOKIMEKI_COTURN_URLS?: CoturnUrlConfig;
+  readonly TOKIMEKI_COTURN_SECRET?: string;
+  readonly TOKIMEKI_COTURN_TTL_SECONDS?: string;
+  readonly TOKIMEKI_TURN_URLS?: string;
+  readonly TOKIMEKI_TURN_USERNAME?: string;
+  readonly TOKIMEKI_TURN_CREDENTIAL?: string;
+  readonly TOKIMEKI_TURN_KEY_ID?: string;
+  readonly TOKIMEKI_TURN_API_TOKEN?: string;
+  readonly TOKIMEKI_TURN_TTL_SECONDS?: string;
+  readonly TOKIMEKI_ICE_TRANSPORT_POLICY?: string;
+  readonly TOKIMEKI_LOG_LEVEL?: string;
+}
+
+export const DEFAULT_SESSION_TTL_SECONDS = 86_400;
+export const DEFAULT_MAX_CLIENTS_PER_SESSION = 8;
+export const DEFAULT_STUN_URLS = "stun:stun.cloudflare.com:3478";
+
+/** Parse a positive integer environment value, falling back on invalid input. */
+export function parsePositiveInt(
+  raw: string | undefined,
+  fallback: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw.trim(), 10);
+  const value = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return Math.min(Math.trunc(value), maximum);
+}
+
+/** Session TTL in seconds (`TOKIMEKI_SESSION_TTL_SECONDS`, default 24h). */
+export function sessionTtlSeconds(env: RelayEnv): number {
+  return parsePositiveInt(env.TOKIMEKI_SESSION_TTL_SECONDS, DEFAULT_SESSION_TTL_SECONDS);
+}
+
+/** Maximum active clients per session (`TOKIMEKI_MAX_CLIENTS_PER_SESSION`, default 8). */
+export function maxClientsPerSession(env: RelayEnv): number {
+  return parsePositiveInt(env.TOKIMEKI_MAX_CLIENTS_PER_SESSION, DEFAULT_MAX_CLIENTS_PER_SESSION);
+}
+
+/** ICE transport policy advertised in `welcome`; defaults to `all`. */
+export function iceTransportPolicy(env: RelayEnv): IceTransportPolicy {
+  return env.TOKIMEKI_ICE_TRANSPORT_POLICY === "relay" ? "relay" : "all";
+}
+
+/** Comma-separated STUN URL list, always containing at least one entry. */
+export function stunUrlList(env: { readonly TOKIMEKI_STUN_URLS?: string }): string[] {
+  const urls = (env.TOKIMEKI_STUN_URLS ?? DEFAULT_STUN_URLS)
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return urls.length > 0 ? urls : [DEFAULT_STUN_URLS];
+}
+
+/**
+ * Raw coturn URL entries.
+ *
+ * Arrays are used as-is. A string starting with `[` is parsed as JSON first so
+ * a runtime that stringifies JSON vars still works; any other string (or a
+ * failed parse) falls back to the legacy comma-separated form.
+ */
+function coturnUrlCandidates(raw: CoturnUrlConfig): unknown[] {
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch {
+        // Not valid JSON; fall through to the legacy comma-separated form.
+      }
+    }
+    return trimmed.split(",");
+  }
+  if (!Array.isArray(raw)) {
+    // Wrangler vars are untyped JSON: a non-array value is treated as unset so
+    // `hello` falls back instead of throwing before provider selection.
+    return [];
+  }
+  return [...raw];
+}
+
+/**
+ * Normalized coturn TURN URL list (`TOKIMEKI_COTURN_URLS`).
+ *
+ * Accepts a JSON array, a JSON-encoded array string, or the legacy
+ * comma-separated string. Entries are trimmed; empty, non-string, duplicate,
+ * and non `turn:`/`turns:` entries are dropped. Order of first occurrence is
+ * preserved. An empty result means coturn REST is not configured.
+ */
+export function coturnUrlList(env: { readonly TOKIMEKI_COTURN_URLS?: CoturnUrlConfig }): string[] {
+  const raw = env.TOKIMEKI_COTURN_URLS;
+  if (raw === undefined) {
+    return [];
+  }
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of coturnUrlCandidates(raw)) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const url = entry.trim();
+    if (url.length === 0 || seen.has(url) || !/^turns?:/i.test(url)) {
+      continue;
+    }
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
+}

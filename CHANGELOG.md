@@ -1,0 +1,51 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- 512×512 rounded PNG repository icon with transparent corners
+  (`assets/icon.png`), generated from the new mascot artwork.
+
+### Changed
+
+- English and Chinese READMEs now reference `assets/icon.png` instead of the
+  legacy `assets/icon.svg` header icon.
+
+## [0.1.0] - 2026-11-14
+
+First public release.
+
+### Added
+
+- Cloudflare Worker + per-session Durable Object relay with WebSocket
+  authentication, routing, snapshots, ACK-based flow control, and resync.
+- `tokimeki` CLI: host `claude` / `pi` / arbitrary commands in a PTY, attach
+  from another machine, and `doctor` diagnostics.
+- WebRTC P2P transport with direct candidates, coturn TURN, Cloudflare
+  Realtime TURN, and automatic Worker relay fallback.
+- Multi-viewer shared control, resize policies, snapshot/reconnect, and
+  sequence-aware output.
+- Shared `@limccn/tokimeki-protocol` package with zod message schemas, binary
+  frames, error/close codes, and golden fixtures.
+- Cloudflare one-click relay deployment, TURN/STUN configuration docs, CLI
+  usage docs, and English/Chinese READMEs.
+- Apache-2.0 license and open-source contribution/security/conduct files.
+
+### Known limitations
+
+- P2P direct is best-effort; TURN or the Worker relay is the reliable path.
+- Strict NAT↔NAT validation, production edge hibernation/TTL long-run, and
+  real Claude/pi TUI manual acceptance remain environment-dependent.
+- v1 has no DataChannel fragmentation, automatic TURN provider refresh, or
+  listener/tunnel runtime.
+- Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
+  tests; link-quality work (selective-repeat/ARQ) is planned for a later
+  release.
+
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

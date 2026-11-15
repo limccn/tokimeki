@@ -1,0 +1,29 @@
+
+# Optional
+.env
+.env.local
+
+.claude/
+.agents/
+.codegraph/
+.trellis/
+.vscode/
+.cursor/
+
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Wrangler local state and dev secrets
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Logs and local tool artifacts
+npm-debug.log*
+.playwright-mcp/
+host-*.log
+attach-*.log

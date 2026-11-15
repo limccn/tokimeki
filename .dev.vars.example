@@ -1,0 +1,16 @@
+# Worker secrets template for the Cloudflare Deploy Button.
+# Copy to `.dev.vars` for local `wrangler dev`; set real values with
+# `wrangler secret put` for deployed Workers. Never commit `.dev.vars`.
+
+# Required: authenticates hosts. Unset/blank rejects all hosts.
+# Replace change-me with a strong random value before deploying.
+TOKIMEKI_MASTER_TOKEN=change-me
+
+# Optional: coturn REST shared secret (must match coturn static-auth-secret).
+TOKIMEKI_COTURN_SECRET=
+
+# Optional: Cloudflare Realtime TURN API token.
+TOKIMEKI_TURN_API_TOKEN=
+
+# Optional: static TURN credential (when using TOKIMEKI_TURN_URLS).
+TOKIMEKI_TURN_CREDENTIAL=

@@ -1,0 +1,69 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "tokimeki-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-07",
+  "routes": [
+    {
+      "pattern": "relay.tokiapi.app",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    // Non-secret runtime configuration. Secrets stay in `wrangler secret`.
+    // Production TURN is the two self-hosted coturn nodes below. The Cloudflare
+    // Realtime TURN verification path keeps TOKIMEKI_TURN_KEY_ID (an identifier;
+    // the API token is a Worker secret) but is inactive while provider=coturn.
+    // Set provider to "cloudflare" to re-enable that path.
+    "TOKIMEKI_TURN_PROVIDER": "coturn",
+    "TOKIMEKI_TURN_KEY_ID": "56cd4b921b7cc7b11dbcd7cdb2459053",
+    // JSON array or legacy comma-separated string. Every entry shares
+    // TOKIMEKI_COTURN_SECRET. UDP is required by the CLI (libjuice); TCP/TLS
+    // are for browser clients. Both nodes pass the two-allocation relay-pair
+    // gate as of 2026-11-13. The secret rotation is already live; this list is
+    // ignored while TOKIMEKI_TURN_PROVIDER=cloudflare.
+    "TOKIMEKI_COTURN_URLS": [
+      "turn:cn.stun.tokiapi.app:3478?transport=udp",
+      "turn:cn.stun.tokiapi.app:3478?transport=tcp",
+      "turns:cn.stun.tokiapi.app:5349?transport=tcp",
+      "turn:stun.tokiapi.app:3478?transport=udp",
+      "turn:stun.tokiapi.app:3478?transport=tcp",
+      "turns:stun.tokiapi.app:5349?transport=tcp"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSIONS",
+        "class_name": "SessionDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionDurableObject"]
+    }
+  ]
+  // Non-secret runtime configuration lives in `vars` above; secrets are set with
+  // `wrangler secret put` and never committed:
+  //   TOKIMEKI_MASTER_TOKEN            (secret, required) host authentication; unset rejects all hosts
+  //   TOKIMEKI_SESSION_TTL_SECONDS     default 86400 host-offline grace
+  //   TOKIMEKI_MAX_CLIENTS_PER_SESSION default 8
+  //   TOKIMEKI_ICE_TRANSPORT_POLICY    all | relay (default all)
+  //   TOKIMEKI_STUN_URLS               default stun:stun.cloudflare.com:3478
+  //   TOKIMEKI_TURN_PROVIDER           auto | coturn | cloudflare | none (default auto)
+  //   TOKIMEKI_COTURN_URLS             JSON array or legacy comma-separated turn:/turns: URLs
+  //   TOKIMEKI_COTURN_SECRET           (secret) coturn static-auth-secret
+  //   TOKIMEKI_COTURN_TTL_SECONDS      default 86400
+  //   TOKIMEKI_TURN_URLS               static TURN URLs
+  //   TOKIMEKI_TURN_USERNAME           static TURN username
+  //   TOKIMEKI_TURN_CREDENTIAL         (secret) static TURN credential
+  //   TOKIMEKI_TURN_KEY_ID             Cloudflare Realtime TURN key id
+  //   TOKIMEKI_TURN_API_TOKEN          (secret) Cloudflare Realtime TURN API token
+  //   TOKIMEKI_TURN_TTL_SECONDS        default 86400, Cloudflare clamps to 172800
+  //   TOKIMEKI_LOG_LEVEL               debug | info | warn | error | silent (default info)
+}

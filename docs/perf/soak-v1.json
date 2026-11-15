@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "run": {
+    "id": "2026-11-13T21-41-17-767Z-soak",
+    "startedAt": "2026-11-13T21:41:17.767Z",
+    "gitCommit": "f2b3a2af50e3f879a3d77ed975929760e637f928",
+    "environment": "local-loopback",
+    "relay": {
+      "url": "ws://127.0.0.1:8787",
+      "version": null
+    },
+    "host": {
+      "os": "Windows_NT 10.0.20348",
+      "platform": "win32",
+      "arch": "x64",
+      "node": "v24.14.1",
+      "cpu": "Intel(R) Xeon(R) Silver 4210R CPU @ 2.40GHz",
+      "cpuCount": 16,
+      "memoryBytes": 34358743040
+    }
+  },
+  "config": {
+    "scenario": "soak",
+    "viewers": 2,
+    "durationMinutes": 60,
+    "burstBytes": 1048576,
+    "burstIntervalMs": 5000,
+    "sampleIntervalMs": 600000,
+    "repetitions": 1,
+    "warmupMs": 0
+  },
+  "results": [
+    {
+      "case": "soak/60m",
+      "repeat": 1,
+      "payloadBytes": 729808896,
+      "wireBytes": 1460419584,
+      "durationMs": 3606346.647,
+      "throughputBytesPerSec": 202368,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    }
+  ],
+  "resources": {
+    "peakRssBytes": 84033536,
+    "endRssBytes": 84033536,
+    "peakCpuPercent": 0,
+    "samples": [
+      {
+        "at": "2026-11-13T21:41:17.881Z",
+        "clientRssBytes": 83361792,
+        "relayRssBytes": 949899264,
+        "bursts": 0
+      },
+      {
+        "at": "2026-11-13T21:51:19.143Z",
+        "clientRssBytes": 82243584,
+        "relayRssBytes": 977866752,
+        "bursts": 117
+      },
+      {
+        "at": "2026-11-13T22:01:19.665Z",
+        "clientRssBytes": 87224320,
+        "relayRssBytes": 967970816,
+        "bursts": 233
+      },
+      {
+        "at": "2026-11-13T22:11:20.240Z",
+        "clientRssBytes": 82952192,
+        "relayRssBytes": 973582336,
+        "bursts": 349
+      },
+      {
+        "at": "2026-11-13T22:21:20.437Z",
+        "clientRssBytes": 87609344,
+        "relayRssBytes": 996556800,
+        "bursts": 465
+      },
+      {
+        "at": "2026-11-13T22:31:20.517Z",
+        "clientRssBytes": 88567808,
+        "relayRssBytes": 994861056,
+        "bursts": 581
+      }
+    ],
+    "peakRelayRssBytes": 996556800,
+    "endRelayRssBytes": 994861056
+  },
+  "notes": ["soak: 696 bursts of 1048576 bytes, 2 viewers, 6 resource samples"]
+}

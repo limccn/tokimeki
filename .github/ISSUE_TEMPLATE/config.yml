@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/limccn/tokimeki#documentation
+    about: README, CLI usage, deployment, and protocol docs
+  - name: Security report
+    url: https://github.com/limccn/tokimeki/security/advisories/new
+    about: Report vulnerabilities privately, not as a public issue

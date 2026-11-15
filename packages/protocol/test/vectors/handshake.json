@@ -1,0 +1,63 @@
+{
+  "description": "Viewer attach handshake transcript for tokimeki protocol v1. Authentication happens in WebSocket headers; the transcript starts after the WebSocket is open.",
+  "name": "viewer-attach-handshake",
+  "transcript": [
+    {
+      "from": "viewer",
+      "to": "relay",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "viewer",
+        "session": "demo-session",
+        "clientId": "viewer-1",
+        "protocolVersion": 1,
+        "capabilities": {
+          "transports": { "modes": ["p2p-direct", "p2p-turn", "relay"] },
+          "snapshot": { "formats": ["xterm-serialize"], "maxBytes": 262144 }
+        },
+        "cols": 100,
+        "rows": 30
+      }
+    },
+    {
+      "from": "relay",
+      "to": "viewer",
+      "message": {
+        "v": 1,
+        "type": "welcome",
+        "session": "demo-session",
+        "protocolVersion": 1,
+        "hostOnline": true,
+        "clients": [{ "clientId": "host-1", "role": "host" }],
+        "iceServers": [{ "urls": ["stun:stun.example.com:3478"] }],
+        "iceProvider": "stun",
+        "iceExpiresAt": null,
+        "transportPolicy": "all",
+        "sessionTtlSeconds": 3600
+      }
+    },
+    {
+      "from": "viewer",
+      "to": "relay",
+      "message": { "v": 1, "type": "ice-refresh", "provider": "coturn" }
+    },
+    {
+      "from": "relay",
+      "to": "viewer",
+      "message": {
+        "v": 1,
+        "type": "ice",
+        "iceServers": [
+          {
+            "urls": ["turns:turn.example.com:443?transport=tcp"],
+            "username": "1760000600:viewer-1",
+            "credential": "c2lnbmVkLXR1cm4tY3JlZGVudGlhbA=="
+          }
+        ],
+        "iceProvider": "coturn",
+        "iceExpiresAt": 1760000600000
+      }
+    }
+  ]
+}

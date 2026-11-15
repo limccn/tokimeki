@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tokimeki-relay",
+  "main": "packages/relay/src/index.ts",
+  "compatibility_date": "2026-04-07",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // Open-source defaults. Add TURN credentials/secrets in the Cloudflare
+    // dashboard or with `wrangler secret put`; see docs/deploy-cloudflare.md.
+    "TOKIMEKI_TURN_PROVIDER": "auto",
+    "TOKIMEKI_STUN_URLS": "stun:stun.cloudflare.com:3478"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSIONS",
+        "class_name": "SessionDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionDurableObject"]
+    }
+  ]
+}

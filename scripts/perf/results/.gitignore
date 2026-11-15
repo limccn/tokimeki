@@ -1,0 +1,2 @@
+# Raw perf runs are local artifacts; only curated baselines go to docs/perf/.
+*.json

@@ -1,0 +1,200 @@
+{
+  "description": "Golden JSON control messages for tokimeki protocol v1. All messages are JSON text frames.",
+  "messages": [
+    {
+      "name": "hello-viewer",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "viewer",
+        "session": "demo-session",
+        "clientId": "viewer-1",
+        "protocolVersion": 1,
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": { "modes": ["p2p-direct", "p2p-turn", "relay"] },
+          "snapshot": { "formats": ["xterm-serialize", "raw-ring"], "maxBytes": 262144 }
+        },
+        "cols": 120,
+        "rows": 40
+      }
+    },
+    {
+      "name": "welcome-basic",
+      "message": {
+        "v": 1,
+        "type": "welcome",
+        "session": "demo-session",
+        "protocolVersion": 1,
+        "hostOnline": true,
+        "clients": [
+          {
+            "clientId": "viewer-1",
+            "role": "viewer",
+            "connectedAt": 1760000000000,
+            "transport": { "mode": "relay", "state": "ready" }
+          }
+        ],
+        "iceServers": [{ "urls": ["stun:stun.example.com:3478"] }],
+        "iceProvider": "stun",
+        "iceExpiresAt": null,
+        "transportPolicy": "all",
+        "sessionTtlSeconds": 3600
+      }
+    },
+    {
+      "name": "ice-refresh-coturn",
+      "message": { "v": 1, "type": "ice-refresh", "provider": "coturn" }
+    },
+    {
+      "name": "ice-coturn",
+      "message": {
+        "v": 1,
+        "type": "ice",
+        "iceServers": [
+          {
+            "urls": ["turns:turn.example.com:443?transport=tcp"],
+            "username": "1760000600:viewer-1",
+            "credential": "c2lnbmVkLXR1cm4tY3JlZGVudGlhbA=="
+          }
+        ],
+        "iceProvider": "coturn",
+        "iceExpiresAt": 1760000600000
+      }
+    },
+    {
+      "name": "peer-joined-viewer",
+      "message": {
+        "v": 1,
+        "type": "peer-joined",
+        "clientId": "viewer-1",
+        "capabilities": { "transports": { "modes": ["p2p-direct", "relay"] } }
+      }
+    },
+    {
+      "name": "peer-left-viewer",
+      "message": { "v": 1, "type": "peer-left", "clientId": "viewer-1" }
+    },
+    {
+      "name": "signal-offer",
+      "message": {
+        "v": 1,
+        "type": "signal",
+        "to": "viewer-1",
+        "from": "host-1",
+        "kind": "offer",
+        "payload": { "type": "offer", "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n" }
+      }
+    },
+    {
+      "name": "transport-ready-direct",
+      "message": {
+        "v": 1,
+        "type": "transport",
+        "clientId": "viewer-1",
+        "mode": "p2p-direct",
+        "state": "ready",
+        "via": "host"
+      }
+    },
+    {
+      "name": "resize",
+      "message": {
+        "v": 1,
+        "type": "resize",
+        "clientId": "viewer-1",
+        "cols": 120,
+        "rows": 40
+      }
+    },
+    {
+      "name": "resync",
+      "message": { "v": 1, "type": "resync", "fromSeq": "41" }
+    },
+    {
+      "name": "ack",
+      "message": { "v": 1, "type": "ack", "seq": "42" }
+    },
+    {
+      "name": "pause",
+      "message": { "v": 1, "type": "pause", "clientId": "viewer-1" }
+    },
+    {
+      "name": "resume",
+      "message": { "v": 1, "type": "resume", "clientId": "viewer-1" }
+    },
+    {
+      "name": "host-online",
+      "message": { "v": 1, "type": "host", "online": true }
+    },
+    {
+      "name": "presence",
+      "message": {
+        "v": 1,
+        "type": "presence",
+        "clients": [
+          { "clientId": "viewer-1", "role": "viewer" },
+          { "clientId": "observer-1", "role": "observer" }
+        ]
+      }
+    },
+    {
+      "name": "ping",
+      "message": { "v": 1, "type": "ping", "ts": 1760000000000 }
+    },
+    {
+      "name": "pong",
+      "message": { "v": 1, "type": "pong", "ts": 1760000000000 }
+    },
+    {
+      "name": "error-unauthorized",
+      "message": {
+        "v": 1,
+        "type": "error",
+        "code": "unauthorized",
+        "message": "invalid session token",
+        "retryable": false
+      }
+    },
+    {
+      "name": "host-exited",
+      "message": { "v": 1, "type": "host-exited", "exitCode": 0, "signal": null }
+    },
+    {
+      "name": "agent-task-claim-unknown",
+      "message": {
+        "v": 1,
+        "type": "agent.task.claim",
+        "requestId": "req-1",
+        "protocolVersion": 1,
+        "ts": 1760000000000,
+        "sessionId": "demo-session",
+        "payload": {
+          "runnerId": "runner-1",
+          "capabilities": { "shells": ["bash"], "tunnel": false },
+          "maxTasks": 1
+        }
+      }
+    },
+    {
+      "name": "agent-runner-register-no-v",
+      "message": {
+        "type": "agent.runner.register",
+        "requestId": "req-2",
+        "protocolVersion": 1,
+        "payload": { "runnerId": "runner-1", "kind": "local" }
+      }
+    },
+    {
+      "name": "agent-not-implemented-reply",
+      "message": {
+        "v": 1,
+        "type": "error",
+        "code": "not_implemented",
+        "message": "feature is not implemented in protocol v1: agent.task.claim",
+        "requestId": "req-1",
+        "retryable": false
+      }
+    }
+  ]
+}

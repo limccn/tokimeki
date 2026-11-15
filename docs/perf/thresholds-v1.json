@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-11-14",
+  "source": "docs/perf/baseline-v1.json",
+  "compare": {
+    "maxDegradation": 0.2,
+    "note": "同环境同参数比较；吞吐中位数劣化 >20% 或 p95 上升 >20% 判失败。生产数据只做趋势提示。"
+  },
+  "local": {
+    "throughput": {
+      "singleViewerMinMiBps": 5,
+      "eightViewerAggregateMinMiBps": 8,
+      "note": "首版 64 KiB 单 viewer 中位数 199.28 MiB/s，8 viewer 1385.04 MiB/s；1 KiB 受 flow-control/缓冲限制，仅作参考。"
+    },
+    "latency": {
+      "oneViewerP95Ms": 50,
+      "oneViewerP99Ms": 100,
+      "eightViewerP95Ms": 250,
+      "eightViewerDesignTargetMs": 100,
+      "eightViewerMeasuredP95Ms": 186.351,
+      "note": "L1 实测 p95 1.956ms / p99 2.25ms。L2 首版 p95 186.351ms，未达到设计临时值 100ms；先以 250ms 作为临时上限，等第二次基线后校准并记录理由。"
+    },
+    "flowControl": {
+      "pauseMaxMs": 5000,
+      "resumeMaxMs": 2000,
+      "note": "首版 pause 45.2ms、resume 3.3ms；暂停期间允许已知丢帧，结束 marker 必须到达。"
+    },
+    "snapshot": {
+      "maxBytes": 262144,
+      "deliverMaxMs": 2000,
+      "reconnectMaxMs": 5000,
+      "note": "首版 256 KiB 快照 4.956ms；2s 重连 + resync 6.107ms。"
+    },
+    "soak": {
+      "durationMinutes": 60,
+      "rssGrowthMaxBytes": 52428800,
+      "note": "首版长稳结果写入 docs/perf/soak-v1.json 后校准。"
+    }
+  }
+}

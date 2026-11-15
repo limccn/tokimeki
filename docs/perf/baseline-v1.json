@@ -1,0 +1,961 @@
+{
+  "schemaVersion": 1,
+  "run": {
+    "id": "2026-11-14-local-baseline-v1",
+    "startedAt": "2026-11-13T21:25:53.534Z",
+    "gitCommit": "f2b3a2af50e3f879a3d77ed975929760e637f928",
+    "environment": "local-loopback",
+    "relay": {
+      "url": "ws://127.0.0.1:8787",
+      "version": null
+    },
+    "host": {
+      "os": "Windows_NT 10.0.20348",
+      "platform": "win32",
+      "arch": "x64",
+      "node": "v24.14.1",
+      "cpu": "Intel(R) Xeon(R) Silver 4210R CPU @ 2.40GHz",
+      "cpuCount": 16,
+      "memoryBytes": 34358743040
+    }
+  },
+  "config": {
+    "scenario": "local-baseline",
+    "note": "throughput: 8 MiB per case, 3 repetitions + ~10% warmup; 1 KiB paced 512 KiB/5ms; 64 KiB unpaced",
+    "throughput": {
+      "scenario": "matrix",
+      "viewers": "1,2,4,8",
+      "frameBytes": "1024,65536",
+      "totalBytes": 8388608,
+      "repetitions": 3,
+      "warmupMs": 0
+    },
+    "flow": {
+      "scenario": "flow",
+      "viewers": 1,
+      "repetitions": 1,
+      "warmupMs": 0
+    },
+    "snapshot": {
+      "scenario": "snapshot",
+      "viewers": 1,
+      "repetitions": 1,
+      "warmupMs": 0
+    },
+    "latency": [
+      {
+        "scenario": "latency",
+        "viewers": 1,
+        "echoes": 1000,
+        "intervalMs": 20,
+        "repetitions": 1,
+        "warmupMs": 0
+      },
+      {
+        "scenario": "latency",
+        "viewers": 8,
+        "echoes": 500,
+        "intervalMs": 20,
+        "repetitions": 1,
+        "warmupMs": 0
+      }
+    ],
+    "p2p": {
+      "scenario": "p2p",
+      "bytes": 8388608,
+      "rttSamples": 20,
+      "repetitions": 1,
+      "warmupMs": 0
+    }
+  },
+  "results": [
+    {
+      "case": "matrix/1viewer-1024B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 4057088,
+      "wireBytes": 4092746,
+      "durationMs": 204.967,
+      "throughputBytesPerSec": 19793898,
+      "perViewerBytesPerSec": [19793898],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/1viewer-1024B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 4955136,
+      "wireBytes": 4998687,
+      "durationMs": 221.895,
+      "throughputBytesPerSec": 22331025,
+      "perViewerBytesPerSec": [22331025],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/1viewer-1024B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 5426176,
+      "wireBytes": 5473867,
+      "durationMs": 222.81,
+      "throughputBytesPerSec": 24353410,
+      "perViewerBytesPerSec": [24353410],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/2viewer-1024B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 5338112,
+      "wireBytes": 5385029,
+      "durationMs": 167.983,
+      "throughputBytesPerSec": 31777692,
+      "perViewerBytesPerSec": [15885798, 15891894],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/2viewer-1024B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 5316608,
+      "wireBytes": 5363336,
+      "durationMs": 186.254,
+      "throughputBytesPerSec": 28544918,
+      "perViewerBytesPerSec": [14272459, 14272459],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/2viewer-1024B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 5654528,
+      "wireBytes": 5704226,
+      "durationMs": 595.3,
+      "throughputBytesPerSec": 9498613,
+      "perViewerBytesPerSec": [4749306, 4749306],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/4viewer-1024B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 6427648,
+      "wireBytes": 6484141,
+      "durationMs": 166.654,
+      "throughputBytesPerSec": 38568935,
+      "perViewerBytesPerSec": [9640698, 9640698, 9640698, 9646842],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/4viewer-1024B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 6118400,
+      "wireBytes": 6172175,
+      "durationMs": 166.403,
+      "throughputBytesPerSec": 36768678,
+      "perViewerBytesPerSec": [9193708, 9193708, 9193708, 9187554],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/4viewer-1024B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 6849536,
+      "wireBytes": 6909737,
+      "durationMs": 838.445,
+      "throughputBytesPerSec": 8169331,
+      "perViewerBytesPerSec": [2042027, 2042027, 2042027, 2043249],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/8viewer-1024B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 6153216,
+      "wireBytes": 6207297,
+      "durationMs": 173.274,
+      "throughputBytesPerSec": 35511458,
+      "perViewerBytesPerSec": [
+        4438194, 4438194, 4438194, 4438194, 4438194, 4438194, 4438194, 4444103
+      ],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/8viewer-1024B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 9223168,
+      "wireBytes": 9304231,
+      "durationMs": 3600.534,
+      "throughputBytesPerSec": 2561611,
+      "perViewerBytesPerSec": [320237, 320237, 320237, 320237, 320237, 320237, 320237, 319953],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/8viewer-1024B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 43058176,
+      "wireBytes": 43436617,
+      "durationMs": 38655.663,
+      "throughputBytesPerSec": 1113891,
+      "perViewerBytesPerSec": [139233, 139233, 139233, 139233, 139233, 139233, 139233, 139259],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/1viewer-65536B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 8388608,
+      "wireBytes": 8389760,
+      "durationMs": 40.145,
+      "throughputBytesPerSec": 208960331,
+      "perViewerBytesPerSec": [208960331],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/1viewer-65536B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 8323072,
+      "wireBytes": 8324215,
+      "durationMs": 34.42,
+      "throughputBytesPerSec": 241807073,
+      "perViewerBytesPerSec": [241807073],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 1,
+        "resumes": 1,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/1viewer-65536B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 5570560,
+      "wireBytes": 5571325,
+      "durationMs": 36.754,
+      "throughputBytesPerSec": 151562543,
+      "perViewerBytesPerSec": [151562543],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 1,
+        "resumes": 1,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/2viewer-65536B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 16515072,
+      "wireBytes": 16517340,
+      "durationMs": 34.663,
+      "throughputBytesPerSec": 476443952,
+      "perViewerBytesPerSec": [242003277, 234440675],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 1,
+        "resumes": 1,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/2viewer-65536B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 11075584,
+      "wireBytes": 11077105,
+      "durationMs": 34.218,
+      "throughputBytesPerSec": 323675237,
+      "perViewerBytesPerSec": [160880000, 162795238],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 2,
+        "resumes": 2,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/2viewer-65536B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 11337728,
+      "wireBytes": 11339285,
+      "durationMs": 36.408,
+      "throughputBytesPerSec": 311408458,
+      "perViewerBytesPerSec": [154804205, 156604253],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 2,
+        "resumes": 2,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/4viewer-65536B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 33292288,
+      "wireBytes": 33296860,
+      "durationMs": 38.769,
+      "throughputBytesPerSec": 858743622,
+      "perViewerBytesPerSec": [216376346, 212995465, 214685906, 214685906],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 3,
+        "resumes": 3,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/4viewer-65536B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 27525120,
+      "wireBytes": 27528900,
+      "durationMs": 33.685,
+      "throughputBytesPerSec": 817123145,
+      "perViewerBytesPerSec": [202335255, 204280786, 204280786, 206226318],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 4,
+        "resumes": 4,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/4viewer-65536B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 26935296,
+      "wireBytes": 26938995,
+      "durationMs": 35.123,
+      "throughputBytesPerSec": 766884833,
+      "perViewerBytesPerSec": [190321783, 190321783, 192187683, 194053583],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 4,
+        "resumes": 4,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/8viewer-65536B",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 67108864,
+      "wireBytes": 67118080,
+      "durationMs": 46.208,
+      "throughputBytesPerSec": 1452321330,
+      "perViewerBytesPerSec": [
+        181540166, 181540166, 181540166, 181540166, 181540166, 181540166, 181540166, 181540166
+      ],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/8viewer-65536B",
+      "repeat": 2,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 60293120,
+      "wireBytes": 60301400,
+      "durationMs": 32.643,
+      "throughputBytesPerSec": 1847057238,
+      "perViewerBytesPerSec": [
+        228874484, 228874484, 230882155, 230882155, 230882155, 230882155, 232889826, 232889826
+      ],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 8,
+        "resumes": 8,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "matrix/8viewer-65536B",
+      "repeat": 3,
+      "payloadBytes": 8388608,
+      "deliveredBytes": 53936128,
+      "wireBytes": 53943535,
+      "durationMs": 43.262,
+      "throughputBytesPerSec": 1246720663,
+      "perViewerBytesPerSec": [
+        152999741, 154514590, 154514590, 154514590, 156029439, 157544288, 157544288, 159059137
+      ],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 8,
+        "resumes": 8,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "latency/1viewer",
+      "repeat": 1,
+      "payloadBytes": 79000,
+      "wireBytes": 88000,
+      "durationMs": 27066.812,
+      "throughputBytesPerSec": 2919,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 1.601,
+        "p95": 1.956,
+        "p99": 2.25,
+        "min": 1.327,
+        "max": 3.853,
+        "mean": 1.641,
+        "samples": 1000
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "latency/8viewer",
+      "repeat": 1,
+      "payloadBytes": 2528000,
+      "wireBytes": 2816000,
+      "durationMs": 10134.789,
+      "throughputBytesPerSec": 249438,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 123.527,
+        "p95": 186.351,
+        "p99": 198.058,
+        "min": 1.227,
+        "max": 207.594,
+        "mean": 108.286,
+        "samples": 4000
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "flow/pause-resume",
+      "repeat": 1,
+      "payloadBytes": 4194317,
+      "deliveredBytes": 4128781,
+      "wireBytes": 4131058,
+      "durationMs": 111.742,
+      "throughputBytesPerSec": 37535692,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 1,
+        "resumes": 1,
+        "pauseLatencyMs": [45.2323],
+        "resumeLatencyMs": [3.3081]
+      },
+      "errors": []
+    },
+    {
+      "case": "flow/hard-limit",
+      "repeat": 1,
+      "payloadBytes": 10485773,
+      "deliveredBytes": 10485773,
+      "wireBytes": 10491542,
+      "durationMs": 539.84,
+      "throughputBytesPerSec": 19423868,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "samples": 0
+      },
+      "flowControl": {
+        "pauses": 1,
+        "resumes": 1,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "snapshot/size-0",
+      "repeat": 1,
+      "payloadBytes": 0,
+      "wireBytes": 0,
+      "durationMs": 1.593,
+      "throughputBytesPerSec": 0,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 1.593,
+        "p95": 1.593,
+        "p99": 1.593,
+        "min": 1.593,
+        "max": 1.593,
+        "mean": 1.593,
+        "samples": 1
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "snapshot/size-131072",
+      "repeat": 1,
+      "payloadBytes": 131072,
+      "wireBytes": 0,
+      "durationMs": 3.648,
+      "throughputBytesPerSec": 0,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 3.648,
+        "p95": 3.648,
+        "p99": 3.648,
+        "min": 3.648,
+        "max": 3.648,
+        "mean": 3.648,
+        "samples": 1
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "snapshot/size-262144",
+      "repeat": 1,
+      "payloadBytes": 262144,
+      "wireBytes": 0,
+      "durationMs": 4.956,
+      "throughputBytesPerSec": 0,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 4.956,
+        "p95": 4.956,
+        "p99": 4.956,
+        "min": 4.956,
+        "max": 4.956,
+        "mean": 4.956,
+        "samples": 1
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "snapshot/reconnect-resync",
+      "repeat": 1,
+      "payloadBytes": 262144,
+      "wireBytes": 0,
+      "durationMs": 6.107,
+      "throughputBytesPerSec": 0,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 6.107,
+        "p95": 6.107,
+        "p99": 6.107,
+        "min": 6.107,
+        "max": 6.107,
+        "mean": 6.107,
+        "samples": 1
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": []
+    },
+    {
+      "case": "p2p/real-cli",
+      "repeat": 1,
+      "payloadBytes": 8388608,
+      "wireBytes": 0,
+      "durationMs": 4262.198,
+      "throughputBytesPerSec": 1968141,
+      "perViewerBytesPerSec": [],
+      "latencyMs": {
+        "p50": 31.537,
+        "p95": 63.031,
+        "p99": 63.613,
+        "min": 24.545,
+        "max": 63.759,
+        "mean": 38.33,
+        "samples": 20
+      },
+      "flowControl": {
+        "pauses": 0,
+        "resumes": 0,
+        "pauseLatencyMs": [],
+        "resumeLatencyMs": []
+      },
+      "errors": [],
+      "transportMode": "p2p-direct, host->prflx"
+    }
+  ],
+  "resources": {
+    "peakRssBytes": 120963072,
+    "endRssBytes": 120963072,
+    "peakCpuPercent": 0
+  },
+  "notes": [
+    "matrix/1viewer-1024B rep 1: delivered 4057088/8388608 bytes (flow-control drops)",
+    "matrix/1viewer-1024B rep 2: delivered 4955136/8388608 bytes (flow-control drops)",
+    "matrix/1viewer-1024B rep 3: delivered 5426176/8388608 bytes (flow-control drops)",
+    "matrix/2viewer-1024B rep 1: delivered 5338112/8388608 bytes (flow-control drops)",
+    "matrix/2viewer-1024B rep 2: delivered 5316608/8388608 bytes (flow-control drops)",
+    "matrix/2viewer-1024B rep 3: delivered 5654528/8388608 bytes (flow-control drops)",
+    "matrix/4viewer-1024B rep 1: delivered 6427648/8388608 bytes (flow-control drops)",
+    "matrix/4viewer-1024B rep 2: delivered 6118400/8388608 bytes (flow-control drops)",
+    "matrix/4viewer-1024B rep 3: delivered 6849536/8388608 bytes (flow-control drops)",
+    "matrix/8viewer-1024B rep 1: delivered 6153216/8388608 bytes (flow-control drops)",
+    "matrix/1viewer-65536B rep 2: delivered 8323072/8388608 bytes (flow-control drops)",
+    "matrix/1viewer-65536B rep 3: delivered 5570560/8388608 bytes (flow-control drops)",
+    "matrix: 8 cases x 3 repetitions",
+    "flow/pause-resume: delivered 4128781/4194317 bytes (drops during pause are expected)",
+    "flow: 4 MiB pause/resume and 8 MiB hard-limit scenarios",
+    "snapshot: synthetic snapshot transport sizes and reconnect resync",
+    "baseline-v1: local loopback on wrangler dev; production and cross-NAT are separate observations",
+    "1 KiB full-rate throughput is limited by relay flow-control/WebSocket buffering; delivered bytes are recorded",
+    "L2 (8 viewers) p95 186ms is the first measured value; threshold is provisional pending a second run",
+    "p2p transport=p2p-direct, host->prflx; hostExit=null; viewerExit=null",
+    "real-CLI P2P: host+attach in PTYs, 8 MiB burst over p2p-direct; PTY/TUI overhead included"
+  ]
+}

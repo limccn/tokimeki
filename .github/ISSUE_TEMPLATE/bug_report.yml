@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a reproducible problem with the relay, CLI, or docs
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please remove tokens, session tokens, TURN
+        credentials, and terminal content before pasting logs.
+  - type: input
+    id: version
+    attributes:
+      label: tokimeki version
+      description: Output of `tokimeki --version`
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - Relay fallback
+        - P2P direct
+        - coturn TURN
+        - Cloudflare TURN
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands, relay type, host program, and viewer setup
+      placeholder: |
+        1. tokimeki claude ...
+        2. tokimeki attach ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Redact tokens and terminal content. `TOKIMEKI_LOG_LEVEL=debug` helps.
+      render: text
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: I removed tokens, TURN credentials, and sensitive terminal content.
+          required: true

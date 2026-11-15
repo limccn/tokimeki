@@ -1,0 +1,423 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-14",
+  "environment": "wan-nat-to-vps",
+  "relay": {
+    "url": "wss://relay.tokiapi.app",
+    "protocolVersion": 1,
+    "turnProvider": "coturn",
+    "turnConfigured": true
+  },
+  "hosts": {
+    "local": {
+      "os": "Windows Server 2022",
+      "node": "24.14.1",
+      "network": "China mainland home broadband behind NAT"
+    },
+    "jp": {
+      "provider": "Linode",
+      "node": "24.22.3",
+      "role": "remote viewer"
+    },
+    "us": {
+      "provider": "Linode",
+      "node": "24.22.3",
+      "role": "remote viewer via jp jump host"
+    }
+  },
+  "method": {
+    "host": "tokimeki run -- node scripts/perf/emit-tui.mjs",
+    "viewer": "tokimeki attach under a remote inner PTY (90x28), observed over ssh -T",
+    "bulkObservation": "PERF_DATA_BEGIN..PERF_DATA_END TUI payload is dropped from the SSH observer stream after being read from the remote PTY",
+    "rtt": "viewer rtt <nonce> -> host PERF_RTT:<nonce>; includes SSH input, transport and remote rendering",
+    "throughput": "viewer start <bytes> -> host PERF_DATA_END; includes remote terminal rendering, not pure network throughput",
+    "note": "Public VPS topology, not strict NAT-to-NAT/CGNAT"
+  },
+  "providerSwitch": {
+    "authorized": "user",
+    "before": {
+      "version": "ee53cf15-2acb-45a7-b08f-dd67d70e06d6",
+      "turnProvider": "coturn"
+    },
+    "testWindow": {
+      "version": "7f852448-b092-441b-9efc-dc06b3746e9b",
+      "turnProvider": "cloudflare",
+      "deployedAt": "2026-11-14T03:48:20.741Z",
+      "bindings": ["TOKIMEKI_TURN_KEY_ID", "TOKIMEKI_COTURN_URLS", "SESSIONS"],
+      "note": "Deployed from HEAD dbe1100 (v1 baseline + security fixes) with --var TOKIMEKI_TURN_PROVIDER:cloudflare; secrets unchanged"
+    },
+    "after": {
+      "version": "ee53cf15-2acb-45a7-b08f-dd67d70e06d6",
+      "turnProvider": "coturn",
+      "rolledBackAt": "2026-11-14T03:56:31.411Z",
+      "smoke": "RELAY SMOKE PASS; ice=coturn"
+    }
+  },
+  "runs": [
+    {
+      "id": "2026-11-14T03-08-57-429Z",
+      "raw": "perf-cross-nat-2026-11-14T03-08-57-429Z.json",
+      "remote": "jp",
+      "mode": "p2p-direct",
+      "payloadBytes": 1048576,
+      "transport": "p2p-direct, prflx->host",
+      "durationMs": 98114.92,
+      "throughputBytesPerSec": 10687,
+      "latencyMs": {
+        "p50": 1627.125,
+        "p95": 2865.501,
+        "p99": 2948.276,
+        "min": 1093.124,
+        "max": 2968.97,
+        "mean": 1864.899,
+        "samples": 5
+      },
+      "ok": true,
+      "note": "SSH observer bulk forwarding not suppressed yet; throughput is SSH-bound"
+    },
+    {
+      "id": "2026-11-14T03-14-35-915Z",
+      "raw": "perf-cross-nat-2026-11-14T03-14-35-915Z.json",
+      "remote": "jp",
+      "mode": "p2p-direct",
+      "payloadBytes": 1048576,
+      "transport": "p2p-direct, srflx->host",
+      "durationMs": 9805.988,
+      "throughputBytesPerSec": 106932,
+      "latencyMs": {
+        "p50": 728.339,
+        "p95": 5851.255,
+        "p99": 6801.714,
+        "min": 691.858,
+        "max": 7039.329,
+        "mean": 2051.778,
+        "samples": 5
+      },
+      "ok": true
+    },
+    {
+      "id": "2026-11-14T03-17-41-754Z",
+      "raw": "perf-cross-nat-2026-11-14T03-17-41-754Z.json",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "payloadBytes": 1048576,
+      "transport": "p2p-turn, relay->relay",
+      "durationMs": 1315.355,
+      "throughputBytesPerSec": 797181,
+      "latencyMs": {
+        "p50": 1386.917,
+        "p95": 1639.382,
+        "p99": 1651.718,
+        "min": 424.484,
+        "max": 1654.802,
+        "mean": 1278.785,
+        "samples": 5
+      },
+      "ok": true
+    },
+    {
+      "id": "2026-11-14T03-19-57-668Z",
+      "raw": "perf-cross-nat-2026-11-14T03-19-57-668Z.json",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "payloadBytes": 8388608,
+      "transport": "p2p-turn, relay->relay",
+      "durationMs": 77934.884,
+      "throughputBytesPerSec": 107636,
+      "latencyMs": {
+        "p50": 1270.632,
+        "p95": 3198.172,
+        "p99": 8117.814,
+        "min": 400.74,
+        "max": 9347.725,
+        "mean": 1686.162,
+        "samples": 20
+      },
+      "ok": true
+    },
+    {
+      "id": "2026-11-14T03-41-13-363Z",
+      "raw": "perf-cross-nat-2026-11-14T03-41-13-363Z.json",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "payloadBytes": 1048576,
+      "transport": "p2p-turn, relay->relay",
+      "durationMs": 3025.83,
+      "throughputBytesPerSec": 346542,
+      "latencyMs": {
+        "p50": 761.156,
+        "p95": 871.498,
+        "p99": 889.716,
+        "min": 384.502,
+        "max": 894.271,
+        "mean": 703.687,
+        "samples": 5
+      },
+      "ok": true
+    },
+    {
+      "id": "2026-11-14T03-29-50-498Z",
+      "raw": "perf-cross-nat-2026-11-14T03-29-50-498Z.json",
+      "remote": "us",
+      "mode": "p2p-fallback",
+      "payloadBytes": 1048576,
+      "transport": "p2p-turn, relay->relay",
+      "durationMs": 2766.806,
+      "throughputBytesPerSec": 378984,
+      "latencyMs": {
+        "p50": 1386.236,
+        "p95": 1669.779,
+        "p99": 1684.163,
+        "min": 890.774,
+        "max": 1687.759,
+        "mean": 1298.23,
+        "samples": 5
+      },
+      "ok": true,
+      "note": "Started as fallback probe; P2P TURN succeeded"
+    },
+    {
+      "id": "2026-11-14T03-48-44-492Z",
+      "raw": "perf-cross-nat-2026-11-14T03-48-44-492Z.json",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "turnProvider": "cloudflare",
+      "payloadBytes": 1048576,
+      "transport": "p2p-turn, relay->relay",
+      "durationMs": 3302.485,
+      "throughputBytesPerSec": 317511,
+      "latencyMs": {
+        "p50": 694.456,
+        "p95": 1665.511,
+        "p99": 1685.829,
+        "min": 664.938,
+        "max": 1690.909,
+        "mean": 1058.565,
+        "samples": 5
+      },
+      "ok": true,
+      "note": "iceProvider field was added after this run; /healthz reported cloudflare"
+    },
+    {
+      "id": "2026-11-14T03-54-22-840Z",
+      "raw": "perf-cross-nat-2026-11-14T03-54-22-840Z.json",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "turnProvider": "cloudflare",
+      "iceProvider": "cloudflare",
+      "payloadBytes": 8388608,
+      "transport": "p2p-turn, relay->relay",
+      "durationMs": 22843.659,
+      "throughputBytesPerSec": 367218,
+      "latencyMs": {
+        "p50": 1655.778,
+        "p95": 4284.969,
+        "p99": 17657.634,
+        "min": 648.438,
+        "max": 21000.8,
+        "mean": 2540.479,
+        "samples": 20
+      },
+      "ok": true
+    }
+  ],
+  "failures": [
+    {
+      "id": "2026-11-14T03-06-49-320Z",
+      "remote": "jp",
+      "mode": "p2p-direct",
+      "payloadBytes": 1048576,
+      "error": "ICE negotiation timed out"
+    },
+    {
+      "id": "2026-11-14T03-12-01-984Z",
+      "remote": "jp",
+      "mode": "p2p-direct",
+      "payloadBytes": 1048576,
+      "error": "timeout waiting for RTT 0"
+    },
+    {
+      "id": "2026-11-14T03-13-23-070Z",
+      "remote": "jp",
+      "mode": "p2p-direct",
+      "payloadBytes": 1048576,
+      "error": "ICE negotiation timed out"
+    },
+    {
+      "id": "2026-11-14T03-22-50-535Z",
+      "remote": "jp",
+      "mode": "p2p-direct",
+      "payloadBytes": 8388608,
+      "error": "timeout waiting for burst end"
+    },
+    {
+      "id": "2026-11-14T03-16-30-583Z",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "payloadBytes": 1048576,
+      "error": "timeout waiting for host relay ready"
+    },
+    {
+      "id": "2026-11-14T03-18-23-900Z",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "payloadBytes": 8388608,
+      "error": "timeout waiting for RTT 4 (10 s per-RTT limit)"
+    },
+    {
+      "id": "2026-11-14T03-32-56-313Z",
+      "remote": "us",
+      "mode": "p2p-turn",
+      "payloadBytes": 8388608,
+      "error": "ICE negotiation timed out; host fell back to relay"
+    },
+    {
+      "id": "2026-11-14T03-32-26-504Z",
+      "remote": "us",
+      "mode": "relay",
+      "payloadBytes": 1048576,
+      "error": "relay host: timeout waiting for welcome"
+    },
+    {
+      "id": "2026-11-14T03-34-00-289Z",
+      "remote": "us",
+      "mode": "p2p-fallback",
+      "payloadBytes": 1048576,
+      "error": "timeout waiting for host relay ready"
+    },
+    {
+      "id": "2026-11-14T03-34-59-149Z",
+      "remote": "us",
+      "mode": "p2p-fallback",
+      "payloadBytes": 1048576,
+      "error": "SSH banner exchange timed out"
+    },
+    {
+      "id": "2026-11-14T03-50-23-054Z",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "turnProvider": "cloudflare",
+      "payloadBytes": 8388608,
+      "error": "SSH banner exchange timed out before the remote attach snapshot"
+    },
+    {
+      "id": "2026-11-14T03-52-07-261Z",
+      "remote": "jp",
+      "mode": "p2p-turn",
+      "turnProvider": "cloudflare",
+      "payloadBytes": 8388608,
+      "error": "remote attach snapshot timeout with empty output (test channel)"
+    }
+  ],
+  "relayOnly": {
+    "jp": {
+      "smoke": {
+        "remote": "jp",
+        "payloadBytes": 1048576,
+        "throughputBytesPerSec": 403399,
+        "errors": 0,
+        "result": "pass"
+      },
+      "repeat1MiB": {
+        "attempts": 3,
+        "passes": 1,
+        "throughputBytesPerSec": [401611],
+        "failures": ["remote viewer SSH exited before ready (255) x2"]
+      },
+      "matrix8MiB": {
+        "remote": "jp",
+        "result": "environment-blocked",
+        "note": "0/partial deliveries, host open/peer-joined/remote result timeouts; not counted as pass"
+      }
+    },
+    "us": {
+      "smoke": {
+        "remote": "us",
+        "payloadBytes": 1048576,
+        "throughputBytesPerSec": 389507,
+        "errors": 0,
+        "result": "pass"
+      },
+      "matrix8MiB": {
+        "remote": "us",
+        "result": "environment-blocked",
+        "note": "3 attempts failed at SSH exit 255 or relay host welcome timeout; no 8 MiB data"
+      }
+    }
+  },
+  "phase7": {
+    "flow": {
+      "status": "not-passed",
+      "topology": "local synthetic host <-> jp synthetic viewer, production relay ee53cf15",
+      "runs": [
+        {
+          "id": "2026-11-14T05-07-54-353Z",
+          "payloadBytes": 4194304,
+          "durationMs": 20312.31223,
+          "throughputBytesPerSec": 206491,
+          "hostSendDurationMs": 6855.229,
+          "remoteStallWindowMs": 2001,
+          "hostPauses": 0,
+          "hostResumes": 0
+        },
+        {
+          "id": "2026-11-14T05-09-17-570Z",
+          "payloadBytes": 8388608,
+          "durationMs": 21977.213685,
+          "throughputBytesPerSec": 381696,
+          "hostSendDurationMs": 13777.61,
+          "remoteStallWindowMs": 2000,
+          "hostPauses": 0,
+          "hostResumes": 0
+        }
+      ],
+      "note": "Viewer stall/resume and full delivery worked; host pause/resume was not observed because the host send completed before the viewer reached the 1 MiB stall threshold. Not counted as a pass."
+    },
+    "snapshotReconnect": {
+      "status": "passed",
+      "topology": "local synthetic host <-> jp synthetic viewer, production relay ee53cf15",
+      "snapshotBytes": 262144,
+      "reconnectMs": 2000,
+      "runs": [
+        {
+          "id": "2026-11-14T05-24-18-631Z",
+          "initialBytes": 262144,
+          "resyncBytes": 262144,
+          "reconnectGapMs": 2308,
+          "initialLatencyMs": 1414.914552,
+          "resyncLatencyMs": 1463.393098,
+          "errors": 0
+        },
+        {
+          "id": "2026-11-14T05-28-06-952Z",
+          "initialBytes": 262144,
+          "resyncBytes": 262144,
+          "reconnectGapMs": 2346,
+          "initialLatencyMs": 3872.598775,
+          "resyncLatencyMs": 4580.953186,
+          "errors": 0
+        }
+      ],
+      "attempts": 5,
+      "passes": 2,
+      "preSessionFailures": 3,
+      "note": "Failures were SSH/relay-open failures before the session was established; once established, 2/2 passed. reconnectGap includes the 2 s sleep and handshake."
+    }
+  },
+  "notMeasured": [
+    "strict NAT-to-NAT / CGNAT peers",
+    "WAN 4 MiB pause/resume flow control (attempted; host pause/resume not observed)",
+    "headless/synthetic P2P viewer network ceiling"
+  ],
+  "conclusions": [
+    "P2P direct is reachable but unstable; TURN fallback is required",
+    "coturn TURN completed JP 1 MiB and 8 MiB with relay->relay",
+    "real-CLI throughput is viewer-rendering-bound, not a pure network number",
+    "US VPS TURN was unstable: 1 MiB pass, 8 MiB fallback",
+    "US synthetic relay-only passed 1 MiB but 8 MiB was blocked at SSH/relay setup",
+    "Cloudflare TURN completed JP 1 MiB and 8 MiB with relay->relay and was rolled back to coturn",
+    "WAN flow-control delivery worked but host pause/resume was not observed; not a pass",
+    "WAN 256 KiB snapshot and 2 s reconnect passed twice with 1.46/4.58 s resync latency",
+    "public VPS results are not strict NAT-to-NAT results"
+  ]
+}

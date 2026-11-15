@@ -1,0 +1,48 @@
+{
+  "name": "@limccn/tokimeki-protocol",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Shared wire protocol for tokimeki relay, CLI, and future Go/Rust clients",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/limccn/tokimeki.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/limccn/tokimeki#readme",
+  "bugs": {
+    "url": "https://github.com/limccn/tokimeki/issues"
+  },
+  "keywords": [
+    "tokimeki",
+    "protocol",
+    "wire",
+    "websocket",
+    "webrtc"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "description": "Binary frame golden vectors for tokimeki protocol v1. Hex is lowercase; payloads are raw bytes.",
+  "valid": [
+    {
+      "name": "input-empty",
+      "hex": "01",
+      "expect": { "type": "input", "payloadHex": "" }
+    },
+    {
+      "name": "input-hello",
+      "hex": "0168656c6c6f",
+      "expect": { "type": "input", "payloadHex": "68656c6c6f" }
+    },
+    {
+      "name": "input-binary",
+      "hex": "0100ff0a",
+      "expect": { "type": "input", "payloadHex": "00ff0a" }
+    },
+    {
+      "name": "output-seq0-empty",
+      "hex": "020000000000000000",
+      "expect": { "type": "output", "seq": 0, "payloadHex": "" }
+    },
+    {
+      "name": "output-seq42-ansi",
+      "hex": "02000000000000002a1b5b33316d5245441b5b306d0d0a",
+      "expect": { "type": "output", "seq": 42, "payloadHex": "1b5b33316d5245441b5b306d0d0a" }
+    },
+    {
+      "name": "output-max-safe-seq-empty",
+      "hex": "02001fffffffffffff",
+      "expect": { "type": "output", "seq": 9007199254740991, "payloadHex": "" }
+    },
+    {
+      "name": "snapshot-seq7",
+      "hex": "0300000000000000071b5b3f3130343968",
+      "expect": { "type": "snapshot", "seq": 7, "payloadHex": "1b5b3f3130343968" }
+    },
+    {
+      "name": "resync-req",
+      "hex": "04",
+      "expect": { "type": "resync_req" }
+    },
+    {
+      "name": "snapshot-to-client1",
+      "hex": "0508636c69656e742d31000000000000007b",
+      "expect": { "type": "snapshot_to", "targetId": "client-1", "seq": 123, "payloadHex": "" }
+    },
+    {
+      "name": "snapshot-to-64byte-target",
+      "hex": "0540616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610000000000000000",
+      "expect": {
+        "type": "snapshot_to",
+        "targetId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "seq": 0,
+        "payloadHex": ""
+      }
+    },
+    {
+      "name": "tunnel-reserved-empty",
+      "hex": "06",
+      "expect": { "type": "tunnel", "payloadHex": "" }
+    },
+    {
+      "name": "tunnel-reserved",
+      "hex": "06deadbeef",
+      "expect": { "type": "tunnel", "payloadHex": "deadbeef" }
+    },
+    {
+      "name": "tunnel-to-reserved",
+      "hex": "07087669657765722d310102",
+      "expect": { "type": "tunnel_to", "targetId": "viewer-1", "payloadHex": "0102" }
+    }
+  ],
+  "invalid": [
+    { "name": "empty-buffer", "hex": "", "error": "frame_truncated" },
+    { "name": "unknown-frame-0x00", "hex": "00", "error": "unknown_frame_type" },
+    { "name": "unknown-frame-0x08", "hex": "08", "error": "unknown_frame_type" },
+    { "name": "unknown-frame-0x7f", "hex": "7f00", "error": "unknown_frame_type" },
+    { "name": "truncated-output-seq", "hex": "0200000000", "error": "frame_truncated" },
+    { "name": "truncated-snapshot-seq", "hex": "03", "error": "frame_truncated" },
+    { "name": "truncated-snapshot-to-header", "hex": "05", "error": "frame_truncated" },
+    { "name": "truncated-snapshot-to-target", "hex": "0505636c69", "error": "frame_truncated" },
+    {
+      "name": "truncated-snapshot-to-seq",
+      "hex": "0508636c69656e742d31",
+      "error": "frame_truncated"
+    },
+    {
+      "name": "snapshot-to-zero-target-len",
+      "hex": "05000000000000000000",
+      "error": "invalid_target_id"
+    },
+    { "name": "snapshot-to-target-len-65", "hex": "0541", "error": "invalid_target_id" },
+    {
+      "name": "snapshot-to-invalid-utf8-target",
+      "hex": "0501ff0000000000000000",
+      "error": "invalid_target_id"
+    },
+    {
+      "name": "output-seq-above-max-safe",
+      "hex": "020020000000000000",
+      "error": "invalid_seq"
+    },
+    { "name": "resync-req-with-payload", "hex": "0400", "error": "invalid_frame" }
+  ]
+}

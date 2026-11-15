@@ -1,0 +1,285 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  buildRelayWebSocketUrl,
+  ConfigError,
+  collectV11Warnings,
+  DEFAULT_HEARTBEAT_SECONDS,
+  DEFAULT_SCROLLBACK_LINES,
+  DEFAULT_SNAPSHOT_MAX_BYTES,
+  loadAttachConfig,
+  loadDoctorConfig,
+  loadHostConfig,
+  MAX_SCROLLBACK_LINES,
+  MIN_SCROLLBACK_LINES,
+  normalizeRelayBaseUrl,
+  relayHealthUrl,
+  sanitizeSessionId,
+} from "./config.js";
+
+function baseHostEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    TOKIMEKI_RELAY_URL: "https://relay.example",
+    TOKIMEKI_MASTER_TOKEN: "master-token-1234",
+    TOKIMEKI_SESSION: "sess-1",
+    ...overrides,
+  };
+}
+
+describe("normalizeRelayBaseUrl", () => {
+  it("converts https to wss and strips trailing slashes", () => {
+    expect(normalizeRelayBaseUrl("https://relay.example/")).toBe("wss://relay.example");
+    expect(normalizeRelayBaseUrl("https://relay.example/base///")).toBe("wss://relay.example/base");
+  });
+
+  it("converts http to ws", () => {
+    expect(normalizeRelayBaseUrl("http://localhost:8787")).toBe("ws://localhost:8787");
+    expect(normalizeRelayBaseUrl("ws://localhost:8787/")).toBe("ws://localhost:8787");
+    expect(normalizeRelayBaseUrl("wss://relay.example")).toBe("wss://relay.example");
+  });
+
+  it("rejects credentials, query strings, and fragments without echoing them", () => {
+    expect(() => normalizeRelayBaseUrl("https://user:pass@relay.example")).toThrow(ConfigError);
+    const queryError = (() => {
+      try {
+        normalizeRelayBaseUrl("https://relay.example/ws?token=supersecret");
+        return null;
+      } catch (error) {
+        return error as Error;
+      }
+    })();
+    expect(queryError).toBeInstanceOf(ConfigError);
+    expect(queryError?.message).not.toContain("supersecret");
+    expect(() => normalizeRelayBaseUrl("https://relay.example/#frag")).toThrow(ConfigError);
+  });
+
+  it("rejects non-http protocols and unparsable values", () => {
+    expect(() => normalizeRelayBaseUrl("ftp://relay.example")).toThrow(ConfigError);
+    expect(() => normalizeRelayBaseUrl("not a url")).toThrow(ConfigError);
+  });
+});
+
+describe("relay URL helpers", () => {
+  it("builds the websocket URL with the session only", () => {
+    expect(buildRelayWebSocketUrl("wss://relay.example", "sess-1")).toBe(
+      "wss://relay.example/ws/sess-1",
+    );
+    expect(buildRelayWebSocketUrl("wss://relay.example/base", "sess-1")).toBe(
+      "wss://relay.example/base/ws/sess-1",
+    );
+  });
+
+  it("rejects invalid session IDs", () => {
+    expect(() => buildRelayWebSocketUrl("wss://relay.example", "bad session")).toThrow(ConfigError);
+  });
+
+  it("derives the health endpoint", () => {
+    expect(relayHealthUrl("wss://relay.example/base")).toBe("https://relay.example/base/healthz");
+    expect(relayHealthUrl("ws://localhost:8787")).toBe("http://localhost:8787/healthz");
+  });
+
+  it("sanitizes arbitrary hostnames and paths into session IDs", () => {
+    expect(sanitizeSessionId("Some Host-C:\\Users\\X\\Project 1")).toBe(
+      "Some-Host-C-Users-X-Project-1",
+    );
+    expect(sanitizeSessionId("***")).toBe("session");
+    expect(sanitizeSessionId("a".repeat(100))).toHaveLength(64);
+  });
+});
+
+describe("loadHostConfig", () => {
+  it("applies documented defaults", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv(),
+      cwd: "/work/project",
+      hostname: "testhost",
+    });
+
+    expect(config.role).toBe("host");
+    expect(config.relayUrl).toBe("wss://relay.example");
+    expect(config.websocketUrl).toBe("wss://relay.example/ws/sess-1");
+    expect(config.session).toBe("sess-1");
+    expect(config.heartbeatSeconds).toBe(DEFAULT_HEARTBEAT_SECONDS);
+    expect(config.scrollbackLines).toBe(DEFAULT_SCROLLBACK_LINES);
+    expect(config.snapshotMaxBytes).toBe(DEFAULT_SNAPSHOT_MAX_BYTES);
+    expect(config.term).toBe("xterm-256color");
+    expect(config.colorterm).toBe("truecolor");
+    expect(config.resizePolicy).toBe("latest");
+    expect(config.p2p).toBe("auto");
+    expect(config.iceTransportPolicy).toBe("all");
+    expect(config.piTuiMode).toBe("fullscreen");
+    expect(config.ptySize).toBeNull();
+    expect(config.claudeBg).toBe(false);
+  });
+
+  it("generates a session token when none is provided and records it as a secret", () => {
+    const config = loadHostConfig({ env: baseHostEnv() });
+    expect(config.sessionTokenGenerated).toBe(true);
+    expect(config.sessionToken.length).toBeGreaterThanOrEqual(32);
+    expect(config.secrets).toContain(config.sessionToken);
+    expect(config.secrets).toContain("master-token-1234");
+  });
+
+  it("marks a provided session token as not generated", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_SESSION_TOKEN: "provided-session-token" }),
+    });
+    expect(config.sessionTokenGenerated).toBe(false);
+    expect(config.sessionToken).toBe("provided-session-token");
+    expect(config.secrets).toContain("provided-session-token");
+  });
+
+  it("rejects identical master and session tokens", () => {
+    expect(() =>
+      loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_SESSION_TOKEN: "master-token-1234" }),
+      }),
+    ).toThrow(/must be different/);
+  });
+
+  it("derives a sanitized default session from hostname and cwd", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_SESSION: undefined }),
+      cwd: "/work/project",
+      hostname: "my host",
+    });
+    expect(config.session).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+    expect(config.session.startsWith("my-host")).toBe(true);
+  });
+
+  it("requires a relay URL and a master token", () => {
+    expect(() => loadHostConfig({ env: { TOKIMEKI_MASTER_TOKEN: "x" } })).toThrow(
+      /TOKIMEKI_RELAY_URL is required/,
+    );
+    expect(() => loadHostConfig({ env: { TOKIMEKI_RELAY_URL: "https://relay.example" } })).toThrow(
+      /TOKIMEKI_MASTER_TOKEN is required/,
+    );
+  });
+
+  it("clamps scrollback to the v1 range", () => {
+    expect(
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_SCROLLBACK_LINES: "100" }) }).scrollbackLines,
+    ).toBe(MIN_SCROLLBACK_LINES);
+    expect(
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_SCROLLBACK_LINES: "99999" }) }).scrollbackLines,
+    ).toBe(MAX_SCROLLBACK_LINES);
+    expect(
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_SCROLLBACK_LINES: "750" }) }).scrollbackLines,
+    ).toBe(750);
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_SCROLLBACK_LINES: "abc" }) }),
+    ).toThrow(ConfigError);
+  });
+
+  it("parses PTY size, resize policy, and pi TUI mode", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_PTY_SIZE: "100x30",
+        TOKIMEKI_RESIZE_POLICY: "min",
+        TOKIMEKI_PI_TUI_MODE: "regular",
+      }),
+    });
+    expect(config.ptySize).toEqual({ cols: 100, rows: 30 });
+    expect(config.resizePolicy).toBe("min");
+    expect(config.piTuiMode).toBe("regular");
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_PTY_SIZE: "100 30" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_RESIZE_POLICY: "everyone" }) }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects an out-of-range snapshot budget", () => {
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_SNAPSHOT_MAX_BYTES: "10" }) }),
+    ).toThrow(ConfigError);
+  });
+});
+
+describe("loadAttachConfig", () => {
+  const attachEnv = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+    TOKIMEKI_RELAY_URL: "https://relay.example/base",
+    TOKIMEKI_SESSION: "sess-1",
+    TOKIMEKI_SESSION_TOKEN: "session-token-9876",
+    ...overrides,
+  });
+
+  it("does not require a master token", () => {
+    const config = loadAttachConfig(attachEnv());
+    expect(config.role).toBe("viewer");
+    expect(config.websocketUrl).toBe("wss://relay.example/base/ws/sess-1");
+    expect(config.sessionToken).toBe("session-token-9876");
+    expect(config.secrets).toContain("session-token-9876");
+  });
+
+  it("requires a session and a session token", () => {
+    expect(() => loadAttachConfig(attachEnv({ TOKIMEKI_SESSION: undefined }))).toThrow(
+      /TOKIMEKI_SESSION is required/,
+    );
+    expect(() => loadAttachConfig(attachEnv({ TOKIMEKI_SESSION_TOKEN: undefined }))).toThrow(
+      /TOKIMEKI_SESSION_TOKEN is required/,
+    );
+  });
+});
+
+describe("v1.1 environment variables", () => {
+  it("emits a single warning with names but never values", () => {
+    const warnings = collectV11Warnings({
+      TOKIMEKI_TUNNEL_SECRET: "supersecret",
+      TOKIMEKI_LAN_DISCOVERY: "1",
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("TOKIMEKI_TUNNEL_SECRET");
+    expect(warnings[0]).toContain("TOKIMEKI_LAN_DISCOVERY");
+    expect(warnings[0]).not.toContain("supersecret");
+    expect(warnings[0]).toContain("not implemented");
+  });
+
+  it("adds the warning through host and attach configs", () => {
+    const host = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_TUNNEL: "1" }),
+    });
+    expect(host.warnings).toHaveLength(1);
+
+    const attach = loadAttachConfig({
+      TOKIMEKI_RELAY_URL: "https://relay.example",
+      TOKIMEKI_SESSION: "sess-1",
+      TOKIMEKI_SESSION_TOKEN: "token-1234",
+      TOKIMEKI_VIEW_MODE: "auto",
+    });
+    expect(attach.warnings).toHaveLength(1);
+  });
+});
+
+describe("loadDoctorConfig", () => {
+  it("reports partial configuration instead of throwing", () => {
+    const config = loadDoctorConfig({});
+    expect(config.relayUrl).toBeNull();
+    expect(config.session).toBeNull();
+    expect(config.hasMasterToken).toBe(false);
+    expect(config.hasSessionToken).toBe(false);
+  });
+
+  it("normalizes a configured relay URL", () => {
+    const config = loadDoctorConfig({
+      TOKIMEKI_RELAY_URL: "https://relay.example/",
+      TOKIMEKI_SESSION: "sess-1",
+      TOKIMEKI_SESSION_TOKEN: "session-token-9876",
+    });
+    expect(config.relayUrl).toBe("wss://relay.example");
+    expect(config.session).toBe("sess-1");
+    expect(config.hasSessionToken).toBe(true);
+    expect(config.secrets).toContain("session-token-9876");
+  });
+
+  it("warns when the master and session tokens are identical", () => {
+    const config = loadDoctorConfig({
+      TOKIMEKI_RELAY_URL: "https://relay.example",
+      TOKIMEKI_MASTER_TOKEN: "same-token-value",
+      TOKIMEKI_SESSION_TOKEN: "same-token-value",
+    });
+    expect(config.warnings.some((warning) => warning.includes("identical"))).toBe(true);
+    expect(config.warnings.join(" ")).not.toContain("same-token-value");
+  });
+});

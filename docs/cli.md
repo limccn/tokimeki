@@ -1,0 +1,153 @@
+# tokimeki CLI
+
+The `tokimeki` command hosts a TUI/PTY program on one machine and lets another
+machine attach to the same live session.
+
+## Install
+
+Requirements: Node.js >= 22.12 and npm >= 11.
+
+```bash
+npm install -g @limccn/tokimeki
+tokimeki --version
+tokimeki --help
+```
+
+Windows uses ConPTY; macOS/Linux use the native PTY. The CLI terminal data path
+uses `node-pty` and `node-datachannel` native modules.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `tokimeki claude [args...]` | Host the `claude` CLI in a PTY |
+| `tokimeki pi [args...]` | Host the `pi` CLI in a PTY |
+| `tokimeki run -- <cmd...>` | Host any command in a PTY (`--` protects flags) |
+| `tokimeki attach` | Attach to a hosted session |
+| `tokimeki doctor` | Check config, PTY support, and relay reachability |
+
+`claude`/`pi` arguments are passed through. `tokimeki claude --help` runs the
+local `claude --help` without requiring relay configuration.
+
+## Host a session
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.example.com
+export TOKIMEKI_MASTER_TOKEN=<relay-master-token>
+
+tokimeki claude
+# or: tokimeki pi
+# or: tokimeki run -- htop
+```
+
+On startup the host prints a banner:
+
+```text
+[tokimeki] session: <hostname>-<cwd-or-session>
+[tokimeki] relay: wss://relay.example.com
+[tokimeki] viewers: 0
+[tokimeki] session token (generated, save it): <session-token>
+```
+
+If you set `TOKIMEKI_SESSION_TOKEN` yourself, the banner says it was provided
+instead of printing the value. The host owns the PTY; closing the host or
+pressing Ctrl-C in the hosted program ends the session.
+
+Useful host variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TOKIMEKI_RELAY_URL` | — (required) | `wss://` relay endpoint |
+| `TOKIMEKI_MASTER_TOKEN` | — (required) | Relay host secret; never share with viewers |
+| `TOKIMEKI_SESSION` | sanitized hostname+cwd | Session name (ASCII/`._-`, <=64 chars) |
+| `TOKIMEKI_SESSION_TOKEN` | generated | Per-session viewer token; generated value is printed once |
+| `TOKIMEKI_P2P` | `auto` | `off` forces the Worker relay |
+| `TOKIMEKI_ICE_TRANSPORT_POLICY` | `all` | `relay` restricts ICE to TURN (test/forced TURN) |
+| `TOKIMEKI_RESIZE_POLICY` | `latest` | `latest`, `min`, or `pinned` |
+| `TOKIMEKI_PTY_SIZE` | — | `<cols>x<rows>`, used with `pinned` |
+| `TOKIMEKI_TERM` | `xterm-256color` | PTY TERM |
+| `TOKIMEKI_COLORTERM` | `truecolor` | PTY COLORTERM |
+| `TOKIMEKI_HEARTBEAT_SECONDS` | `25` | WebSocket heartbeat; `0` disables |
+| `TOKIMEKI_SCROLLBACK_LINES` | `1000` | Headless screen scrollback |
+| `TOKIMEKI_SNAPSHOT_MAX_BYTES` | `262144` | Snapshot size budget |
+| `TOKIMEKI_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
+
+## Attach from another machine
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.example.com
+export TOKIMEKI_SESSION=<host-session-name>
+export TOKIMEKI_SESSION_TOKEN=<session-token>
+
+tokimeki attach
+```
+
+Attach needs `TOKIMEKI_SESSION` and `TOKIMEKI_SESSION_TOKEN`; it does **not**
+need the relay master token. The viewer enters the alternate screen, applies
+the current snapshot, and forwards keyboard input.
+
+- **Disconnect/reconnect:** the host PTY stays alive; a reconnecting viewer
+  requests a fresh snapshot.
+- **Multiple viewers:** all viewers share control; resize follows
+  `TOKIMEKI_RESIZE_POLICY`.
+- **Exit:** Ctrl-C is forwarded to the hosted program; quitting the viewer
+  restores the local terminal.
+- **P2P:** with `TOKIMEKI_P2P=auto` the viewer may switch to a WebRTC
+  DataChannel. If ICE fails (~12 s), it falls back to the relay.
+- **TURN:** set `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` to require TURN; with no
+  usable TURN the attempt times out and falls back to the relay. The CLI only
+  uses TURN over UDP (libjuice).
+
+## Doctor
+
+```bash
+TOKIMEKI_RELAY_URL=wss://relay.example.com \
+TOKIMEKI_MASTER_TOKEN=<relay-master-token> \
+  tokimeki doctor
+```
+
+`doctor` checks PTY spawn support, relay `/healthz`, and host authentication
+configuration. It prints actionable warnings for missing/conflicting values.
+
+## Exit codes
+
+| Code | Meaning |
+|---:|---|
+| `0` | Success |
+| `1` | Runtime/connection failure, a failed `doctor` check, or CLI usage error |
+| `2` | Invalid `TOKIMEKI_*` configuration at host/attach startup |
+
+## P2P / TURN / relay selection
+
+1. `TOKIMEKI_P2P=off` — Worker relay only.
+2. `auto` — attempt WebRTC per viewer; if ICE cannot connect within ~12 s,
+   resume relay output and request a fresh snapshot.
+3. `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` — force TURN candidates for testing;
+   no usable TURN means timeout + relay fallback.
+4. Relay fallback is always available; control/signaling always use the relay.
+
+Logs go to stderr and redact known tokens. Use `TOKIMEKI_LOG_LEVEL=debug` when
+diagnosing connection issues.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| `401 unauthorized` | `TOKIMEKI_MASTER_TOKEN` matches the relay secret; host/session tokens differ |
+| `host_offline` | Host is connected to the same relay/session and still running |
+| `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
+| P2P never opens | Corporate UDP firewall; try TURN or `TOKIMEKI_P2P=off` |
+| TURN attempt takes ~12 s | Expected when TURN is unreachable; relay takes over |
+| Garbled screen after reconnect | Enable `debug` logs and file an issue with the terminal/OS details |
+| Local terminal not restored | Run `reset`; report the terminal emulator and OS |
+
+Full relay/TURN deployment: [deploy-cloudflare.md](deploy-cloudflare.md).
+All environment variables: [`.env.example`](../.env.example).
+
+## Security
+
+- The master token authenticates **hosts**; never give it to viewers.
+- Session tokens are per session; share them over a trusted channel.
+- Tokens are sent in headers, not URLs.
+- The relay can see terminal bytes while carrying them. P2P/TURN change the
+  transport path; this is not end-to-end encryption.
