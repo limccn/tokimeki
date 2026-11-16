@@ -26,6 +26,27 @@ describe("buildCapabilities", () => {
     expect(capabilities.transports?.fragmentation).toBeUndefined();
   });
 
+  it("advertises listener mode as relay-only and snapshot-only", () => {
+    const capabilities = buildCapabilities({ p2p: true, listener: true });
+    expect(capabilities.transports?.modes).toEqual(["relay"]);
+    expect(capabilities.transports?.fragmentation).toBeUndefined();
+    expect(capabilities.listener?.modes).toEqual(["snapshot-only"]);
+
+    const parsed = parseControlMessage({
+      v: PROTOCOL_VERSION,
+      type: "hello",
+      role: "listener",
+      session: "demo-session",
+      clientId: "listener-1",
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities,
+    });
+    expect(parsed.type).toBe("hello");
+    const hello = parsed as HelloMessage;
+    expect(hello.capabilities.listener?.modes).toEqual(["snapshot-only"]);
+    expect(hello.capabilities.transports?.modes).toEqual(["relay"]);
+  });
+
   it("accepts only the exact fragmentation dialect", () => {
     const enabled = buildCapabilities({ p2p: true });
     const fragmentation = enabled.transports?.fragmentation;

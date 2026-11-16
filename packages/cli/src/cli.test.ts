@@ -218,6 +218,28 @@ describe("tokimeki CLI wiring", () => {
     });
   });
 
+  it("wires attach --listen as a read-only listener", async () => {
+    const runAttach = vi.fn(async (_config: AttachConfig, _logger: Logger): Promise<number> => 0);
+    const { deps } = harness(
+      {
+        TOKIMEKI_RELAY_URL: "https://relay.example/base/",
+        TOKIMEKI_SESSION: "sess-1",
+        TOKIMEKI_SESSION_TOKEN: "session-token-9876",
+      },
+      { runAttach },
+    );
+
+    const code = await main(["node", "tokimeki", "attach", "--listen"], deps);
+    expect(code).toBe(0);
+    expect(runAttach).toHaveBeenCalledTimes(1);
+    const [config] = runAttach.mock.calls[0] ?? [];
+    expect(config).toMatchObject({
+      role: "listener",
+      session: "sess-1",
+      websocketUrl: "wss://relay.example/base/ws/sess-1",
+    });
+  });
+
   it("wires doctor with normalized configuration", async () => {
     const runDoctor = vi.fn(
       async (_config: DoctorConfig, _stdout: NodeJS.WriteStream): Promise<number> => 0,

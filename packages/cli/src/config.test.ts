@@ -5,12 +5,15 @@ import {
   ConfigError,
   collectV11Warnings,
   DEFAULT_HEARTBEAT_SECONDS,
+  DEFAULT_LISTENER_SNAPSHOT_MS,
   DEFAULT_SCROLLBACK_LINES,
   DEFAULT_SNAPSHOT_MAX_BYTES,
   loadAttachConfig,
   loadDoctorConfig,
   loadHostConfig,
+  MAX_LISTENER_SNAPSHOT_MS,
   MAX_SCROLLBACK_LINES,
+  MIN_LISTENER_SNAPSHOT_MS,
   MIN_SCROLLBACK_LINES,
   normalizeRelayBaseUrl,
   relayHealthUrl,
@@ -102,6 +105,7 @@ describe("loadHostConfig", () => {
     expect(config.heartbeatSeconds).toBe(DEFAULT_HEARTBEAT_SECONDS);
     expect(config.scrollbackLines).toBe(DEFAULT_SCROLLBACK_LINES);
     expect(config.snapshotMaxBytes).toBe(DEFAULT_SNAPSHOT_MAX_BYTES);
+    expect(config.listenerSnapshotMs).toBe(DEFAULT_LISTENER_SNAPSHOT_MS);
     expect(config.term).toBe("xterm-256color");
     expect(config.colorterm).toBe("truecolor");
     expect(config.resizePolicy).toBe("latest");
@@ -195,6 +199,30 @@ describe("loadHostConfig", () => {
       loadHostConfig({ env: baseHostEnv({ TOKIMEKI_SNAPSHOT_MAX_BYTES: "10" }) }),
     ).toThrow(ConfigError);
   });
+
+  it("parses and clamps the listener snapshot interval", () => {
+    const read = (value: string) =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_LISTENER_SNAPSHOT_MS: value }) });
+
+    expect(read("250").listenerSnapshotMs).toBe(MIN_LISTENER_SNAPSHOT_MS);
+    expect(read("60000").listenerSnapshotMs).toBe(MAX_LISTENER_SNAPSHOT_MS);
+    expect(read("500").listenerSnapshotMs).toBe(500);
+
+    const below = read("10");
+    expect(below.listenerSnapshotMs).toBe(MIN_LISTENER_SNAPSHOT_MS);
+    expect(
+      below.warnings.some((warning) => warning.includes("TOKIMEKI_LISTENER_SNAPSHOT_MS")),
+    ).toBe(true);
+
+    const above = read("99999");
+    expect(above.listenerSnapshotMs).toBe(MAX_LISTENER_SNAPSHOT_MS);
+
+    const invalid = read("fast");
+    expect(invalid.listenerSnapshotMs).toBe(DEFAULT_LISTENER_SNAPSHOT_MS);
+    expect(
+      invalid.warnings.some((warning) => warning.includes("TOKIMEKI_LISTENER_SNAPSHOT_MS")),
+    ).toBe(true);
+  });
 });
 
 describe("loadAttachConfig", () => {
@@ -220,6 +248,11 @@ describe("loadAttachConfig", () => {
     expect(() => loadAttachConfig(attachEnv({ TOKIMEKI_SESSION_TOKEN: undefined }))).toThrow(
       /TOKIMEKI_SESSION_TOKEN is required/,
     );
+  });
+
+  it("selects the listener role only when explicitly requested", () => {
+    expect(loadAttachConfig(attachEnv()).role).toBe("viewer");
+    expect(loadAttachConfig(attachEnv(), { listener: true }).role).toBe("listener");
   });
 });
 

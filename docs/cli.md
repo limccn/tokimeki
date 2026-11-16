@@ -23,7 +23,8 @@ uses `node-pty` and `node-datachannel` native modules.
 | `tokimeki claude [args...]` | Host the `claude` CLI in a PTY |
 | `tokimeki pi [args...]` | Host the `pi` CLI in a PTY |
 | `tokimeki run -- <cmd...>` | Host any command in a PTY (`--` protects flags) |
-| `tokimeki attach` | Attach to a hosted session |
+| `tokimeki attach` | Attach to a hosted session (shared control) |
+| `tokimeki attach --listen` | Attach as a read-only snapshot-only listener (v1.1) |
 | `tokimeki doctor` | Check config, PTY support, and relay reachability |
 
 `claude`/`pi` arguments are passed through. `tokimeki claude --help` runs the
@@ -70,6 +71,7 @@ Useful host variables:
 | `TOKIMEKI_HEARTBEAT_SECONDS` | `25` | WebSocket heartbeat; `0` disables |
 | `TOKIMEKI_SCROLLBACK_LINES` | `1000` | Headless screen scrollback |
 | `TOKIMEKI_SNAPSHOT_MAX_BYTES` | `262144` | Snapshot size budget |
+| `TOKIMEKI_LISTENER_SNAPSHOT_MS` | `1000` | Read-only listener snapshot interval (250–60000 ms) |
 | `TOKIMEKI_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
 
 ## Attach from another machine
@@ -102,6 +104,37 @@ the current snapshot, and forwards keyboard input.
 - **TURN:** set `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` to require TURN; with no
   usable TURN the attempt times out and falls back to the relay. The CLI only
   uses TURN over UDP (libjuice).
+
+### Read-only listener (v1.1)
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.example.com
+export TOKIMEKI_SESSION=<host-session-name>
+export TOKIMEKI_SESSION_TOKEN=<session-token>
+
+tokimeki attach --listen
+```
+
+`--listen` connects with the `listener` role instead of `viewer`:
+
+- The host sends one full ANSI snapshot immediately and then every
+  `TOKIMEKI_LISTENER_SNAPSHOT_MS` (default 1000 ms; 250–60000 ms).
+- Local keyboard input is ignored. Ctrl-C stops only the local listener and is
+  never written to the hosted PTY.
+- The listener never sends input, resize, ACK, resync, or P2P signaling. It
+  does not affect viewer flow control or PTY sizing and never attempts P2P.
+- It receives only relay `SNAPSHOT_TO` (plus presence/host-exited); there is no
+  incremental output in this version.
+- If the relay predates v1.1 listener support, the CLI prints an actionable
+  `not_implemented` error and exits non-zero instead of falling back to a
+  shared-control viewer.
+- Relay operators can cap concurrent listeners with
+  `TOKIMEKI_MAX_LISTENERS` (default 8; listeners also count toward
+  `TOKIMEKI_MAX_CLIENTS_PER_SESSION`).
+- Mixed versions: a v1.1 relay with a pre-v1.1 host still delivers snapshots
+  (the old host treats the listener as a viewer), but the old host may attempt
+  P2P signaling that the relay rejects. Upgrade the host to v1.1 for clean
+  listener handling.
 
 ## Doctor
 

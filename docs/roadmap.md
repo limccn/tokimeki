@@ -42,8 +42,9 @@ v1 基线历史限制（F0 已在 `b8c9ec4` 解决）：v1 本身不做 DataChan
 状态（2026-11-16）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建。F0 已实现、
 本地验证并归档（提交 `b8c9ec4`：typecheck/lint/276 tests/75 relay tests/build、
 P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公网 NAT/TURN 复测与
-生产部署尚未执行。当前进入 F2 listener snapshot-only 规划
-（`.trellis/tasks/11-16-v1-1-f2-listener`，planning）；F1/F3 在后续按顺序拆子任务。
+生产部署尚未执行。F2 listener snapshot-only 已在当前工作树实现
+（`.trellis/tasks/11-16-v1-1-f2-listener`）；本地 live e2e（`E2E_LISTENER=1` +
+P2P viewer，2026-11-16）已通过，生产部署与发布验证待执行。F1/F3 在后续按顺序拆子任务。
 
 - **F0 P2P 传输增强（已完成并归档，`b8c9ec4`）**：新增 capability-gated
   `FRAGMENT` 帧（0x08）实现
@@ -57,10 +58,10 @@ P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公�
   可选 XOR/RS FEC + AES-256-GCM；WS relay 上只保留加密封装，不叠加 ARQ/FEC
   （TCP 队头阻塞无法消除）。默认由 session token 派生密钥时 relay 可推导，
   只作传输加固；relay-blind E2E 需独立 `TOKIMEKI_TUNNEL_SECRET` 带外共享。
-- **F2 听众模式（listener，规划中）**：任务
-  `.trellis/tasks/11-16-v1-1-f2-listener`；只读、无 ack/背压，第一版
-  snapshot-only（周期全量快照），独立上限；任意丢增量帧会破坏 ANSI 状态，不作为
-  默认。
+- **F2 听众模式（已实现，本地 live e2e 通过）**：任务
+  `.trellis/tasks/11-16-v1-1-f2-listener`。只读、无 ack/背压，第一版
+  snapshot-only（周期全量快照），独立上限 `TOKIMEKI_MAX_LISTENERS`；本地
+  host + viewer + listener live e2e（含 P2P viewer）已通过，生产/真实跨公网环境待复测。
 - **F3 同内网/相邻网络优化**：v1 已利用 ICE host candidate；v1.1 再评估
   `RouteSelector`、同 LAN 分组提示、mDNS（仅提示，不作发现权威）与 peer fan-out
   （默认 off，需 leader 选举、保序、信任与故障切换设计）。

@@ -110,7 +110,11 @@ export default {
       logger.warn("master_session_token_equal", { sessionId });
       return jsonResponse(401, { ok: false, error: "unauthorized" });
     }
-    let role: "host" | "viewer" = "viewer";
+    // The CLI marks an explicit read-only listener connection. The header is
+    // internal: it never reaches the DO, and the master token always wins so a
+    // host cannot accidentally be downgraded to listener.
+    const listenerHeader = request.headers.get("x-tokimeki-listener");
+    let role: "host" | "viewer" | "listener" = "viewer";
     if (presentedMaster !== null) {
       const masterValid = await isMasterTokenValid(presentedMaster, env.TOKIMEKI_MASTER_TOKEN);
       if (!masterValid) {
@@ -118,10 +122,17 @@ export default {
         return jsonResponse(401, { ok: false, error: "unauthorized" });
       }
       role = "host";
+    } else if (listenerHeader !== null) {
+      if (listenerHeader !== "1") {
+        logger.warn("invalid_listener_header", { sessionId });
+        return jsonResponse(400, { ok: false, error: "invalid_role" });
+      }
+      role = "listener";
     }
 
     const headers = new Headers(request.headers);
     headers.delete("x-tokimeki-master");
+    headers.delete("x-tokimeki-listener");
     headers.set("x-tokimeki-role", role);
 
     const forwarded = new Request(request, { headers });

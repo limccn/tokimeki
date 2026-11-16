@@ -66,6 +66,12 @@ const SNAPSHOT_TICK_MS = 20;
 const RING_BYTES = 256 * 1024;
 const RELAY_HIGH_WATER = 1_048_576;
 const RELAY_LOW_WATER = 262_144;
+/**
+ * Listener snapshots share the host's relay socket with viewer output. Stop
+ * enqueueing them once this much data is already buffered so a slow relay or
+ * many listeners cannot push the shared socket toward the viewer pause mark.
+ */
+const LISTENER_RELAY_BUFFER_BUDGET = 524_288;
 const P2P_HIGH_WATER = 4_194_304;
 const SNAPSHOT_PAUSE = "snapshot";
 const RESYNC_THROTTLE_MS = 500;
@@ -175,6 +181,14 @@ class HostSession {
   #latestSize: TerminalSize = { cols: 80, rows: 24 };
 
   readonly #viewers = new Set<string>();
+  /**
+   * Read-only listeners are tracked separately from viewers: they never enter
+   * resize, P2P, flow-control, or ACK accounting and only receive periodic
+   * full `SNAPSHOT_TO` frames.
+   */
+  readonly #listeners = new Set<string>();
+  #listenerTimer: NodeJS.Timeout | null = null;
+  #listenerSnapshotInFlight = false;
   readonly #viewerSizes = new Map<string, TerminalSize>();
   readonly #pendingSnapshots = new Set<string>();
   readonly #resyncAt = new Map<string, number>();
@@ -438,7 +452,16 @@ class HostSession {
       `ice provider: ${welcome.iceProvider} ` +
         `(servers=${welcome.iceServers.length}, transportPolicy=${welcome.transportPolicy})`,
     );
+    // `welcome.clients` is authoritative after a relay reconnect: drop
+    // listeners that left while the host was disconnected before re-adding the
+    // currently connected set below.
+    this.#listeners.clear();
+    this.#stopListenerTimer();
     for (const client of welcome.clients) {
+      if (client.role === "listener") {
+        this.#listeners.add(client.clientId);
+        continue;
+      }
       if (client.role !== undefined && client.role !== "viewer") continue;
       this.#viewers.add(client.clientId);
       this.#scheduleSnapshot(client.clientId);
@@ -452,12 +475,32 @@ class HostSession {
         this.#startP2P(client.clientId);
       }
     }
+    if (this.#listeners.size > 0) {
+      // A reconnected host must not leave listeners waiting for the first
+      // periodic tick; send the current screen immediately.
+      void this.#sendListenerSnapshots();
+      this.#startListenerTimer();
+    }
     this.#logger.info(`viewers: ${this.#viewers.size}`);
+    if (this.#listeners.size > 0) {
+      this.#logger.info(`listeners: ${this.#listeners.size}`);
+    }
   }
 
   #handleControl(message: KnownControlMessage): void {
     switch (message.type) {
       case "peer-joined": {
+        if (message.role === "listener") {
+          // Listeners only get periodic snapshots; no P2P, resize, or entry in
+          // the viewer sets.
+          this.#listeners.add(message.clientId);
+          this.#logger.info(
+            `listener joined: ${message.clientId} (listeners=${this.#listeners.size})`,
+          );
+          void this.#sendListenerSnapshots();
+          this.#startListenerTimer();
+          return;
+        }
         this.#viewers.add(message.clientId);
         const fragments = supportsFragmentation(message.capabilities);
         if (fragments) {
@@ -475,6 +518,15 @@ class HostSession {
         return;
       }
       case "peer-left":
+        if (this.#listeners.delete(message.clientId)) {
+          this.#logger.info(
+            `listener left: ${message.clientId} (listeners=${this.#listeners.size})`,
+          );
+          if (this.#listeners.size === 0) {
+            this.#stopListenerTimer();
+          }
+          return;
+        }
         this.#closeP2PLink(message.clientId, "viewer left");
         this.#viewers.delete(message.clientId);
         this.#viewerSizes.delete(message.clientId);
@@ -489,6 +541,10 @@ class HostSession {
         if (message.clientId === this.#clientId) {
           // Defense in depth: the relay only synthesizes resize for viewers,
           // but a self-resize must never register the host as its own viewer.
+          return;
+        }
+        if (this.#listeners.has(message.clientId)) {
+          // Listeners never drive PTY sizing.
           return;
         }
         if (!this.#viewers.has(message.clientId)) {
@@ -1031,6 +1087,68 @@ class HostSession {
     }
   }
 
+  #startListenerTimer(): void {
+    if (this.#listenerTimer !== null || this.#listeners.size === 0 || this.#closing) return;
+    const timer = setInterval(() => {
+      void this.#sendListenerSnapshots();
+    }, this.#config.listenerSnapshotMs);
+    timer.unref?.();
+    this.#listenerTimer = timer;
+  }
+
+  #stopListenerTimer(): void {
+    if (this.#listenerTimer === null) return;
+    clearInterval(this.#listenerTimer);
+    this.#listenerTimer = null;
+  }
+
+  /**
+   * Send one full ANSI snapshot to every listener over the relay.
+   *
+   * Deliberately independent from the viewer snapshot path: the PTY is not
+   * paused, no output is held, and no viewer seq/ACK state is touched. If a
+   * listener falls behind, the frame is still encoded and handed to the relay;
+   * the relay drops it and the next tick supersedes it.
+   */
+  async #sendListenerSnapshots(): Promise<void> {
+    if (this.#closing || this.#listeners.size === 0 || this.#listenerSnapshotInFlight) return;
+    const transport = this.#transport;
+    if (transport === null) return;
+    this.#listenerSnapshotInFlight = true;
+    try {
+      // Do not pause the PTY; output written while this resolves is simply
+      // covered by the next periodic snapshot.
+      await this.#mirror?.flush();
+      if (this.#closing || this.#listeners.size === 0) return;
+      if ((this.#client?.bufferedAmount ?? 0) > LISTENER_RELAY_BUFFER_BUDGET) {
+        this.#logger.debug("listener snapshots skipped: relay buffer is high");
+        return;
+      }
+      const payload = Buffer.from(this.#serializeSnapshot(""), "utf8");
+      const seq = Math.max(0, this.#lastAssignedSeq);
+      let sent = 0;
+      for (const target of this.#listeners) {
+        // Re-check per listener: all frames share the host's socket, and the
+        // next periodic tick will catch any listener skipped here.
+        if ((this.#client?.bufferedAmount ?? 0) > LISTENER_RELAY_BUFFER_BUDGET) {
+          break;
+        }
+        try {
+          transport.send(encodeFrame({ type: "snapshot_to", targetId: target, seq, payload }));
+          sent += 1;
+        } catch (error) {
+          // A single bad listener must not end the session or stop the timer.
+          this.#logger.warn(`failed to send listener snapshot to ${target}: ${formatError(error)}`);
+        }
+      }
+      this.#logger.debug(
+        `listener snapshots sent (listeners=${sent}, bytes=${payload.byteLength}, seq=${seq})`,
+      );
+    } finally {
+      this.#listenerSnapshotInFlight = false;
+    }
+  }
+
   #snapshotPayloadLimit(): number {
     // SNAPSHOT_TO: 1 type + 1 targetLen + target + 8 seq bytes. Reserve room
     // for the longest legal client id.
@@ -1111,6 +1229,8 @@ class HostSession {
       clearTimeout(this.#snapshotTimer);
       this.#snapshotTimer = null;
     }
+    this.#stopListenerTimer();
+    this.#listeners.clear();
     if (this.#relayBackpressureTimer !== null) {
       clearInterval(this.#relayBackpressureTimer);
       this.#relayBackpressureTimer = null;

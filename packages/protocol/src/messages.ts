@@ -43,7 +43,7 @@ export const TunnelCapabilitySchema = z.looseObject({
 });
 
 export const ListenerCapabilitySchema = z.looseObject({
-  /** Expected v1.1 values include `snapshot-only` and `safe-boundary`. */
+  /** v1.1 value: `snapshot-only`; `safe-boundary` remains reserved. */
   modes: z.array(z.string().min(1)).optional(),
 });
 
@@ -81,7 +81,7 @@ export const CapabilitiesSchema = z.looseObject({
   snapshot: SnapshotCapabilitySchema.optional(),
   /** Reserved for v1.1; ignored by v1. */
   tunnel: TunnelCapabilitySchema.optional(),
-  /** Reserved for v1.1; ignored by v1. */
+  /** v1.1 listener modes (`snapshot-only`); ignored by pre-v1.1 relays. */
   listener: ListenerCapabilitySchema.optional(),
   /** Reserved for v1.1; ignored by v1. */
   peerRelay: PeerRelayCapabilitySchema.optional(),
@@ -192,6 +192,11 @@ export const PeerJoinedMessageSchema = z.looseObject({
   v: zV1,
   type: z.literal("peer-joined"),
   clientId: zClientId,
+  /**
+   * v1.1: role of the joining client so the host can separate viewers from
+   * read-only listeners. Absent on a v1 relay, where every peer is a viewer.
+   */
+  role: z.enum(ALL_ROLES).optional(),
   capabilities: CapabilitiesSchema.default({}),
 });
 
@@ -596,7 +601,7 @@ export interface NotImplementedReplyOptions {
 
 /**
  * Build the canonical `not_implemented` error a v1 relay returns for reserved
- * agent messages, reserved roles (`listener`), and reserved features.
+ * agent messages, pre-v1.1 `listener` connections, and reserved features.
  */
 export function createNotImplementedErrorMessage(
   options: NotImplementedReplyOptions = {},

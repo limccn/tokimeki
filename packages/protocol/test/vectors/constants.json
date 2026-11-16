@@ -11,8 +11,8 @@
     "TUNNEL_TO": 7,
     "FRAGMENT": 8
   },
-  "roles": ["host", "viewer", "observer", "agent"],
-  "reservedRoles": ["listener"],
+  "roles": ["host", "viewer", "observer", "agent", "listener"],
+  "reservedRoles": [],
   "transportModes": ["p2p-direct", "p2p-turn", "relay"],
   "transportStates": ["selecting", "ready", "failed"],
   "iceProviders": ["coturn", "static", "cloudflare", "stun"],

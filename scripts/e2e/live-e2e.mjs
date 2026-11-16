@@ -17,6 +17,8 @@
  *                            cannot see their names
  *   E2E_FLOW_CONTROL=1       pause one viewer during a 4 MiB burst and require
  *                            relay pause/resume; requires E2E_P2P_MODE=off
+ *   E2E_LISTENER=1           add `attach --listen`, require immediate/periodic
+ *                            snapshots, and prove listener input is ignored
  *   E2E_TIMEOUT_MS           default: 45000
  *   E2E_DUMP_DIR             on failure, write each process's full output here
  *
@@ -47,6 +49,7 @@ const p2pMode = process.env.E2E_P2P_MODE ?? "auto";
 const icePolicy = process.env.E2E_ICE_POLICY ?? "all";
 const secretCheck = process.env.E2E_SECRET_CHECK === "1";
 const flowControl = process.env.E2E_FLOW_CONTROL === "1";
+const listenerMode = process.env.E2E_LISTENER === "1";
 
 if (!relayUrl || !masterToken) {
   console.error("TOKIMEKI_RELAY_URL and TOKIMEKI_MASTER_TOKEN are required");
@@ -74,6 +77,7 @@ function baseEnv() {
     TOKIMEKI_SNAPSHOT_MAX_BYTES: "262144",
     TOKIMEKI_P2P: p2pMode,
     TOKIMEKI_ICE_TRANSPORT_POLICY: icePolicy,
+    ...(listenerMode ? { TOKIMEKI_LISTENER_SNAPSHOT_MS: "500" } : {}),
     TOKIMEKI_LOG_LEVEL: "debug",
   };
 }
@@ -267,6 +271,38 @@ async function main() {
   await waitFor(attach2, "SIZE=100x30", timeoutMs, "SIZE=100x30");
   pass("resize propagated to PTY and broadcast");
 
+  // v1.1 F2: a read-only listener gets snapshots but cannot influence the PTY.
+  let listener = null;
+  if (listenerMode) {
+    listener = start("listener", ["attach", "--listen"], baseEnv(), 100, 30);
+    await waitFor(listener, "TOKIMEKI_E2E_READY", timeoutMs, "listener initial snapshot");
+    pass("listener received an immediate snapshot");
+
+    const ignored = "listener-input-must-not-echo";
+    listener.child.write(`${ignored}\r`);
+    await new Promise((r) => setTimeout(r, 2_000));
+    const leaked = [host, attach1, attach2].some((state) =>
+      state.output.includes(`ECHO:${ignored}`),
+    );
+    if (leaked) {
+      throw new Error("listener input reached the shared PTY");
+    }
+    pass("listener input was ignored and never reached the PTY");
+
+    // The fixture echoes viewer input; the listener must see it in the next
+    // periodic full snapshot without sending a resync or ACK.
+    const updateMarker = "listener-periodic-e2e";
+    attach2.child.write(`${updateMarker}\r`);
+    await waitFor(attach2, `ECHO:${updateMarker}`, timeoutMs, "viewer echo for listener");
+    await waitForRecent(
+      listener,
+      `ECHO:${updateMarker}`,
+      20_000,
+      "listener periodic snapshot update",
+    );
+    pass("listener received a periodic snapshot update");
+  }
+
   if (flowControl) {
     // Stop draining attach1's stdout. Its relay reader eventually stops ACKing,
     // the relay crosses the 1 MiB unacked high-water mark, and the host pauses
@@ -384,11 +420,16 @@ async function main() {
   // the persisted host-exit replay.
   await waitFor(attach2, "host exited (code=0)", Math.min(timeoutMs, 60_000));
   await waitFor(attach3, "host exited (code=0)", Math.min(timeoutMs, 60_000));
+  if (listener !== null) {
+    await waitFor(listener, "host exited (code=0)", Math.min(timeoutMs, 60_000));
+    pass("host exit reached the read-only listener");
+  }
   pass("Ctrl-C propagated through relay to PTY and host-exited reached viewers");
 
   await waitExit(host, 15_000);
   await waitExit(attach2, 5_000);
   await waitExit(attach3, 5_000);
+  if (listener !== null) await waitExit(listener, 5_000);
   pass("host and attached viewers exited cleanly");
 }
 

@@ -116,6 +116,41 @@ describe("relay worker", () => {
     host.close();
   });
 
+  it("rejects an invalid listener header value", async () => {
+    const response = await SELF.fetch("https://relay.test/ws/listener-header", {
+      headers: {
+        Upgrade: "websocket",
+        "x-tokimeki-session": SESSION_TOKEN,
+        "x-tokimeki-listener": "yes",
+      },
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json<Record<string, unknown>>();
+    expect(body).toMatchObject({ ok: false, error: "invalid_role" });
+  });
+
+  it("rejects hello.role listener without the listener header", async () => {
+    const socket = await connectWorker("listener-role-worker", { token: SESSION_TOKEN });
+    socket.send(helloFor("listener-role-worker", "listener", "listener-1"));
+    const error = await socket.waitForType("error");
+    expect(error.code).toBe("invalid_role");
+    const closed = await socket.waitForClose();
+    expect(closed.code).toBe(4003);
+  });
+
+  it("lets the master token win over the listener header", async () => {
+    const sessionId = "listener-header-host";
+    const socket = await connectWorker(sessionId, {
+      master: MASTER_TOKEN,
+      token: SESSION_TOKEN,
+      listener: true,
+    });
+    socket.send(helloFor(sessionId, "host", "host-1"));
+    const welcome = await socket.waitForType("welcome");
+    expect(welcome.hostOnline).toBe(true);
+    socket.close();
+  });
+
   it("does not create relay tables for an anonymous pending socket", async () => {
     const sessionId = "no-schema-pending";
     const socket = await connectDirect(sessionId, { role: "viewer" });

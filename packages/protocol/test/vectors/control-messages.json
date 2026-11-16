@@ -45,6 +45,23 @@
       }
     },
     {
+      "name": "hello-listener",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "listener",
+        "session": "demo-session",
+        "clientId": "listener-1",
+        "protocolVersion": 1,
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": { "modes": ["relay"] },
+          "snapshot": { "formats": ["xterm-serialize"], "maxBytes": 262144 },
+          "listener": { "modes": ["snapshot-only"] }
+        }
+      }
+    },
+    {
       "name": "welcome-basic",
       "message": {
         "v": 1,
@@ -93,7 +110,18 @@
         "v": 1,
         "type": "peer-joined",
         "clientId": "viewer-1",
+        "role": "viewer",
         "capabilities": { "transports": { "modes": ["p2p-direct", "relay"] } }
+      }
+    },
+    {
+      "name": "peer-joined-listener",
+      "message": {
+        "v": 1,
+        "type": "peer-joined",
+        "clientId": "listener-1",
+        "role": "listener",
+        "capabilities": { "listener": { "modes": ["snapshot-only"] } }
       }
     },
     {

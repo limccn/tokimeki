@@ -1,9 +1,10 @@
 # Tokimeki Wire Protocol v1
 
 > 状态：v1 实现完成（Phase 6）；v1.1 F0 已在 v1 基线上实现（`FRAGMENT 0x08`、
-> P2P 直发快照、ICE 到期自动刷新、provider 重试一次），单测与 relay 测试通过。
+> P2P 直发快照、ICE 到期自动刷新、provider 重试一次），v1.1 F2 已实现只读
+> `listener`（snapshot-only）角色；单测与 relay 测试通过。
 > 生产部署、跨 NAT/TURN 与真实 TUI 的验收记录见 `docs/deployment.md` §7；wire
-> `v` 仍为 1，F0 新增项是 capability-gated 可选扩展。
+> `v` 仍为 1，F0/F2 新增项是 capability-gated 可选扩展。
 > 规范性实现：`packages/protocol`；语言无关向量：`packages/protocol/test/vectors/`。
 > 本文描述的是线上格式，不是 Node/TypeScript 实现细节。v2 Go/Rust 实现必须能仅凭本文与 golden vectors 互通。
 
@@ -12,7 +13,11 @@
 - 当前协议版本：`PROTOCOL_VERSION = 1`，JSON 控制消息使用顶层 `"v": 1`。
 - v1 提供：JSON 控制消息、二进制终端帧、WebSocket 中继与 WebRTC DataChannel 共用的字节格式、会话握手、ICE 配置下发、输出序号与快照恢复、错误/关闭码。
 - v1.1 F0 可选扩展：`FRAGMENT`（0x08）、`transports.fragmentation` capability、P2P 直发 `SNAPSHOT`。这些只在双方声明/协商后使用；未协商时保持 v1 行为。
-- v1 只定义、不实现：`TUNNEL`/`TUNNEL_TO` 应用层隧道、`listener` 角色、`tunnel`/`listener`/`peerRelay` capabilities、Agent 运行时。收到这些预留项时返回 `not_implemented`。
+- v1.1 F2 可选扩展：`listener` 角色（只读、snapshot-only）与 `listener.modes: ["snapshot-only"]`
+  capability。旧于 v1.1 的 relay 收到 `listener` hello 仍返回 `not_implemented`；v1.1
+  客户端必须明确报错退出，不得静默降级为 viewer。
+- v1 只定义、不实现：`TUNNEL`/`TUNNEL_TO` 应用层隧道、`tunnel`/`peerRelay`
+  capabilities、Agent 运行时。收到这些预留项时返回 `not_implemented`。
 - 破坏性变更必须提升 `v`。向后兼容的新增字段可以保留 `v: 1`；旧实现必须忽略未知字段。
 - 线上格式只使用：字节、UTF-8、大端 `u64`、JSON。不得出现 Node `Buffer`、TypeScript 特有类型或平台相关序列化。
 
@@ -44,7 +49,7 @@
 | `OUTPUT` | `0x02` | host → viewer | `[0x02][seq:u64BE][payload...]` |
 | `SNAPSHOT` | `0x03` | host → viewer（P2P 直发） | `[0x03][seq:u64BE][ANSI snapshot...]` |
 | `RESYNC_REQ` | `0x04` | viewer → host | `[0x04]` |
-| `SNAPSHOT_TO` | `0x05` | host → relay → 指定 viewer | `[0x05][targetLen:u8][targetId UTF-8][seq:u64BE][ANSI snapshot...]` |
+| `SNAPSHOT_TO` | `0x05` | host → relay → 指定 viewer 或 listener | `[0x05][targetLen:u8][targetId UTF-8][seq:u64BE][ANSI snapshot...]` |
 | `TUNNEL` | `0x06` | 预留 v1.1 | `[0x06][opaque tunnel record...]` |
 | `TUNNEL_TO` | `0x07` | 预留 v1.1 | `[0x07][targetLen:u8][targetId UTF-8][opaque tunnel record...]` |
 | `FRAGMENT` | `0x08` | P2P 双向（F0 仅 host → viewer） | `[0x08][messageId:u32BE][fragIndex:u16BE][fragCount:u16BE][totalBytes:u32BE][chunk...]` |
@@ -57,6 +62,7 @@
 - `targetId`：UTF-8 字符串，必须是合法 Unicode/UTF-8。v1 的目标是客户端 ID，形状见 §5 的 ID 正则，因此总是 ASCII 且 ≤64 字节。
 - `RESYNC_REQ` 必须恰好 1 字节；带任何 payload 都是 `invalid_frame`。
 - `SNAPSHOT` 仅用于 P2P DataChannel 直发；v1.1 F0 在 `transports.fragmentation` 协商成功后用它承载切换/resync 快照。relay 路径仍拒绝裸 `SNAPSHOT`。
+- `SNAPSHOT_TO` 的 target 可以是 relay viewer，也可以是只读 listener。viewer 的快照进入 ACK/背压路径；listener 的快照不产生 ACK、不改变 `unackedBytes`/`droppedBytes`，只会被下一次周期快照覆盖。
 - `FRAGMENT` header 固定 13 字节：`messageId` 为非 0 u32；`fragIndex` 从 0 开始；`fragCount` 为 1..65 且必须等于 `ceil(totalBytes / 16371)`；`totalBytes` 是原始完整帧长度（包含原帧 type byte），范围 1..1 MiB；除最后一片外每片 payload 恰好 16371 字节，最后一片为余数。重组后的帧不得仍是 `FRAGMENT`（禁止嵌套）。
 - `FRAGMENT` 只允许在已协商分片的 P2P DataChannel 上发送；relay 收到时返回 `invalid_frame`，不得转发。
 - `TUNNEL`/`TUNNEL_TO` 在 v1 必须能被识别和路由，但不得执行任何隧道行为；收到时返回 `error{code:"not_implemented"}`，不得静默丢弃或转发。
@@ -105,7 +111,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `welcome` | DO → client | `session`, `hostOnline`, `iceProvider`, `sessionTtlSeconds` | `protocolVersion`（默认 1）、`clients`（默认 `[]`）、`iceServers`（默认 `[]`）、`iceExpiresAt`、`transportPolicy`（默认 `all`）、`capabilities` |
 | `ice-refresh` | client → DO | 无 | `provider` |
 | `ice` | DO → client | `iceServers`, `iceProvider` | `iceExpiresAt` |
-| `peer-joined` | DO → host | `clientId` | `capabilities`（默认 `{}`） |
+| `peer-joined` | DO → host | `clientId` | `role`（v1.1；缺省视为 viewer）、`capabilities`（默认 `{}`） |
 | `peer-left` | DO → host | `clientId` | — |
 | `signal` | host ↔ viewer（经 DO） | `to`, `from`, `kind`, `payload` | — |
 | `transport` | client → host/DO | `clientId`, `mode`, `state` | `reason`, `via`（预留） |
@@ -119,11 +125,15 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `ping` | 双向 | 无 | `ts`（epoch ms） |
 | `pong` | 双向 | 无 | `ts`（epoch ms） |
 | `error` | DO → client | `code`, `message` | `requestId`, `retryable`, `details`, `exitCode`, `signal` |
-| `host-exited` | host → DO → viewers | 无 | `exitCode`, `signal` |
+| `host-exited` | host → DO → clients（含 listener） | 无 | `exitCode`, `signal` |
 
 字段细节：
 
-- `hello.role`：`host`、`viewer`、`observer`、`agent`，以及 v1.1 预留的 `listener`。v1 relay 对 `listener` 返回 `not_implemented`，不授予任何终端路由。
+- `hello.role`：`host`、`viewer`、`observer`、`agent`、`listener`。v1.1 relay 激活
+  `listener`（只读、snapshot-only）；更早的 v1 relay 对 `listener` 返回
+  `not_implemented`，不授予任何终端路由。`listener` 的 `cols`/`rows` 不参与 PTY 尺寸协商。
+- `peer-joined.role`：v1.1 relay 填 `host`/`viewer`/`observer`/`agent`/`listener`；
+  pre-v1.1 relay 不带该字段，host 必须按 viewer 处理（向后兼容）。
 - `hello.cols` / `hello.rows` / `resize.cols` / `resize.rows`：整数，范围 `1..10000`，且 `cols * rows <= 4_000_000`。
 - `capabilities`：见 §4.4。
 - `welcome.iceProvider`：`coturn`、`static`、`cloudflare`、`stun`。
@@ -155,7 +165,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `transports` | `modes: string[]`, `fragmentation?` | v1 使用 `modes`；v1.1 F0 使用 `fragmentation: {version, maxFrameBytes, maxMessageBytes}` |
 | `snapshot` | `formats: string[]`, `maxBytes` | v1 使用；预期格式含 `xterm-serialize`、`raw-ring` |
 | `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `maxFrameSize` | v1.1 预留，v1 只透传/忽略 |
-| `listener` | `modes: string[]` | v1.1 预留，预期含 `snapshot-only`、`safe-boundary` |
+| `listener` | `modes: string[]` | v1.1 F2 使用 `snapshot-only`；`safe-boundary` 仍预留 |
 | `peerRelay` | `version`, `roles: string[]` | v1.1 预留 |
 
 所有 capability 的已知字段都是可选的，未知字段/未知值不得导致连接失败。v1 relay 不协商未知 capability，也不得据此改变行为。
@@ -163,6 +173,11 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 F0 仅在 `transports.fragmentation` 满足 `version === 1`、`maxFrameBytes >= 1 MiB`、
 `maxMessageBytes === 16384` 时视为支持；不匹配按“不支持分片”处理，回退 relay
 快照。
+
+F2 的 listener 只声明 `transports.modes: ["relay"]` 与
+`listener.modes: ["snapshot-only"]`，不声明分片。v1.1 relay 在
+`welcome.capabilities.listener.modes` 中声明 `snapshot-only`，供客户端判断 relay
+是否支持 listener；capability 不匹配只影响提示，不改变 relay 路由。
 
 ### 4.5 结构类型
 
@@ -210,15 +225,19 @@ F0 仅在 `transports.fragmentation` 满足 `version === 1`、`maxFrameBytes >= 
 | 角色 | URL/头 |
 |---|---|
 | host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Master: <master token>`，`X-Tokimeki-Session: <session token>` |
-| viewer/observer/agent | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>` |
+| viewer | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>` |
+| listener（v1.1） | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`，`X-Tokimeki-Listener: 1` |
+| observer/agent | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`（DO 支持，Worker 入口保留） |
 
-角色不放在 URL 中：Worker 依据 `X-Tokimeki-Master` 常量时间校验结果设置内部角色（host 或非 host），并由 `hello.role` 与认证角色交叉校验。URL 只承载公开的会话名。v1 Worker 实际只分配 `host` / `viewer` 两个入口角色；`observer` / `agent` 的 DO 路由、SQLite 表与协议 schema 已实现并通过直连测试，但生产 Worker 尚未提供选择这两个角色的入口，属于为后续协调层保留的能力；`listener` 仍返回 `not_implemented`。
+角色不放在 URL 中：Worker 依据认证头设置内部角色，并由 `hello.role` 与认证角色交叉校验。URL 只承载公开的会话名。v1.1 Worker 分配 `host` / `viewer` /
+`listener` 三个入口角色；`X-Tokimeki-Master` 优先，存在时忽略
+`X-Tokimeki-Listener`。`observer` / `agent` 的 DO 路由、SQLite 表与协议 schema 已实现并通过直连测试，但生产 Worker 尚未提供选择这两个角色的入口，属于为后续协调层保留的能力。更早的 v1 relay 对 `listener` 返回 `not_implemented`。
 
 规则：
 
 1. `session` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`。
-2. Worker 校验 host 的 master token（常量时间比较）、session 格式，覆盖内部 `x-tokimeki-role` 头，并移除客户端自带 master header 后再转发到 DO。
-3. DO 首次创建会话时保存 `sha256(sessionToken)`；已有会话校验 hash。viewer/observer/agent 不做 master 校验。
+2. Worker 校验 host 的 master token（常量时间比较）、session 格式，覆盖内部 `x-tokimeki-role` 头，并移除客户端自带 master 与 listener 头后再转发到 DO。
+3. DO 首次创建会话时保存 `sha256(sessionToken)`；已有会话校验 hash。viewer/observer/agent/listener 不做 master 校验。
 4. 认证失败返回 HTTP 401 或 `error{code:"unauthorized"}` 后关闭。
 5. WebSocket 打开后，客户端第一条消息必须是 `hello`。`hello.session` 必须等于 URL session，`hello.role` 必须等于认证角色；`protocolVersion` 若提供必须为 1，缺省按 1 处理。
 6. `hello.clientId` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`，且在同一会话内唯一；重复活跃 clientId 返回 `duplicate_client_id`。例外：host token 校验通过后，host 可替换同 clientId 的陈旧 host socket；若同 clientId 被非 host 占用且当前没有其他在线 host，host 接管并关闭占用者（host-wins）。viewer 默认用 `crypto.randomUUID()` 生成。
@@ -227,6 +246,7 @@ F0 仅在 `transports.fragmentation` 满足 `version === 1`、`maxFrameBytes >= 
 9. 每个连接必须携带非空 `X-Tokimeki-Session`；缺失/空值在 Worker 层直接返回 HTTP 401，不会到达 DO。
 10. `X-Tokimeki-Master` 不得与 `X-Tokimeki-Session` 相同；相等时 Worker 返回 HTTP 401。
 11. DO 对非空 token 仍做防御性校验（空 token → 401），并把每个会话的 OPEN socket 数限制为 `maxClients * 2`（含 pending；超限 HTTP 429）。schema 只在该会话首次 host `hello` 时创建。
+12. listener 仍计入 `maxClients`，并额外受 `TOKIMEKI_MAX_LISTENERS`（默认 8）限制；超限返回 `session_full` 并关闭。listener 必须先有 host 会话，不能创建 schema。
 
 ### 5.2 标准时序
 
@@ -248,7 +268,11 @@ viewer                     relay / DO                         host
 
 - 认证失败、会话满、非法 ID：发送 `error` 后关闭，尽量使用对应关闭码（§8）。
 - `unsupported_version`：说明对端版本不受支持；客户端不得自动降级到 v1 以外的语义。
-- `listener` 角色：v1 返回 `error{code:"not_implemented"}`，不得授予路由；可关闭连接。
+- `listener` 角色：v1.1 relay 接受只读 listener；更早的 v1 relay 返回
+  `error{code:"not_implemented"}`（关闭码 4005），不得静默降级为 viewer。
+- listener 的只读边界：发送 `INPUT`/`RESYNC_REQ`/`resize`/`resync`/`ack`/`signal`/
+  `transport` 返回 `invalid_role`，relay 不转发给 host；listener 不接收 `OUTPUT`，
+  不参与 ACK、`unackedBytes`、`droppedBytes`、pause 或 slow-consumer 判定。
 - 未知 `agent.*` 消息：返回 `not_implemented`，通常**不关闭**连接，允许同一连接继续发送 v1 消息。
 
 ## 6. 输出序号、确认、重连与快照
@@ -274,6 +298,10 @@ viewer                     relay / DO                         host
    lastSeq` 的旧快照，避免 fallback/retry 时旧快照晚到导致屏幕回退。
 5. 恢复 `> N` 的增量。超过 `MAX_FRAME_BYTES` 或客户端配置的快照上限时，host 必须降级（截断 scrollback/回退 ring）而不是发送损坏的 ANSI。
 6. 终端尺寸单轴 `1..10000`，且 `cols * rows <= MAX_TERMINAL_CELLS = 4_000_000`；relay 对每个 viewer 的 resize 做 250ms 节流并保留 trailing 最新尺寸，host 在应用前再做一次乘积 guard。
+7. listener 不走 viewer 的暂停/切换路径：host 在 listener 加入后立即发送一次全量
+   `SNAPSHOT_TO`，之后按 `TOKIMEKI_LISTENER_SNAPSHOT_MS`（默认 1000ms，250..60000）
+   周期发送；不暂停 PTY、不增加 viewer 序号/ACK 状态。listener 清屏后应用快照，
+   忽略 `seq < lastSeq` 的旧快照；周期快照自然覆盖丢失的中间画面。
 
 ### 6.3 背压
 
@@ -282,6 +310,9 @@ viewer                     relay / DO                         host
 - `SNAPSHOT_TO` 是 viewer 从 relay 丢帧 gap 恢复的唯一边界，**必须穿透暂停状态送达**。否则当 host 在暂停期间结束输出时，viewer 的 `resync` 快照会被丢弃，且之后没有新 `OUTPUT` 再次触发 `resync`，viewer 将永久卡在 gap。快照仍计入未确认字节数与硬上限；其 `ack` 通过正常低水位路径解除暂停。
 - P2P 切换的 DC `SNAPSHOT` 不产生 relay ACK；relay 的 pause 由 host 的 `transport{state:"ready"}` 清除（SessionDO 已有行为）。若之后回退 relay，host 发送的 `SNAPSHOT_TO` 仍按上一条 ACK 并清除之前的未确认字节。
 - `ack` 是应用层流控；WebSocket 层还可以使用文本 `ping`/`pong` 自动响应。
+- listener 不参与背压：relay 不为其记录 `pendingAcks`/`unackedBytes`/`droppedBytes`，
+  不发送 `pause`/`resume`，也不会以 `slow_consumer` 关闭 listener。listener socket
+  缓冲过高时 relay 只丢弃该次 `SNAPSHOT_TO`，等待下一次周期快照。
 - `error{code:"slow_consumer"}` 表示客户端长期不确认，relay 可关闭该连接；关闭码 `4000`。
 
 ## 7. 传输选择与 ICE
@@ -296,7 +327,7 @@ viewer                     relay / DO                         host
 
 默认选择顺序：`p2p-direct` → `p2p-turn`（coturn 优先，Cloudflare TURN 兜底）→ `relay`。
 
-客户端 `TOKIMEKI_P2P=off` 时不发起 P2P，直接使用 `relay`。`TOKIMEKI_ICE_TRANSPORT_POLICY=relay` 强制只使用 TURN candidate（测试用）；没有可用 TURN 时 P2P 会在超时后回退 relay。
+客户端 `TOKIMEKI_P2P=off` 时不发起 P2P，直接使用 `relay`。`TOKIMEKI_ICE_TRANSPORT_POLICY=relay` 强制只使用 TURN candidate（测试用）；没有可用 TURN 时 P2P 会在超时后回退 relay。listener 始终使用 relay，不参与 P2P 协商。
 
 ### 7.2 ICE 配置
 
@@ -413,8 +444,8 @@ Envelope：
 以下内容在 v1 只保留名称/号码，不实现行为：
 
 1. **应用层隧道**：`TUNNEL 0x06`、`TUNNEL_TO 0x07` 以及 `0x09..0x7F` 扩展区间。`0x08` 已在 v1.1 F0 分配给 `FRAGMENT`（capability-gated P2P 分片，relay 拒绝）。v1 relay 对 0x06/0x07 返回 `not_implemented`；其他未知字节按 `unknown_frame_type` 处理。v1.1 才会冻结 ARQ/FEC/AEAD 布局、`txSeq`/`streamSeq` 与密钥威胁模型。
-2. **listener 角色**：`hello.role = "listener"`。v1 返回 `not_implemented`；v1.1 才实现只读、snapshot-only、不参与 resize/输入/ack 的语义。
-3. **Capabilities**：`tunnel`、`listener`、`peerRelay` 预留；`transports`、`snapshot` 在 v1 可用；`transports.fragmentation` 在 v1.1 F0 可用（仅 P2P 大帧分片/直发快照）。未知 capability 必须忽略，不能拒绝连接。
+2. **listener 角色**：v1.1 F2 已激活 `hello.role = "listener"`（只读、snapshot-only、不参与 resize/输入/ack/背压/P2P）。更早的 v1 relay 返回 `not_implemented`。`safe-boundary`、listener 增量输出与 listener P2P 仍预留。
+3. **Capabilities**：`tunnel`、`peerRelay` 预留；`transports`、`snapshot`、`listener`（`snapshot-only`）在 v1.1 可用；`transports.fragmentation` 在 v1.1 F0 可用（仅 P2P 大帧分片/直发快照）。未知 capability 必须忽略，不能拒绝连接。
 4. **transport.via**：`host`、`peer:<id>`、`relay` 预留，v1 可忽略。
 5. v1.1 新增控制消息（如 `tunnel.*`、`listener.*`）时，v1 relay 应识别预留命名空间并返回 `not_implemented`，而不是静默丢弃。
 
@@ -426,7 +457,7 @@ Envelope：
 |---|---|
 | `constants.json` | 版本、帧类型值、角色、传输模式、provider、resize policy、错误码、关闭码、限制、正则 |
 | `frames.json` | 每种二进制帧至少一个合法 hex（含 v1.1 `FRAGMENT`）；含空 payload、u64 最大安全值、64 字节 target、非法 fragment header 等边界；`invalid` 数组给出错误码 |
-| `control-messages.json` | 全部 19 种 v1 控制消息 + 未知 `agent.*` + `not_implemented` 回复 |
+| `control-messages.json` | 全部 19 种 v1 控制消息（含 v1.1 listener hello 与带 `role` 的 `peer-joined`）+ 未知 `agent.*` + `not_implemented` 回复 |
 | `handshake.json` | hello → welcome → ice-refresh → ice 的完整 transcript |
 
 测试入口：`packages/protocol/src/goldens.test.ts`：
@@ -452,5 +483,6 @@ npm test -- packages/protocol
 - 终端 payload 不得被 JSON 化、按行拆分或做文本转码；必须原样传递字节。
 - 终端数据依赖传输层加密（WSS/WebRTC DTLS）；v1 不提供应用层 E2E 加密。v1.1 隧道密钥模型未定，默认不得宣称 relay-blind。
 - v1.1 F0 使用 capability-gated `FRAGMENT 0x08` 与 P2P `SNAPSHOT`；未声明分片的 v1 peer 仍走 relay 快照，不会收到 fragment。新增帧类型/可选字段保持 `v: 1`；删除字段、改变既有帧布局或语义才提升主版本。
+- v1.1 F2 将 `listener` 激活为只读 snapshot-only 角色，并新增可选 `peer-joined.role`。未带 `role` 的旧 `peer-joined` 按 viewer 处理；旧 relay 对 listener 返回 `not_implemented`，v1.1 客户端必须报错而非降级。v1.1 relay + pre-v1.1 host 时，host 会把 listener 当 viewer 处理并可能尝试被 relay 拒绝的 P2P 信令；完整 listener 服务需要 v1.1 host。新增可选字段/角色保持 `v: 1`。
 - token、TURN secret、credential、终端内容不得进入日志、错误消息、URL 或 `hello`。
 - 所有长度限制以字节计（UTF-8），除非明确写为字符。

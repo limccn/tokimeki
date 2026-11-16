@@ -133,16 +133,37 @@ describe("hello and welcome", () => {
     });
   });
 
-  it("accepts the reserved listener role and detects it as reserved", () => {
+  it("accepts listener as an active role", () => {
     const parsed = parseControlMessage({ ...minimalHello, role: "listener" });
     expect(parsed.type).toBe("hello");
     const { role } = HelloMessageSchema.parse({ ...minimalHello, role: "listener" });
     expect(role).toBe("listener");
-    expect(isReservedRole(role)).toBe(true);
-    expect(isActiveRole(role)).toBe(false);
-    expect(ROLES).toEqual(["host", "viewer", "observer", "agent"]);
-    expect(RESERVED_ROLES).toEqual(["listener"]);
+    expect(isActiveRole(role)).toBe(true);
+    expect(isReservedRole(role)).toBe(false);
+    expect(ROLES).toEqual(["host", "viewer", "observer", "agent", "listener"]);
+    expect(RESERVED_ROLES).toEqual([]);
     expect(ALL_ROLES).toContain("listener");
+  });
+
+  it("roundtrips the optional peer-joined role", () => {
+    const joined = parseControlMessage({
+      v: 1,
+      type: "peer-joined",
+      clientId: "listener-1",
+      role: "listener",
+      capabilities: { listener: { modes: ["snapshot-only"] } },
+    });
+    expect(joined.type).toBe("peer-joined");
+    if (joined.type !== "peer-joined") throw new Error("expected peer-joined");
+    expect(joined.role).toBe("listener");
+
+    const legacy = parseControlMessage({
+      v: 1,
+      type: "peer-joined",
+      clientId: "viewer-1",
+    });
+    if (legacy.type !== "peer-joined") throw new Error("expected peer-joined");
+    expect(legacy.role).toBeUndefined();
   });
 
   it("roundtrips the minimum fields through the schema and encoder", () => {

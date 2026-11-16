@@ -32,7 +32,7 @@ import { buildCapabilities } from "../transport/capabilities.js";
 import { buildNodeRtcConfig, resolveIceTransportPolicy } from "../transport/ice.js";
 import { IceConfigManager } from "../transport/ice-config.js";
 import { P2PPeer } from "../transport/p2p-peer.js";
-import { RelayClient } from "../transport/relay-client.js";
+import { RelayClient, type RelayClientOptions } from "../transport/relay-client.js";
 import { RelayTransport } from "../transport/relay-transport.js";
 import type { RelayConnectionState, RelayFatalError } from "../transport/relay-types.js";
 import { RouteSelector } from "../transport/route-selector.js";
@@ -45,6 +45,10 @@ export interface AttachSessionDeps {
   readonly stdout?: NodeJS.WriteStream;
   readonly stderr?: NodeJS.WriteStream;
   readonly platform?: NodeJS.Platform;
+  /** Test seam: replace the WebSocket relay client. */
+  readonly createClient?: (options: RelayClientOptions) => RelayClient;
+  /** Test seam: replace relay transport selection. */
+  readonly selectTransport?: (client: RelayClient) => Promise<Transport>;
 }
 
 const RESYNC_THROTTLE_MS = 500;
@@ -73,6 +77,10 @@ class AttachSession {
   readonly #stdout: NodeJS.WriteStream;
   readonly #clientId = randomUUID();
   readonly #reducer = new SeqReducer();
+  /** v1.1 read-only mode: snapshots only, no input/resize/ACK/resync/P2P. */
+  readonly #listener: boolean;
+  readonly #createClient: ((options: RelayClientOptions) => RelayClient) | null;
+  readonly #selectTransport: ((client: RelayClient) => Promise<Transport>) | null;
 
   #client: RelayClient | null = null;
   #transport: Transport | null = null;
@@ -103,6 +111,9 @@ class AttachSession {
 
   constructor(config: AttachConfig, deps: AttachSessionDeps) {
     this.#config = config;
+    this.#listener = config.role === "listener";
+    this.#createClient = deps.createClient ?? null;
+    this.#selectTransport = deps.selectTransport ?? null;
     this.#iceTransportPolicy = config.iceTransportPolicy;
     this.#logger = deps.logger;
     this.#stdin = deps.stdin ?? process.stdin;
@@ -126,33 +137,46 @@ class AttachSession {
     this.#interactive = this.#stdin.isTTY === true && this.#stdout.isTTY === true;
     this.#installLocalTerminal();
 
-    const client = new RelayClient({
+    const localSize = this.#localSize();
+    const clientOptions: RelayClientOptions = {
       url: this.#config.websocketUrl,
       headers: {
         "X-Tokimeki-Session": this.#config.sessionToken,
+        ...(this.#listener ? { "X-Tokimeki-Listener": "1" } : {}),
       },
-      role: "viewer",
+      role: this.#config.role,
       session: this.#config.session,
       clientId: this.#clientId,
-      cols: this.#localSize().cols,
-      rows: this.#localSize().rows,
+      // Listeners must not drive PTY sizing (and hello dims would be ignored
+      // by the relay anyway); omit them entirely.
+      ...(this.#listener ? {} : { cols: localSize.cols, rows: localSize.rows }),
       heartbeatSeconds: this.#config.heartbeatSeconds,
-      capabilities: buildCapabilities({ p2p: this.#config.p2p === "auto" }),
+      capabilities: buildCapabilities({
+        p2p: this.#config.p2p === "auto" && !this.#listener,
+        listener: this.#listener,
+      }),
       logger: this.#logger,
-    });
+    };
+    const client =
+      this.#createClient === null
+        ? new RelayClient(clientOptions)
+        : this.#createClient(clientOptions);
     this.#client = client;
     client.onWelcome((welcome) => this.#handleWelcome(welcome));
     client.onMessage((message) => this.#handleControl(message));
     client.onState((state) => this.#handleState(state));
     client.onFatal((error) => this.#handleFatal(error));
 
-    const selector = new RouteSelector({
-      p2p: this.#config.p2p,
-      logger: this.#logger,
-      createRelayTransport: () => new RelayTransport(client),
-    });
-    void selector
-      .select()
+    const selectTransport =
+      this.#selectTransport ??
+      ((relayClient: RelayClient) =>
+        new RouteSelector({
+          // Listeners never attempt P2P; their base transport is the relay.
+          p2p: this.#listener ? "off" : this.#config.p2p,
+          logger: this.#logger,
+          createRelayTransport: () => new RelayTransport(relayClient),
+        }).select());
+    void selectTransport(client)
       .then((transport) => {
         this.#transport = transport;
         transport.onFrame((bytes) => this.#handleFrame(bytes));
@@ -181,6 +205,14 @@ class AttachSession {
       if (!this.#screenActive) return;
       const data = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
       if (data.byteLength === 0) return;
+      if (this.#listener) {
+        // A listener is read-only. Ctrl-C (0x03) only stops this local
+        // listener; every other keystroke is ignored and never reaches the PTY.
+        if (data.includes(0x03)) {
+          this.#finish(0, "listener stopped");
+        }
+        return;
+      }
       try {
         const frame = encodeFrame({ type: "input", payload: data });
         // Control-plane frames stay on the relay; terminal input prefers the
@@ -296,7 +328,7 @@ class AttachSession {
   }
 
   #sendResize(): void {
-    if (this.#closing) return;
+    if (this.#closing || this.#listener) return;
     const size = this.#localSize();
     this.#client?.sendControl({
       v: PROTOCOL_VERSION,
@@ -365,6 +397,8 @@ class AttachSession {
         }
         return;
       case "signal": {
+        // Listeners never participate in P2P signaling.
+        if (this.#listener) return;
         if (message.kind === "offer") {
           // A new offer means the host started a new P2P attempt (initial
           // switch or the one-shot retry). Silently drop any old peer so a
@@ -378,6 +412,8 @@ class AttachSession {
         return;
       }
       case "transport": {
+        // Listener transport is fixed to the relay; ignore any update.
+        if (this.#listener) return;
         if (message.clientId !== this.#clientId) return;
         this.#handleTransportUpdate(message.mode, message.state, message.reason);
         return;
@@ -388,9 +424,19 @@ class AttachSession {
       case "ice-refresh":
         this.#logger.debug("ice refresh requested");
         return;
+      case "host": {
+        // A restarted host process resets its output sequence to 0. A listener
+        // that stayed connected across that restart would otherwise reject
+        // every new snapshot as stale (`seq < lastSeq`) and freeze on the old
+        // screen, so rebase on the next snapshot when a host comes online.
+        if (this.#listener && message.online) {
+          this.#logger.debug("host online; resetting listener snapshot sequence");
+          this.#reducer.reset();
+        }
+        return;
+      }
       case "peer-joined":
       case "peer-left":
-      case "host":
       case "presence":
       case "resync":
       case "ack":
@@ -407,7 +453,7 @@ class AttachSession {
   }
 
   #startViewerPeer(hostClientId: string): void {
-    if (this.#config.p2p === "off" || this.#closing) return;
+    if (this.#config.p2p === "off" || this.#closing || this.#listener) return;
     if (this.#peer !== null) return;
     const peer = new P2PPeer({
       label: `viewer:${hostClientId}`,
@@ -560,6 +606,9 @@ class AttachSession {
         this.#applySnapshot(frame.seq, frame.payload, false);
         return;
       case "output":
+        // Snapshot-only: a listener must never apply incremental output even
+        // if a relay bug or a stale server sends it.
+        if (this.#listener) return;
         this.#applyOutput(frame.seq, frame.payload, viaRelay);
         return;
       case "tunnel":
@@ -579,6 +628,9 @@ class AttachSession {
    * a healthy viewer is eventually dropped as a slow consumer.
    */
   #sendAck(seq: number): void {
+    // Listeners are outside the relay's ACK/backpressure accounting. A
+    // snapshot ACK from a listener would be rejected and must never be sent.
+    if (this.#listener) return;
     try {
       this.#client?.sendControl({ v: PROTOCOL_VERSION, type: "ack", seq: toU64String(seq) });
     } catch (error) {
@@ -620,6 +672,9 @@ class AttachSession {
   }
 
   #requestResync(): void {
+    // Listeners recover from the host's next periodic snapshot; they never
+    // send resync requests.
+    if (this.#listener) return;
     const now = Date.now();
     if (now - this.#lastResyncAt < RESYNC_THROTTLE_MS) return;
     this.#lastResyncAt = now;

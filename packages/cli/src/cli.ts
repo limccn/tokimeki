@@ -193,10 +193,10 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
     }
   };
 
-  const attachAction = async (): Promise<number> => {
+  const attachAction = async (listener: boolean): Promise<number> => {
     let config: AttachConfig;
     try {
-      config = loadAttachConfig(env);
+      config = loadAttachConfig(env, { listener });
     } catch (error) {
       printError(error);
       return 2;
@@ -298,8 +298,9 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
   program
     .command("attach")
     .description("Attach to a hosted session")
-    .action(async () => {
-      exitCode = await attachAction();
+    .option("--listen", "attach as a read-only listener (snapshot-only)")
+    .action(async (options: { listen?: boolean }) => {
+      exitCode = await attachAction(options.listen === true);
     });
 
   program

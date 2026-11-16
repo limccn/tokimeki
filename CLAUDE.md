@@ -49,14 +49,20 @@ assets/              README icon
   host; constant-time comparisons; master token equal to session token is
   rejected; master header removed before forwarding to the DO.
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
-  host/viewer/observer/agent; viewer `INPUT`/`RESYNC_REQ` to host; host
+  host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
-  reserved `listener`/`TUNNEL` return `not_implemented`; lazy schema only on
+  reserved `TUNNEL` returns `not_implemented`; lazy schema only on
   authenticated host hello.
+- Listeners are read-only snapshot-only clients: `X-Tokimeki-Listener: 1` at
+  the Worker selects the role (master token still wins as host), they are
+  capped by `TOKIMEKI_MAX_LISTENERS` (default 8) on top of `maxClients`, receive
+  relay `SNAPSHOT_TO` only, and are excluded from `OUTPUT`, ACK/unacked bytes,
+  pause/resume, slow-consumer, resize, and P2P. INPUT/resize/resync/ack/signal/
+  transport from a listener returns `invalid_role`.
 - Flow control: ACK-driven `unackedBytes` high water 1 MiB, low water 256 KiB,
   hard limit 8 MiB, ACK ring 256; `pause`/`resume` control messages; slow
-  consumers close with code 4000. Resize is throttled (250 ms trailing) and
-  resync is throttled (500 ms).
+  consumers close with code 4000. Listeners never enter this accounting.
+  Resize is throttled (250 ms trailing) and resync is throttled (500 ms).
 - Snapshots: host sends `SNAPSHOT_TO` at `seq=N`, then resumes `>N`; viewers
   clear and apply the snapshot; P2P switch snapshots also use relay
   `SNAPSHOT_TO` in v1.
@@ -69,12 +75,16 @@ assets/              README icon
 
 ## CLI notes
 
-- `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach`, `doctor`; all
-  runtime config comes from env (`.env.example` is the reference).
+- `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach` (`--listen` for
+  read-only listener mode), `doctor`; all runtime config comes from env
+  (`.env.example` is the reference).
 - `host/`: node-pty, Windows ConPTY, headless xterm mirror, mode tracker,
-  resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup.
+  resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup, and a
+  separate periodic listener snapshot timer (`TOKIMEKI_LISTENER_SNAPSHOT_MS`,
+  default 1000 ms) that never pauses the PTY.
 - `attach/`: raw terminal, alternate screen, snapshot apply, seq reducer,
-  reconnect/resync, terminal restore.
+  reconnect/resync, terminal restore; listener mode sends no input/resize/ACK/
+  resync/P2P and Ctrl-C exits only the local listener.
 - `transport/`: relay client, P2P peer (node-datachannel), fragmentation,
   ICE config/refresh, P2P retry policy, route selector, ICE/TURN config, signal
   limits.
@@ -133,8 +143,9 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   interaction acceptance. Production edge hibernation/TTL long-run remains
   environment-dependent.
 - v1.1 F0 adds capability-gated `FRAGMENT 0x08` DataChannel fragmentation,
-  P2P direct snapshots, automatic ICE refresh, and one provider retry. There is
-  still no listener/tunnel runtime; those remain later v1.1 roadmap items.
+  P2P direct snapshots, automatic ICE refresh, and one provider retry. v1.1 F2
+  adds the read-only snapshot-only `listener` role; there is still no tunnel
+  runtime or listener incremental/safe-boundary output.
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
   tests (delivery worked); link-quality work (selective-repeat/ARQ) is future.
 

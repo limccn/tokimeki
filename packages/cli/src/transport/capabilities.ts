@@ -9,6 +9,8 @@ export interface CapabilityOptions {
   /** Advertise the P2P transports this process can actually negotiate. */
   readonly p2p: boolean;
   readonly snapshotMaxBytes?: number;
+  /** Advertise read-only listener support (relay-only, snapshot-only). */
+  readonly listener?: boolean;
 }
 
 /**
@@ -27,11 +29,14 @@ export function supportsFragmentation(capabilities: Capabilities | undefined): b
 
 /** Capabilities advertised in `hello`. */
 export function buildCapabilities(options: CapabilityOptions): Capabilities {
+  // Listeners are relay-only by design: they never negotiate P2P, so they
+  // advertise the relay transport and the snapshot-only listener mode.
+  const p2p = options.p2p && options.listener !== true;
   return {
     protocolVersion: PROTOCOL_VERSION,
     transports: {
-      modes: options.p2p ? ["relay", "p2p-direct", "p2p-turn"] : ["relay"],
-      ...(options.p2p
+      modes: p2p ? ["relay", "p2p-direct", "p2p-turn"] : ["relay"],
+      ...(p2p
         ? {
             fragmentation: {
               version: 1,
@@ -45,5 +50,6 @@ export function buildCapabilities(options: CapabilityOptions): Capabilities {
       formats: ["xterm-serialize", "raw-ring"],
       ...(options.snapshotMaxBytes === undefined ? {} : { maxBytes: options.snapshotMaxBytes }),
     },
+    ...(options.listener === true ? { listener: { modes: ["snapshot-only"] } } : {}),
   };
 }

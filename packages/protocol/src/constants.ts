@@ -10,33 +10,38 @@
 export const PROTOCOL_VERSION = 1;
 
 /**
- * Active v1 connection roles.
+ * Active connection roles.
  *
  * - `host` owns the PTY and is the only role allowed to send terminal output.
  * - `viewer` is a full shared-control client (input + output).
  * - `observer` watches control-plane / agent events but does not receive PTY data.
  * - `agent` is reserved for a future agent coordinator transport.
+ * - `listener` is the v1.1 snapshot-only read-only role. It never sends input,
+ *   resize, resync, ACKs, or signals, and only receives relay `SNAPSHOT_TO`
+ *   frames. Pre-v1.1 relays reject it with `not_implemented`.
  */
-export const ROLES = ["host", "viewer", "observer", "agent"] as const;
+export const ROLES = ["host", "viewer", "observer", "agent", "listener"] as const;
 export type Role = (typeof ROLES)[number];
 
 /**
- * Reserved v1.1 role. v1 relays must reject `listener` with a structured
- * `not_implemented` error instead of silently downgrading it.
+ * Roles reserved by a later protocol revision.
+ *
+ * Empty since v1.1 activated `listener`. Kept exported so implementations can
+ * keep a single active/reserved split and future revisions can add entries.
  */
-export const RESERVED_ROLES = ["listener"] as const;
+export const RESERVED_ROLES = [] as const;
 export type ReservedRole = (typeof RESERVED_ROLES)[number];
 
 /** Every role string accepted by the `hello` schema (active + reserved). */
 export const ALL_ROLES = [...ROLES, ...RESERVED_ROLES] as const;
 export type AnyRole = (typeof ALL_ROLES)[number];
 
-/** True for roles the v1 relay/CLI can route. */
+/** True for roles the relay/CLI can route. */
 export function isActiveRole(role: string): role is Role {
   return (ROLES as readonly string[]).includes(role);
 }
 
-/** True for roles reserved by a later protocol revision (`listener`). */
+/** True for roles reserved by a later protocol revision. */
 export function isReservedRole(role: string): role is ReservedRole {
   return (RESERVED_ROLES as readonly string[]).includes(role);
 }

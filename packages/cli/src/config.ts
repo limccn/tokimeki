@@ -56,12 +56,14 @@ export interface HostConfig extends CommonConfig {
   readonly ptySize: TerminalSize | null;
   readonly scrollbackLines: number;
   readonly snapshotMaxBytes: number;
+  readonly listenerSnapshotMs: number;
   readonly piTuiMode: PiTuiMode;
   readonly claudeBg: boolean;
 }
 
 export interface AttachConfig extends CommonConfig {
-  readonly role: "viewer";
+  /** `listener` is the v1.1 read-only snapshot-only mode (`attach --listen`). */
+  readonly role: "viewer" | "listener";
   readonly sessionToken: string;
 }
 
@@ -90,8 +92,6 @@ const V11_ENV_VARS = [
   "TOKIMEKI_ROUTE_POLICY",
   "TOKIMEKI_LAN_DISCOVERY",
   "TOKIMEKI_LAN_FANOUT",
-  "TOKIMEKI_LISTENER_SNAPSHOT_MS",
-  "TOKIMEKI_MAX_LISTENERS_PER_SESSION",
 ] as const;
 
 export const DEFAULT_HEARTBEAT_SECONDS = 25;
@@ -99,6 +99,9 @@ export const DEFAULT_SCROLLBACK_LINES = 1000;
 export const MIN_SCROLLBACK_LINES = 500;
 export const MAX_SCROLLBACK_LINES = 2000;
 export const DEFAULT_SNAPSHOT_MAX_BYTES = 262_144;
+export const DEFAULT_LISTENER_SNAPSHOT_MS = 1000;
+export const MIN_LISTENER_SNAPSHOT_MS = 250;
+export const MAX_LISTENER_SNAPSHOT_MS = 60_000;
 export const DEFAULT_TERM = "xterm-256color";
 export const DEFAULT_COLORTERM = "truecolor";
 
@@ -252,6 +255,34 @@ function parseSnapshotMax(env: NodeJS.ProcessEnv): number {
   return parseInteger("TOKIMEKI_SNAPSHOT_MAX_BYTES", raw, { min: 1024, max: 900_000 });
 }
 
+/**
+ * Listener snapshot interval (`TOKIMEKI_LISTENER_SNAPSHOT_MS`).
+ *
+ * Out-of-range values are clamped and non-integer values fall back to the
+ * default with a warning instead of aborting the host: this timer only affects
+ * the optional read-only fan-out and must not block the shared PTY session.
+ */
+function parseListenerSnapshotMs(env: NodeJS.ProcessEnv, warnings: string[]): number {
+  const raw = optionalEnv(env, "TOKIMEKI_LISTENER_SNAPSHOT_MS");
+  if (raw === undefined) return DEFAULT_LISTENER_SNAPSHOT_MS;
+  if (!/^\d+$/.test(raw.trim())) {
+    warnings.push(
+      `TOKIMEKI_LISTENER_SNAPSHOT_MS must be an integer; using ${DEFAULT_LISTENER_SNAPSHOT_MS}`,
+    );
+    return DEFAULT_LISTENER_SNAPSHOT_MS;
+  }
+  const value = Number.parseInt(raw.trim(), 10);
+  if (value < MIN_LISTENER_SNAPSHOT_MS) {
+    warnings.push(`TOKIMEKI_LISTENER_SNAPSHOT_MS is below ${MIN_LISTENER_SNAPSHOT_MS}; clamping`);
+    return MIN_LISTENER_SNAPSHOT_MS;
+  }
+  if (value > MAX_LISTENER_SNAPSHOT_MS) {
+    warnings.push(`TOKIMEKI_LISTENER_SNAPSHOT_MS is above ${MAX_LISTENER_SNAPSHOT_MS}; clamping`);
+    return MAX_LISTENER_SNAPSHOT_MS;
+  }
+  return value;
+}
+
 function parsePtySize(env: NodeJS.ProcessEnv): TerminalSize | null {
   const raw = optionalEnv(env, "TOKIMEKI_PTY_SIZE");
   if (raw === undefined) return null;
@@ -364,6 +395,7 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
     ptySize: parsePtySize(env),
     scrollbackLines: parseScrollback(env),
     snapshotMaxBytes: parseSnapshotMax(env),
+    listenerSnapshotMs: parseListenerSnapshotMs(env, common.warnings),
     piTuiMode: parseEnum(
       "TOKIMEKI_PI_TUI_MODE",
       optionalEnv(env, "TOKIMEKI_PI_TUI_MODE"),
@@ -375,13 +407,21 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
   };
 }
 
-export function loadAttachConfig(env: NodeJS.ProcessEnv = process.env): AttachConfig {
+export interface AttachConfigOptions {
+  /** Connect as a read-only snapshot-only listener (`attach --listen`). */
+  readonly listener?: boolean;
+}
+
+export function loadAttachConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  options: AttachConfigOptions = {},
+): AttachConfig {
   const session = requireEnv(env, "TOKIMEKI_SESSION");
   const sessionToken = requireEnv(env, "TOKIMEKI_SESSION_TOKEN");
   const common = loadCommon(env, session);
   return {
     ...common,
-    role: "viewer",
+    role: options.listener === true ? "listener" : "viewer",
     sessionToken,
     secrets: [...common.secrets, sessionToken],
   };

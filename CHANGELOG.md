@@ -11,6 +11,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - v1.1 F0 P2P transport enhancements: capability-gated `FRAGMENT 0x08`
   DataChannel fragmentation/reassembly, P2P-direct `SNAPSHOT`, automatic ICE
   credential refresh, and one bounded TURN-provider retry before relay fallback.
+- v1.1 F2 read-only listener mode: `listener` is an active snapshot-only role;
+  `tokimeki attach --listen` receives immediate and periodic full
+  `SNAPSHOT_TO` snapshots without input, resize, ACK, resync, or P2P. The relay
+  advertises `listener.modes: ["snapshot-only"]`, enforces
+  `TOKIMEKI_MAX_LISTENERS` (default 8) on top of the total client cap, and
+  excludes listeners from output/ACK/backpressure/slow-consumer accounting.
+  Pre-v1.1 relays still reject listener with `not_implemented`.
 - Golden vectors and protocol/capability coverage for `FRAGMENT` and
   `transports.fragmentation`.
 - 512×512 rounded PNG repository icon with transparent corners
