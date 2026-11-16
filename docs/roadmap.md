@@ -44,8 +44,8 @@ v1 基线历史限制（F0 已在 `b8c9ec4` 解决）：v1 本身不做 DataChan
 P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公网 NAT/TURN 复测与
 生产部署尚未执行。F2 listener snapshot-only 已实现、提交（`147974f`）并归档；
 本地 live e2e（`E2E_LISTENER=1` + P2P viewer，2026-11-16）已通过。F1 TUN profile
-已在工作树实现（P2P-only AEAD + selective-repeat ARQ；XOR FEC 暂缓），本地
-typecheck/lint/unit/relay/build 已通过，待 P2P tunnel live e2e 复测后归档；
+已实现、提交（`1cbebc8`）并通过 tunnel live e2e（session-token 与 shared-secret
+两种 keyMode；P2P-only AEAD + selective-repeat ARQ；XOR FEC 暂缓到 F1.1）；
 F3 在其后。
 
 - **F0 P2P 传输增强（已完成并归档，`b8c9ec4`）**：新增 capability-gated
@@ -55,7 +55,7 @@ F3 在其后。
   顺序重试一次，再回退 relay。设计已覆盖 viewer 先失败重试、旧快照 stale guard、
   ICE refresh 串行/quiet 等失败路径。协议新增项需同步 golden vectors 与
   `docs/protocol.md`；relay/DO 不改路由行为。
-- **F1 应用层可靠隧道（TUN profile，工作树实现完成，本地 e2e 通过，待归档）**：
+- **F1 应用层可靠隧道（TUN profile，已实现并提交 `1cbebc8`，本地 e2e 通过）**：
   任务 `.trellis/tasks/11-16-v1-1-f1-tunnel`。只封装 tokimeki 终端字节流，不做
   OS TUN/VPN。首版在 WebRTC unreliable/unordered DataChannel 上做
   selective-repeat ARQ（窗口 64、有界重传）+ AES-256-GCM，P2P-only；relay
