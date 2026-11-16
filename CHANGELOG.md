@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-16
+
 ### Added
 
 - Fixed TUI window and full-screen viewport: commands listed in
@@ -150,6 +152,7 @@ First public release.
 > P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
 > recovery. The 0.1.0 limitation above is kept as the release-time record.
 
-[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/limccn/tokimeki/releases/tag/v0.1.2
 [0.1.1]: https://github.com/limccn/tokimeki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

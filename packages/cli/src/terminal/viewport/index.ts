@@ -61,7 +61,8 @@ export class LocalViewport {
     this.#mirror = options.mirror;
     this.#tracker = options.tracker;
     this.#onInput = options.onInput;
-    this.#invite = options.invite === undefined ? null : new InviteKeyController(options.invite.key);
+    this.#invite =
+      options.invite === undefined ? null : new InviteKeyController(options.invite.key);
     this.#inviteLines = options.invite?.lines ?? [];
     this.#inviteCopyText = options.invite?.copyText ?? "";
     this.#renderer = new ViewportRenderer({

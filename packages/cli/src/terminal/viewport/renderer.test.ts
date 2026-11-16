@@ -150,9 +150,7 @@ describe("ViewportRenderer", () => {
     const beforeCopy = text().length;
     renderer.copyInvite();
     expect(text().slice(beforeCopy)).toContain("\x1b]52;c;");
-    expect(text().slice(beforeCopy)).toContain(
-      Buffer.from(invite, "utf8").toString("base64"),
-    );
+    expect(text().slice(beforeCopy)).toContain(Buffer.from(invite, "utf8").toString("base64"));
 
     renderer.setInviteOverlay(null);
     renderer.renderNow();

@@ -129,10 +129,7 @@ describe("tokimeki CLI wiring", () => {
 
   it("dispatches allow-listed TUI subcommands dynamically", async () => {
     const runHost = makeRunHost();
-    const { deps } = harness(
-      { ...hostEnv, TOKIMEKI_WINDOW_TUI: "claude,pi,omp" },
-      { runHost },
-    );
+    const { deps } = harness({ ...hostEnv, TOKIMEKI_WINDOW_TUI: "claude,pi,omp" }, { runHost });
     const code = await main(["node", "tokimeki", "omp", "--flag", "x"], deps);
     expect(code).toBe(0);
     expect(runHost).toHaveBeenCalledTimes(1);

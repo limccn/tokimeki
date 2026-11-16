@@ -229,6 +229,7 @@ function countOccurrences(text, needle) {
  * PTY reflow (a narrow host can split a log line across cursor-position codes).
  */
 function normalizeLog(text) {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI CSI stripping is intentional.
   return text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\s+/g, " ");
 }
 

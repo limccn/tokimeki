@@ -30,7 +30,9 @@ describe("RelayClient hello", () => {
     const helloReceived = new Promise<Record<string, unknown>>((resolve) => {
       server.on("connection", (socket) => {
         socket.once("message", (data) => {
-          resolve(JSON.parse(Buffer.from(data as Buffer).toString("utf8")) as Record<string, unknown>);
+          resolve(
+            JSON.parse(Buffer.from(data as Buffer).toString("utf8")) as Record<string, unknown>,
+          );
         });
       });
     });

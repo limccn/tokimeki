@@ -227,21 +227,21 @@ describe("loadHostConfig", () => {
     expect(empty.windowMode).toBe("off");
     expect([...empty.windowTuiCommands]).toEqual([]);
 
-    expect(() =>
-      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW: "auto" }) }),
-    ).toThrow(ConfigError);
-    expect(() =>
-      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW_SIZE: "100 30" }) }),
-    ).toThrow(ConfigError);
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW: "auto" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW_SIZE: "100 30" }) })).toThrow(
+      ConfigError,
+    );
     expect(() =>
       loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW_SIZE: "5000x5000" }) }),
     ).toThrow(ConfigError);
-    expect(() =>
-      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_LOG_PANEL_ROWS: "-1" }) }),
-    ).toThrow(ConfigError);
-    expect(() =>
-      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_INVITE_KEY: "esc" }) }),
-    ).toThrow(ConfigError);
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_LOG_PANEL_ROWS: "-1" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_INVITE_KEY: "esc" }) })).toThrow(
+      ConfigError,
+    );
   });
 
   it("keeps PTY_SIZE and WINDOW_SIZE independent for host precedence", () => {

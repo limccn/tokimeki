@@ -61,8 +61,7 @@ export class Logger {
 
   constructor(options: LoggerOptions) {
     this.#level = options.level;
-    this.#defaultWrite =
-      options.write ?? ((line) => void process.stderr.write(`${line}\n`));
+    this.#defaultWrite = options.write ?? ((line) => void process.stderr.write(`${line}\n`));
     this.#write = this.#defaultWrite;
     this.#redact = options.redact ?? ((text) => text);
   }

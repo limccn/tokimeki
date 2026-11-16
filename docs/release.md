@@ -14,11 +14,11 @@ GitHub Release.
 
 ## Versioning
 
-- Current release: `0.1.1` (`v0.1.1` tag).
+- Current release: `0.1.2` (`v0.1.2` tag).
 - All four `package.json` files (`package.json`, `packages/protocol`,
   `packages/cli`, `packages/relay`) must use the same version.
 - The CLI and relay dependencies on `@limccn/tokimeki-protocol` are exact
-  versions (`0.1.1`), so protocol is published first.
+  versions (`0.1.2`), so protocol is published first.
 - Use the version helper instead of editing versions by hand:
 
   ```bash

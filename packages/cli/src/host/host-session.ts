@@ -25,7 +25,11 @@ import {
   type WelcomeMessage,
 } from "@limccn/tokimeki-protocol";
 
-import { buildClientDescriptor, buildInviteOverlayLines, formatViewerConfigJson } from "../client-info.js";
+import {
+  buildClientDescriptor,
+  buildInviteOverlayLines,
+  formatViewerConfigJson,
+} from "../client-info.js";
 import type { HostConfig } from "../config.js";
 import { inviteKeyLabel } from "../invite.js";
 import { formatError, type Logger } from "../logger.js";
@@ -49,7 +53,7 @@ import { P2PPeer } from "../transport/p2p-peer.js";
 import { canRetryP2P, P2P_RETRY_DELAY_MS } from "../transport/p2p-retry.js";
 import { RelayClient } from "../transport/relay-client.js";
 import { RelayTransport } from "../transport/relay-transport.js";
-import type { RelayConnectionState, RelayFatalError } from "../transport/relay-types.js";
+import type { RelayFatalError } from "../transport/relay-types.js";
 import { RouteSelector } from "../transport/route-selector.js";
 import {
   buildTunnelOffer,
@@ -567,9 +571,7 @@ class HostSession {
         ...(this.#fixedGeometryEnabled
           ? {
               display: {
-                modes: this.#viewportEnabled
-                  ? ["fixed-grid", "viewport"]
-                  : ["fixed-grid"],
+                modes: this.#viewportEnabled ? ["fixed-grid", "viewport"] : ["fixed-grid"],
                 fixed: this.#fixedSize,
                 logPanel: true,
                 terminalQueries: "host",
@@ -795,14 +797,6 @@ class HostSession {
         }
         return;
       }
-      case "host":
-      case "presence":
-      case "ping":
-      case "pong":
-      case "welcome":
-      case "hello":
-      case "error":
-      case "host-exited":
       default:
         return;
     }

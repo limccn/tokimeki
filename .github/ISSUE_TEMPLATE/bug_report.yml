@@ -13,7 +13,7 @@ body:
     attributes:
       label: tokimeki version
       description: Output of `tokimeki --version`
-      placeholder: 0.1.1
+      placeholder: 0.1.2
     validations:
       required: true
   - type: dropdown

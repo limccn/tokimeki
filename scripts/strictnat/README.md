@@ -86,7 +86,7 @@ The script prompts for the session token, runs the same viewer runner, prints
 
 If you do not want to clone/build on Mac/Windows, copy only the
 `scripts/strictnat/` folder to the viewer machine and use the published
-`@limccn/tokimeki@0.1.1` package from GitHub Packages.
+`@limccn/tokimeki@0.1.2` package from GitHub Packages.
 
 Requirements: GitHub PAT with `read:packages`. The script installs the CLI into
 `~/.tokimeki-strictnat-viewer` (or `%USERPROFILE%\.tokimeki-strictnat-viewer`),

@@ -20,11 +20,7 @@ import {
 import { ConfigEnvelopeError, parseConfigEnvelope } from "./config-envelope.js";
 import { INVITE_KEYS, type InviteKey } from "./invite.js";
 import { isLogLevel, LOG_LEVELS, type LogLevel } from "./logger.js";
-import {
-  parseTuiCommandList,
-  WINDOW_MODES,
-  type WindowMode,
-} from "./window-policy.js";
+import { parseTuiCommandList, WINDOW_MODES, type WindowMode } from "./window-policy.js";
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -375,12 +371,7 @@ function parseWindowSize(env: NodeJS.ProcessEnv): TerminalSize {
 }
 
 function parseWindowMode(env: NodeJS.ProcessEnv): WindowMode {
-  return parseEnum(
-    "TOKIMEKI_WINDOW",
-    optionalEnv(env, "TOKIMEKI_WINDOW"),
-    WINDOW_MODES,
-    "tui",
-  );
+  return parseEnum("TOKIMEKI_WINDOW", optionalEnv(env, "TOKIMEKI_WINDOW"), WINDOW_MODES, "tui");
 }
 
 function parseLogPanelRows(env: NodeJS.ProcessEnv): number {

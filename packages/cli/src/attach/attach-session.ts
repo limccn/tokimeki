@@ -39,10 +39,7 @@ import {
   type ViewportStatus,
   type ViewportTransport,
 } from "../terminal/viewport/index.js";
-import {
-  buildCapabilities,
-  hostAnswersTerminalQueries,
-} from "../transport/capabilities.js";
+import { buildCapabilities, hostAnswersTerminalQueries } from "../transport/capabilities.js";
 import { buildNodeRtcConfig, resolveIceTransportPolicy } from "../transport/ice.js";
 import { IceConfigManager } from "../transport/ice-config.js";
 import { P2PPeer } from "../transport/p2p-peer.js";

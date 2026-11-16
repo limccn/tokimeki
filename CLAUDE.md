@@ -18,10 +18,10 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.1)
+## Release identity (0.1.2)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.1`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.1`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.2`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.2`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@tokimeki/relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).

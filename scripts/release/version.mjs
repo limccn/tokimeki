@@ -3,9 +3,9 @@
  * Release version helper for the tokimeki monorepo.
  *
  * Usage:
- *   node scripts/release/version.mjs bump 0.1.1
- *   node scripts/release/version.mjs check 0.1.1
- *   node scripts/release/version.mjs check --tag v0.1.1
+ *   node scripts/release/version.mjs bump 0.1.2
+ *   node scripts/release/version.mjs check 0.1.2
+ *   node scripts/release/version.mjs check --tag v0.1.2
  *
  * `bump` updates the root and workspace versions, every exact internal
  * @limccn/tokimeki-protocol dependency, and package-lock.json. `check`

@@ -153,7 +153,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * and the display capability for welcome/presence echo; storing anything else
  * risks the 2 KiB attachment limit and amplifies client data to every peer.
  */
-function boundedClientDescriptor(client: ClientDescriptor | undefined): ClientDescriptor | undefined {
+function boundedClientDescriptor(
+  client: ClientDescriptor | undefined,
+): ClientDescriptor | undefined {
   if (client === undefined) return undefined;
   return {
     name: client.name.slice(0, 64),
@@ -164,9 +166,7 @@ function boundedClientDescriptor(client: ClientDescriptor | undefined): ClientDe
   };
 }
 
-function boundedCapabilities(
-  capabilities: Capabilities | undefined,
-): Capabilities | undefined {
+function boundedCapabilities(capabilities: Capabilities | undefined): Capabilities | undefined {
   const display = capabilities?.display;
   if (display === undefined) return undefined;
   return {
