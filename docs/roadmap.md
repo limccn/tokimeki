@@ -46,8 +46,9 @@ P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公�
 本地 live e2e（`E2E_LISTENER=1` + P2P viewer，2026-11-16）已通过。F1 TUN profile
 已实现、提交（`1cbebc8`）并通过 tunnel live e2e（session-token 与 shared-secret
 两种 keyMode；P2P-only AEAD + selective-repeat ARQ；XOR FEC 暂缓到 F1.1）。
-F3 已在当前工作树实现 LAN 提示并完成 mDNS/peer fan-out 设计评估（fan-out 不实现、
-默认关闭）；待提交/归档。
+F3 已实现、提交（`53f6861`）：LAN 提示 + mDNS/peer fan-out 设计评估（fan-out
+不实现、默认关闭）。至此 F0/F1/F2/F3 四个 v1.1 子任务均完成本地实现与验收；
+剩余为环境依赖验证、XOR FEC 后续项与生产部署。
 
 - **F0 P2P 传输增强（已完成并归档，`b8c9ec4`）**：新增 capability-gated
   `FRAGMENT` 帧（0x08）实现
@@ -73,7 +74,7 @@ F3 已在当前工作树实现 LAN 提示并完成 mDNS/peer fan-out 设计评�
   `.trellis/tasks/11-16-v1-1-f2-listener`。只读、无 ack/背压，第一版
   snapshot-only（周期全量快照），独立上限 `TOKIMEKI_MAX_LISTENERS`；本地
   host + viewer + listener live e2e（含 P2P viewer）已通过，生产/真实跨公网环境待复测。
-- **F3 同内网/相邻网络优化（LAN 提示已实现，fan-out 仅设计）**：v1 已利用
+- **F3 同内网/相邻网络优化（LAN 提示已实现并提交 `53f6861`，fan-out 仅设计）**：v1 已利用
   ICE host candidate；v1.1 增加 selected pair 的 `lan=yes|no` 诊断提示（仅提示，
   不改变选路）。mDNS 不采用（不作发现权威）；peer fan-out 仅完成 leader 选举/
   保序/信任/故障切换设计，默认 off、不在本版实现。
