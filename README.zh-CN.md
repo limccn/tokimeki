@@ -171,12 +171,12 @@ TURN 变量、secret、按钮/手动部署步骤：
 
 ## 状态
 
-`0.1.0` — 首个公开版本。从
-[npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装，或查看
-[v0.1.0 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.0)。
-P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1 路线
-（selective-repeat/ARQ、listener、LAN 优化）见 [CHANGELOG.md](CHANGELOG.md)
-与 [`CLAUDE.md`](CLAUDE.md)。
+`0.1.1` — 当前版本。从
+[npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装（同时镜像到 GitHub
+Packages，见 [docs/release.md](docs/release.md)），或查看
+[v0.1.1 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.1)。
+P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1
+功能演进见 [CHANGELOG.md](CHANGELOG.md) 与 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 贡献
 

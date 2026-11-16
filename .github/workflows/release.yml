@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Check tag and version consistency
+        run: node scripts/release/version.mjs check --tag "$GITHUB_REF_NAME"
+      - name: Confirm package-lock.json is current
+        run: |
+          npm install --package-lock-only --ignore-scripts
+          git diff --exit-code -- package-lock.json
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run typecheck:relay
+      - run: npm test
+      - run: npm run test:relay
+      - run: npm run build
+      - name: Wrangler dry run (open-source config)
+        run: npx wrangler deploy --dry-run
+      - name: Wrangler dry run (production config)
+        run: npx wrangler deploy --dry-run --config packages/relay/wrangler.jsonc
+      - name: Verify published package contents
+        run: |
+          npm pack --dry-run --workspace @limccn/tokimeki-protocol
+          npm pack --dry-run --workspace @limccn/tokimeki
+
+  publish:
+    name: Publish packages
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Re-check tag and version consistency
+        run: node scripts/release/version.mjs check --tag "$GITHUB_REF_NAME"
+      - name: Configure npm registry credentials
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "NPM_TOKEN repository secret is required for npmjs publishing" >&2
+            exit 1
+          fi
+          umask 077
+          cat > "${RUNNER_TEMP}/.npmrc" <<EOF
+          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+          //npm.pkg.github.com/:_authToken=${GH_PACKAGES_TOKEN}
+          EOF
+          echo "NPM_CONFIG_USERCONFIG=${RUNNER_TEMP}/.npmrc" >> "$GITHUB_ENV"
+      - name: Publish protocol to npmjs
+        run: >-
+          npm publish --workspace @limccn/tokimeki-protocol
+          --registry=https://registry.npmjs.org --access public --provenance
+      - name: Publish CLI to npmjs
+        run: >-
+          npm publish --workspace @limccn/tokimeki
+          --registry=https://registry.npmjs.org --access public --provenance
+      - name: Publish protocol to GitHub Packages
+        run: >-
+          npm publish --workspace @limccn/tokimeki-protocol
+          --registry=https://npm.pkg.github.com --access public
+      - name: Publish CLI to GitHub Packages
+        run: >-
+          npm publish --workspace @limccn/tokimeki
+          --registry=https://npm.pkg.github.com --access public
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "tokimeki ${version}" \
+            --generate-notes

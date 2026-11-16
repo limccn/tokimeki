@@ -6,8 +6,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-16
+
 ### Added
 
+- Tag-triggered GitHub Actions release workflow: pushing `v<version>` runs the
+  full verification gate, publishes `@limccn/tokimeki-protocol` before
+  `@limccn/tokimeki` to npmjs and GitHub Packages, and creates a GitHub
+  Release. `npm run release:bump` updates all package versions, exact internal
+  dependencies, and the lockfile; `npm run release:check` verifies the tag,
+  package versions, and lockfile agree.
 - v1.1 F0 P2P transport enhancements: capability-gated `FRAGMENT 0x08`
   DataChannel fragmentation/reassembly, P2P-direct `SNAPSHOT`, automatic ICE
   credential refresh, and one bounded TURN-provider retry before relay fallback.
@@ -95,5 +103,6 @@ First public release.
 > P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
 > recovery. The 0.1.0 limitation above is kept as the release-time record.
 
-[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/limccn/tokimeki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

@@ -18,13 +18,20 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.0)
+## Release identity (0.1.1)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.0`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.0`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.1`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.1`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@tokimeki/relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
+- `npm run release:bump -- <version>` updates the root/workspace versions,
+  exact protocol dependencies, and `package-lock.json`; `npm run
+  release:check -- <version>` verifies them.
+- Pushing a `v<version>` tag triggers `.github/workflows/release.yml`, which
+  verifies first, then publishes protocol before CLI to npmjs (`NPM_TOKEN`)
+  and GitHub Packages (`GITHUB_TOKEN`), and finally creates the GitHub
+  Release.
 - Release steps are documented in `docs/release.md`; do not run
   `npm publish`, create tags, or deploy production without explicit user
   authorization.
@@ -37,6 +44,7 @@ packages/relay/      Worker + SessionDO: auth, routing, flow control, TURN issua
 packages/cli/        CLI: cli/config, host PTY, attach viewer, transport, terminal mirror
 scripts/e2e/         live e2e / cross-machine helpers
 scripts/perf/        local + cross-NAT performance harnesses (results gitignored)
+scripts/release/     version bump/check helper used by the release workflow
 docs/                protocol, deployment, CLI, Cloudflare deploy, release, roadmap
 assets/              README icon
 .trellis/            local Trellis tasks/specs (gitignored)

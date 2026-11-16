@@ -179,13 +179,13 @@ Common host/attach variables: `TOKIMEKI_RELAY_URL`, `TOKIMEKI_MASTER_TOKEN`
 
 ## Status
 
-`0.1.0` — the first public release. Install from
-[npm](https://www.npmjs.com/package/@limccn/tokimeki) or read the
-[v0.1.0 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.0).
+`0.1.1` — current release. Install from
+[npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to GitHub
+Packages; see [docs/release.md](docs/release.md)) or read the
+[v0.1.1 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.1).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
-limitations and the v1.1 roadmap (selective-repeat/ARQ, listener mode, LAN
-optimizations).
+limitations and the v1.1 feature history.
 
 ## Contributing
 
