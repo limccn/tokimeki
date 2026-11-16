@@ -45,9 +45,9 @@ P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公�
 生产部署尚未执行。F2 listener snapshot-only 已实现、提交（`147974f`）并归档；
 本地 live e2e（`E2E_LISTENER=1` + P2P viewer，2026-11-16）已通过。F1 TUN profile
 已实现、提交（`1cbebc8`）并通过 tunnel live e2e（session-token 与 shared-secret
-两种 keyMode；P2P-only AEAD + selective-repeat ARQ）；F1.1 XOR FEC 已实现
-（`TOKIMEKI_TUNNEL_FEC=xor`，capability `fec:["none","xor"]`，单丢包 parity
-恢复，多丢包/丢 parity 仍走 ARQ）。F3 已实现、提交（`53f6861`）：LAN 提示 +
+两种 keyMode；P2P-only AEAD + selective-repeat ARQ）；F1.1 XOR FEC 已实现、
+提交（`24a5dfb`；`TOKIMEKI_TUNNEL_FEC=xor`，capability `fec:["none","xor"]`，
+单丢包 parity 恢复，多丢包/丢 parity 仍走 ARQ）。F3 已实现、提交（`53f6861`）：LAN 提示 +
 mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0/F1/F1.1/F2/F3
 五个 v1.1 子任务均完成本地实现与验收；剩余为环境依赖验证与生产部署。
 
@@ -65,7 +65,7 @@ mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0
   路径保持现有 v1 帧与流控，TUNNEL 仍不转发。默认 `TOKIMEKI_TUNNEL=off`；
   `auto` 需双方 capability/keyMode 匹配。默认由 session token 派生密钥时 relay
   可推导，只作传输加固；relay-blind 需独立 `TOKIMEKI_TUNNEL_SECRET` 带外共享。
-  XOR FEC（`TOKIMEKI_TUNNEL_FEC=xor`）由 F1.1 补齐：capability 声明
+  XOR FEC（`TOKIMEKI_TUNNEL_FEC=xor`）由 F1.1（`24a5dfb`）补齐：capability 声明
   `fec:["none","xor"]`，每 8 条 data 记录发一条 AEAD parity，接收端恢复恰好
   1 条丢失记录；丢 parity/多丢包继续依赖 ARQ。本地 live e2e（`E2E_TUNNEL=1`，
   session-token 与 shared-secret 各一次）、listener+P2P、F0 P2P 快照、
