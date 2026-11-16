@@ -28,6 +28,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `TOKIMEKI_TUNNEL_SECRET` selects relay-blind `shared-secret` keys and is
   scrubbed from the hosted PTY environment/redacted from logs. XOR FEC is
   deferred; the capability advertises `fec: ["none"]`.
+- v1.1 F3 same-LAN ICE hint: selected candidate pairs whose local and remote
+  addresses are loopback/private/link-local are logged as `lan=yes` (otherwise
+  `lan=no`) for diagnostics only. Route selection, relay fallback, flow control,
+  and security semantics are unchanged. mDNS is not adopted; peer fan-out
+  remains design-only and default-off.
 - Tunnel record layout/AAD golden vectors and a `tunnel` capability `keyMode`
   field in `@limccn/tokimeki-protocol`.
 - Golden vectors and protocol/capability coverage for `FRAGMENT` and
