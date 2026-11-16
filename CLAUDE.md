@@ -88,12 +88,13 @@ assets/              README icon
 - `transport/`: relay client, P2P peer (node-datachannel), fragmentation,
   ICE config/refresh, P2P retry policy, route selector, ICE/TURN config, signal
   limits.
-- `transport/tunnel/`: v1.1 F1 TUN profile — HKDF direction keys + AES-256-GCM
-  records (`crypto.ts`), selective-repeat ARQ (`arq.ts`), capability/offer
-  negotiation (`capability.ts`), and the P2P endpoint (`tunnel-transport.ts`).
-  It is opt-in (`TOKIMEKI_TUNNEL=auto`), P2P-only, and falls back to the relay;
-  the relay still rejects `TUNNEL` with `not_implemented`. XOR FEC is deferred;
-  the capability advertises `fec:["none"]`.
+- `transport/tunnel/`: v1.1 F1/F1.1 TUN profile — HKDF direction keys +
+  AES-256-GCM records (`crypto.ts`), selective-repeat ARQ (`arq.ts`), XOR
+  parity (`fec.ts`), capability/offer negotiation (`capability.ts`), and the
+  P2P endpoint (`tunnel-transport.ts`). It is opt-in (`TOKIMEKI_TUNNEL=auto`),
+  P2P-only, and falls back to the relay; the relay still rejects `TUNNEL` with
+  `not_implemented`. `TOKIMEKI_TUNNEL_FEC=xor` advertises and negotiates
+  `fec:["none","xor"]` for single-loss parity; default `off` keeps F1 behavior.
 - Exit codes: `0` success, `1` runtime/connection (including a failed
   `doctor` check and Commander usage errors), `2` invalid `TOKIMEKI_*`
   configuration at host/attach startup.
@@ -155,15 +156,17 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 - v1.1 F0 adds capability-gated `FRAGMENT 0x08` DataChannel fragmentation,
   P2P direct snapshots, automatic ICE refresh, and one provider retry. v1.1 F2
   adds the read-only snapshot-only `listener` role. v1.1 F1 adds the opt-in
-  P2P-only TUN profile (AEAD + selective-repeat ARQ); XOR FEC is deferred and
-  the capability advertises `fec:["none"]`. Local tunnel e2e passes for
-  session-token and shared-secret key modes; cross-machine tunnel e2e, forced
-  loss/reorder injection, and secret-mismatch fallback remain to be run. The
-  host/attach tunnel switch has no pure unit test (live e2e covers it).
-  There is still no listener incremental/safe-boundary output.
+  P2P-only TUN profile (AEAD + selective-repeat ARQ); F1.1 adds opt-in XOR
+  parity (`TOKIMEKI_TUNNEL_FEC=xor`, capability `fec:["none","xor"]`) for
+  exactly-one-record recovery, with multi-loss/lost-parity still on ARQ. Local
+  tunnel e2e passes for session-token and shared-secret key modes; cross-machine
+  tunnel e2e, forced loss/reorder injection (including FEC recovery), and
+  secret-mismatch fallback remain to be run. The host/attach tunnel switch has
+  no pure unit test (live e2e covers it). There is still no listener
+  incremental/safe-boundary output.
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
-  tests (delivery worked); link-quality work beyond the F1 tunnel
-  (fragmentation-independent ARQ tuning/FEC) is future.
+  tests (delivery worked); link-quality work beyond the F1/F1.1 tunnel
+  (fragmentation-independent ARQ tuning, Reed-Solomon/multi-loss FEC) is future.
 
 ## Documentation
 

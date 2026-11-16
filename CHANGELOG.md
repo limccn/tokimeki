@@ -27,7 +27,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tunnel failure falls back to the relay and requests a fresh snapshot.
   `TOKIMEKI_TUNNEL_SECRET` selects relay-blind `shared-secret` keys and is
   scrubbed from the hosted PTY environment/redacted from logs. XOR FEC is
-  deferred; the capability advertises `fec: ["none"]`.
+  deferred to F1.1.
+- v1.1 F1.1 XOR FEC for the TUN profile: `TOKIMEKI_TUNNEL_FEC=xor` emits one
+  AEAD-authenticated parity record per full group of eight data records, and
+  the receiver rebuilds exactly one missing record before falling back to ARQ.
+  The capability advertises `fec: ["none", "xor"]`; the host offers `xor` only
+  when the peer advertises it and otherwise keeps `none`. FEC is supplementary:
+  lost parity, multiple losses, malformed records, or pruned recovery state
+  never bypass AEAD and continue to rely on ARQ or relay fallback. The default
+  `off` and `TOKIMEKI_TUNNEL=off` behaviors are unchanged.
 - v1.1 F3 same-LAN ICE hint: selected candidate pairs whose local and remote
   addresses are loopback/private/link-local are logged as `lan=yes` (otherwise
   `lan=no`) for diagnostics only. Route selection, relay fallback, flow control,
@@ -84,8 +92,8 @@ First public release.
 > Post-release update (2026-11-16): strict NAT↔NAT and real Claude/pi TUI were
 > manually confirmed at the e2e layer; see `docs/deployment.md` §7.6. v1.1
 > added DataChannel fragmentation, listener snapshot-only mode, and an opt-in
-> P2P-only AEAD/ARQ tunnel (XOR FEC deferred). The 0.1.0 limitation above is
-> kept as the release-time record.
+> P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
+> recovery. The 0.1.0 limitation above is kept as the release-time record.
 
 [Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

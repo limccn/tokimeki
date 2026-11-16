@@ -10,17 +10,19 @@ import {
   buildTunnelOffer,
   matchingTunnelCapability,
   parseTunnelOffer,
+  peerSupportsXorFec,
+  selectTunnelFec,
   tunnelCapabilitiesCompatible,
   tunnelOfferCompatible,
 } from "./capability.js";
 
 describe("tunnel capability", () => {
-  it("advertises the exact F1 dialect and only the none FEC mode", () => {
+  it("advertises the F1 dialect with both FEC modes", () => {
     const capability = buildTunnelCapability("session-token");
     expect(capability).toEqual({
       version: 1,
       arq: "selective-repeat",
-      fec: ["none"],
+      fec: ["none", "xor"],
       crypto: "aes-256-gcm",
       keyMode: "session-token",
       maxFrameSize: TUNNEL_MAX_FRAME_BYTES,
@@ -28,7 +30,7 @@ describe("tunnel capability", () => {
     expect(buildTunnelCapability("shared-secret").keyMode).toBe("shared-secret");
   });
 
-  it("accepts only a matching dialect", () => {
+  it("accepts only a matching dialect but either FEC mode", () => {
     const capability = buildTunnelCapability("session-token");
     const base: Capabilities = { tunnel: capability };
     expect(matchingTunnelCapability(base)).toEqual(capability);
@@ -38,7 +40,16 @@ describe("tunnel capability", () => {
     expect(matchingTunnelCapability({ tunnel: { ...capability, arq: "kcp" } })).toBeNull();
     expect(matchingTunnelCapability({ tunnel: { ...capability, crypto: "future" } })).toBeNull();
     expect(matchingTunnelCapability({ tunnel: { ...capability, keyMode: "future" } })).toBeNull();
-    expect(matchingTunnelCapability({ tunnel: { ...capability, fec: ["xor"] } })).toBeNull();
+    expect(matchingTunnelCapability({ tunnel: { ...capability, fec: ["none"] } })).toEqual({
+      ...capability,
+      fec: ["none"],
+    });
+    expect(matchingTunnelCapability({ tunnel: { ...capability, fec: ["xor"] } })).toEqual({
+      ...capability,
+      fec: ["xor"],
+    });
+    expect(matchingTunnelCapability({ tunnel: { ...capability, fec: [] } })).toBeNull();
+    expect(matchingTunnelCapability({ tunnel: { ...capability, fec: ["future"] } })).toBeNull();
     expect(
       matchingTunnelCapability({
         tunnel: { ...capability, maxFrameSize: TUNNEL_MAX_FRAME_BYTES - 1 },
@@ -54,6 +65,18 @@ describe("tunnel capability", () => {
     expect(tunnelCapabilitiesCompatible(sharedSecret, "shared-secret")).toBe(true);
     expect(tunnelCapabilitiesCompatible(null, "session-token")).toBe(false);
   });
+
+  it("selects XOR only when both sides request and advertise it", () => {
+    const withXor = buildTunnelCapability("session-token");
+    const noneOnly = { ...withXor, fec: ["none"] };
+    expect(peerSupportsXorFec(withXor)).toBe(true);
+    expect(peerSupportsXorFec(noneOnly)).toBe(false);
+    expect(peerSupportsXorFec(null)).toBe(false);
+    expect(selectTunnelFec("xor", withXor)).toBe("xor");
+    expect(selectTunnelFec("xor", noneOnly)).toBe("none");
+    expect(selectTunnelFec("xor", null)).toBe("none");
+    expect(selectTunnelFec("none", withXor)).toBe("none");
+  });
 });
 
 describe("tunnel offer metadata", () => {
@@ -66,16 +89,18 @@ describe("tunnel offer metadata", () => {
       initialSeq: 0,
     });
     expect(parseTunnelOffer(offer)).toEqual(offer);
+    const xorOffer = buildTunnelOffer("session-token", "xor");
+    expect(parseTunnelOffer(xorOffer)).toEqual(xorOffer);
   });
 
-  it("rejects mismatched, unknown, or XOR offers", () => {
+  it("rejects mismatched or unknown offers but accepts both FEC modes", () => {
     expect(parseTunnelOffer(null)).toBeNull();
     expect(parseTunnelOffer("offer")).toBeNull();
     expect(parseTunnelOffer({ ...buildTunnelOffer("session-token"), version: 2 })).toBeNull();
     expect(
       parseTunnelOffer({ ...buildTunnelOffer("session-token"), keyMode: "future" }),
     ).toBeNull();
-    expect(parseTunnelOffer({ ...buildTunnelOffer("session-token"), fec: "xor" })).toBeNull();
+    expect(parseTunnelOffer({ ...buildTunnelOffer("session-token"), fec: "future" })).toBeNull();
     expect(parseTunnelOffer({ ...buildTunnelOffer("session-token"), initialSeq: 5 })).toBeNull();
     expect(parseTunnelOffer({ ...buildTunnelOffer("session-token"), extra: true })).toEqual(
       buildTunnelOffer("session-token"),

@@ -9,9 +9,11 @@
 
 import {
   encodeFrame,
+  TUNNEL_FLAG_FEC_PARITY,
   TUNNEL_INPUT_PAYLOAD_MAX_BYTES,
   TUNNEL_MAX_FRAME_BYTES,
   type TunnelKeyMode,
+  type TunnelRecordHeader,
   type TunnelRecordType,
 } from "@limccn/tokimeki-protocol";
 
@@ -22,7 +24,14 @@ import {
   SelectiveRepeatReceiver,
   SelectiveRepeatSender,
 } from "./arq.js";
+import type { TunnelFecMode } from "./capability.js";
 import { deriveTunnelKeys, TunnelCipher, TunnelCryptoError } from "./crypto.js";
+import {
+  decodeXorFecGroup,
+  TUNNEL_FEC_INPUT_PAYLOAD_MAX_BYTES,
+  XorFecReceiver,
+  XorFecSender,
+} from "./fec.js";
 
 /** Consecutive failed AEAD opens before the tunnel is declared unusable. */
 export const TUNNEL_MAX_CONSECUTIVE_DECRYPT_FAILURES = 16;
@@ -44,6 +53,8 @@ export interface TunnelTransportOptions {
   readonly keyMode: TunnelKeyMode;
   /** Required for `shared-secret` mode. */
   readonly secret?: string | null;
+  /** Local XOR parity policy. `none` never emits `fec` records (default). */
+  readonly fec?: TunnelFecMode;
   readonly logger: Logger;
   /** Send one complete `TUNNEL` frame over the DataChannel. */
   readonly sendFrame: (bytes: Uint8Array) => boolean;
@@ -68,6 +79,9 @@ export interface TunnelStats {
   readonly decryptFailures: number;
   readonly deliveredFrames: number;
   readonly droppedReplays: number;
+  readonly fecGroupsSent: number;
+  readonly fecRecovered: number;
+  readonly fecParityDropped: number;
 }
 
 export class TunnelTransport {
@@ -75,6 +89,9 @@ export class TunnelTransport {
   readonly #cipher: TunnelCipher;
   readonly #sender: SelectiveRepeatSender;
   readonly #receiver: SelectiveRepeatReceiver;
+  readonly #fecMode: TunnelFecMode;
+  readonly #fecSender: XorFecSender | null;
+  readonly #fecReceiver: XorFecReceiver;
   readonly #maxConsecutiveDecryptFailures: number;
   readonly #drainLowWaterBytes: number;
   readonly #maxOutboundBytes: number;
@@ -91,6 +108,9 @@ export class TunnelTransport {
   #consecutiveDecryptFailures = 0;
   #deliveredFrames = 0;
   #droppedReplays = 0;
+  #fecGroupsSent = 0;
+  #fecRecovered = 0;
+  #fecParityDropped = 0;
   #failed = false;
   #disposed = false;
   #failureReason: string | null = null;
@@ -101,6 +121,11 @@ export class TunnelTransport {
       options.maxConsecutiveDecryptFailures ?? TUNNEL_MAX_CONSECUTIVE_DECRYPT_FAILURES;
     this.#drainLowWaterBytes = options.drainLowWaterBytes ?? TUNNEL_DRAIN_LOW_WATER_BYTES;
     this.#maxOutboundBytes = options.maxOutboundBytes ?? TUNNEL_MAX_OUTBOUND_BYTES;
+    this.#fecMode = options.fec ?? "none";
+    this.#fecSender = this.#fecMode === "xor" ? new XorFecSender() : null;
+    // The receiver always understands peer parity, even when this endpoint
+    // sends with FEC off; the peer's offer may enable it in one direction.
+    this.#fecReceiver = new XorFecReceiver({ now: options.now });
 
     const keys = deriveTunnelKeys({
       keyMode: options.keyMode,
@@ -142,6 +167,11 @@ export class TunnelTransport {
     return this.#options.keyMode;
   }
 
+  /** Local parity sender policy negotiated for this direction. */
+  get fec(): TunnelFecMode {
+    return this.#fecMode;
+  }
+
   /** Unacknowledged data records plus queued application frames. */
   get pendingCount(): number {
     return this.#sender.pendingCount + this.#outbound.length;
@@ -172,6 +202,9 @@ export class TunnelTransport {
       decryptFailures: this.#decryptFailures,
       deliveredFrames: this.#deliveredFrames,
       droppedReplays: this.#droppedReplays,
+      fecGroupsSent: this.#fecGroupsSent,
+      fecRecovered: this.#fecRecovered,
+      fecParityDropped: this.#fecParityDropped,
     };
   }
 
@@ -209,7 +242,8 @@ export class TunnelTransport {
   sendTerminalInput(payload: Uint8Array): boolean {
     if (this.#failed || this.#disposed) return false;
     if (payload.byteLength === 0) return true;
-    const frameCount = Math.ceil(payload.byteLength / TUNNEL_INPUT_PAYLOAD_MAX_BYTES);
+    const maxPayload = this.#inputPayloadMax();
+    const frameCount = Math.ceil(payload.byteLength / maxPayload);
     // Each split INPUT frame adds one frame-type byte.
     const encodedBytes = payload.byteLength + frameCount;
     // Fail before any chunk reaches the unreliable channel when the whole
@@ -220,11 +254,8 @@ export class TunnelTransport {
       this.#fail("outbound_queue_full");
       return false;
     }
-    for (let offset = 0; offset < payload.byteLength; offset += TUNNEL_INPUT_PAYLOAD_MAX_BYTES) {
-      const chunk = payload.subarray(
-        offset,
-        Math.min(offset + TUNNEL_INPUT_PAYLOAD_MAX_BYTES, payload.byteLength),
-      );
+    for (let offset = 0; offset < payload.byteLength; offset += maxPayload) {
+      const chunk = payload.subarray(offset, Math.min(offset + maxPayload, payload.byteLength));
       if (!this.send(encodeFrame({ type: "input", payload: chunk }))) {
         return false;
       }
@@ -251,32 +282,19 @@ export class TunnelTransport {
       case "data": {
         // Piggybacked ACK state on data records also advances the sender.
         this.#sender.receiveAck(opened.header.ackSeq, opened.header.ackBits);
-        const result = this.#receiver.accept(opened.header.seq, opened.plaintext);
-        if (result === null) {
-          this.#droppedReplays += 1;
-          return;
-        }
-        this.#sender.setAckState(result.ack.ackSeq, result.ack.ackBits);
-        if (result.failure !== undefined) {
-          this.#fail(`arq:${result.failure}`);
-          return;
-        }
-        for (const frame of result.delivered) {
-          this.#deliveredFrames += 1;
-          this.#options.onFrame(frame);
-        }
-        if (result.shouldAck) {
-          this.#sendAck(result.ack.ackSeq, result.ack.ackBits);
-        }
+        this.#fecReceiver.addData(opened.header.seq, opened.plaintext);
+        this.#acceptDataRecord(opened.header.seq, opened.plaintext);
         return;
       }
       case "ack":
         this.#sender.receiveAck(opened.header.ackSeq, opened.header.ackBits);
         return;
       case "fec":
+        this.#handleFecRecord(opened.header, opened.plaintext);
+        return;
       case "ping":
-        // XOR FEC is deferred; ping has no F1 runtime behavior.
-        this.#options.logger.debug(`ignoring unused tunnel record type ${opened.header.type}`);
+        // ping has no F1/F1.1 runtime behavior.
+        this.#options.logger.debug("ignoring unused tunnel record type ping");
         return;
       default:
         return;
@@ -288,6 +306,8 @@ export class TunnelTransport {
     this.#disposed = true;
     this.#outbound.length = 0;
     this.#outboundBytes = 0;
+    this.#fecSender?.reset();
+    this.#fecReceiver.reset();
     this.#sender.dispose();
     this.#receiver.dispose();
   }
@@ -312,7 +332,11 @@ export class TunnelTransport {
         ackBits,
         plaintext,
       });
-      return this.#sendTunnelRecord(sealed);
+      const sent = this.#sendTunnelRecord(sealed);
+      // Feed only records that actually reached the DataChannel. Retransmits
+      // repeat an older seq and are ignored by the group sender.
+      if (sent) this.#maybeSendFecParity(seq, plaintext);
+      return sent;
     } catch (error) {
       if (error instanceof TunnelCryptoError) {
         this.#options.logger.warn(`tunnel seal failed: ${error.reason}`);
@@ -321,6 +345,115 @@ export class TunnelTransport {
       }
       return false;
     }
+  }
+
+  /** Largest INPUT payload that keeps room for FEC metadata when enabled. */
+  #inputPayloadMax(): number {
+    return this.#fecSender === null
+      ? TUNNEL_INPUT_PAYLOAD_MAX_BYTES
+      : TUNNEL_FEC_INPUT_PAYLOAD_MAX_BYTES;
+  }
+
+  /**
+   * Emit one XOR parity record when a group filled up.
+   *
+   * Parity is supplementary: failures here are logged and never fail the
+   * tunnel. The record does not enter ARQ and is never retransmitted.
+   */
+  #maybeSendFecParity(seq: number, plaintext: Uint8Array): void {
+    const fecSender = this.#fecSender;
+    if (fecSender === null || this.#failed || this.#disposed) return;
+    const droppedBefore = fecSender.droppedGroups;
+    const encoded = fecSender.add(seq, plaintext);
+    if (encoded === null) {
+      if (fecSender.droppedGroups > droppedBefore) {
+        this.#options.logger.debug(
+          `tunnel fec group dropped: ${fecSender.lastDropReason ?? "unknown"}`,
+        );
+      }
+      return;
+    }
+    const group = decodeXorFecGroup(encoded);
+    if (group === null) {
+      this.#options.logger.debug("tunnel fec group dropped: invalid encoding");
+      return;
+    }
+    try {
+      const sealed = this.#cipher.seal({
+        type: "fec",
+        flags: TUNNEL_FLAG_FEC_PARITY,
+        seq: group.startSeq,
+        ackSeq: 0,
+        ackBits: 0,
+        plaintext: encoded,
+      });
+      if (!this.#sendTunnelRecord(sealed)) {
+        this.#options.logger.debug("tunnel fec parity could not be queued");
+        return;
+      }
+      this.#fecGroupsSent += 1;
+      this.#options.logger.debug(
+        `tunnel fec parity sent start=${group.startSeq} count=${group.count}`,
+      );
+    } catch {
+      this.#options.logger.debug("tunnel fec parity seal failed");
+    }
+  }
+
+  /**
+   * Run one authenticated data plaintext through the ARQ receiver.
+   *
+   * Used for records that arrived directly and for records rebuilt from an
+   * authenticated parity record, so ACK/ordering/dedupe semantics are shared.
+   */
+  #acceptDataRecord(seq: number, plaintext: Uint8Array): void {
+    const result = this.#receiver.accept(seq, plaintext);
+    if (result === null) {
+      this.#droppedReplays += 1;
+      return;
+    }
+    this.#sender.setAckState(result.ack.ackSeq, result.ack.ackBits);
+    if (result.failure !== undefined) {
+      this.#fail(`arq:${result.failure}`);
+      return;
+    }
+    for (const frame of result.delivered) {
+      this.#deliveredFrames += 1;
+      this.#options.onFrame(frame);
+    }
+    if (result.shouldAck) {
+      this.#sendAck(result.ack.ackSeq, result.ack.ackBits);
+    }
+  }
+
+  /**
+   * Try to rebuild one missing data record from an authenticated parity
+   * record. Multi-loss, pruned state, or malformed metadata leaves recovery to
+   * ARQ; nothing is delivered without a successful AEAD open and a consistent
+   * group.
+   */
+  #handleFecRecord(header: TunnelRecordHeader, plaintext: Uint8Array): void {
+    if ((header.flags & TUNNEL_FLAG_FEC_PARITY) === 0) {
+      this.#fecParityDropped += 1;
+      this.#options.logger.debug("tunnel fec parity dropped: missing parity flag");
+      return;
+    }
+    const group = decodeXorFecGroup(plaintext);
+    if (group === null || group.startSeq !== header.seq) {
+      this.#fecParityDropped += 1;
+      this.#options.logger.debug("tunnel fec parity dropped: invalid metadata");
+      return;
+    }
+    const recovered = this.#fecReceiver.tryRecover(group);
+    if (recovered === null) {
+      this.#options.logger.debug(
+        `tunnel fec parity did not recover a record (start=${group.startSeq}, count=${group.count})`,
+      );
+      return;
+    }
+    this.#fecRecovered += 1;
+    this.#options.logger.debug(`tunnel fec recovered seq ${recovered.seq}`);
+    this.#acceptDataRecord(recovered.seq, recovered.plaintext);
   }
 
   #sendAck(ackSeq: number, ackBits: number): void {
@@ -361,6 +494,8 @@ export class TunnelTransport {
     this.#failureReason = reason;
     this.#outbound.length = 0;
     this.#outboundBytes = 0;
+    this.#fecSender?.reset();
+    this.#fecReceiver.reset();
     this.#sender.dispose();
     this.#receiver.dispose();
     this.#options.logger.debug(`tunnel failed: ${reason}`);

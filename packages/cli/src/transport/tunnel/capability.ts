@@ -1,9 +1,11 @@
 /**
  * TUN profile capability negotiation.
  *
- * F1 only advertises `fec: ["none"]`; XOR FEC is deliberately deferred. A peer
- * that requires XOR, a different key mode, or a different record dialect is
- * treated as incompatible and the session stays on the v1 relay path.
+ * F1.1 advertises both `fec: ["none", "xor"]`. The host offers XOR only when
+ * its own sender policy is `xor` and the peer advertises it; older peers get
+ * `fec: "none"` and the session continues on the F1 dialect. A peer that
+ * requires a different key mode or record dialect is treated as incompatible
+ * and the session stays on the v1 relay path.
  */
 
 import {
@@ -17,19 +19,26 @@ import {
   type TunnelKeyMode,
 } from "@limccn/tokimeki-protocol";
 
-/** FEC dialects implemented by this build. XOR is deferred to F1.1. */
-export const TUNNEL_FEC_SUPPORTED = ["none"] as const;
+/** FEC dialects implemented by this build. */
+export const TUNNEL_FEC_SUPPORTED = ["none", "xor"] as const;
+
+/** Parity policy used by one tunnel endpoint. */
+export type TunnelFecMode = (typeof TUNNEL_FEC_SUPPORTED)[number];
 
 /** Tunnel offer parameters carried in the host's P2P `offer` signal payload. */
 export interface TunnelOfferParams {
   readonly version: number;
   readonly keyMode: TunnelKeyMode;
-  readonly fec: "none";
+  readonly fec: TunnelFecMode;
   readonly initialSeq: number;
 }
 
 function isKeyMode(value: unknown): value is TunnelKeyMode {
   return typeof value === "string" && (TUNNEL_KEY_MODES as readonly string[]).includes(value);
+}
+
+function isFecMode(value: unknown): value is TunnelFecMode {
+  return value === "none" || value === "xor";
 }
 
 /** Build the `tunnel` capability advertised in `hello`. */
@@ -46,7 +55,9 @@ export function buildTunnelCapability(keyMode: TunnelKeyMode): TunnelCapability 
 
 /**
  * Return the peer's tunnel capability only when it matches the exact dialect
- * this build can speak. Unknown or looser values are treated as unsupported.
+ * this build can speak. Either FEC dialect is acceptable because this build
+ * always understands incoming parity; unsupported values are treated as
+ * unsupported.
  */
 export function matchingTunnelCapability(
   capabilities: Capabilities | undefined,
@@ -60,7 +71,8 @@ export function matchingTunnelCapability(
   if (tunnel.maxFrameSize === undefined || tunnel.maxFrameSize < TUNNEL_MAX_FRAME_BYTES) {
     return null;
   }
-  if (!Array.isArray(tunnel.fec) || !tunnel.fec.includes("none")) return null;
+  if (!Array.isArray(tunnel.fec)) return null;
+  if (!tunnel.fec.some((fec) => isFecMode(fec))) return null;
   return tunnel;
 }
 
@@ -77,12 +89,33 @@ export function tunnelCapabilitiesCompatible(
   return peer !== null && peer.keyMode === localKeyMode;
 }
 
+/** True when the peer declared XOR parity support. */
+export function peerSupportsXorFec(peer: TunnelCapability | null): boolean {
+  return peer !== null && Array.isArray(peer.fec) && peer.fec.includes("xor");
+}
+
+/**
+ * Pick the parity policy for one link.
+ *
+ * The sender only emits parity when its local policy is `xor` and the peer
+ * advertised XOR; otherwise the link keeps the plain F1 dialect.
+ */
+export function selectTunnelFec(
+  localFec: TunnelFecMode,
+  peer: TunnelCapability | null,
+): TunnelFecMode {
+  return localFec === "xor" && peerSupportsXorFec(peer) ? "xor" : "none";
+}
+
 /** Build the offer metadata the host embeds in its P2P `offer` signal. */
-export function buildTunnelOffer(keyMode: TunnelKeyMode): TunnelOfferParams {
+export function buildTunnelOffer(
+  keyMode: TunnelKeyMode,
+  fec: TunnelFecMode = "none",
+): TunnelOfferParams {
   return {
     version: TUNNEL_RECORD_VERSION,
     keyMode,
-    fec: "none",
+    fec,
     initialSeq: 0,
   };
 }
@@ -93,12 +126,12 @@ export function parseTunnelOffer(value: unknown): TunnelOfferParams | null {
   const record = value as Record<string, unknown>;
   if (record.version !== TUNNEL_RECORD_VERSION) return null;
   if (!isKeyMode(record.keyMode)) return null;
-  if (record.fec !== "none") return null;
+  if (!isFecMode(record.fec)) return null;
   if (record.initialSeq !== 0) return null;
   return {
     version: TUNNEL_RECORD_VERSION,
     keyMode: record.keyMode,
-    fec: "none",
+    fec: record.fec,
     initialSeq: 0,
   };
 }

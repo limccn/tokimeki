@@ -73,7 +73,7 @@ Useful host variables:
 | `TOKIMEKI_SNAPSHOT_MAX_BYTES` | `262144` | Snapshot size budget |
 | `TOKIMEKI_LISTENER_SNAPSHOT_MS` | `1000` | Read-only listener snapshot interval (250–60000 ms) |
 | `TOKIMEKI_TUNNEL` | `off` | `auto` runs the P2P-only AEAD/ARQ tunnel |
-| `TOKIMEKI_TUNNEL_FEC` | `off` | `xor` is recognized but deferred; currently runs without FEC |
+| `TOKIMEKI_TUNNEL_FEC` | `off` | `xor` emits AEAD parity for single-loss recovery |
 | `TOKIMEKI_TUNNEL_SECRET` | — | Optional >=16-byte shared secret for relay-blind tunnel keys |
 | `TOKIMEKI_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
 
@@ -200,8 +200,13 @@ top of an unreliable/unordered WebRTC DataChannel:
   `shared-secret`, the tunnel is negotiated but AEAD authentication fails;
   after the failure threshold it falls back to the relay and requests a fresh
   snapshot.
-- XOR FEC is deferred: `TOKIMEKI_TUNNEL_FEC=xor` is accepted but logs a
-  warning and runs without FEC (`fec: ["none"]` in the capability).
+- `TOKIMEKI_TUNNEL_FEC=xor` (default `off`) emits one AEAD parity record per
+  full group of eight data records. The receiver can rebuild exactly one lost
+  record; lost parity or multiple losses stay on ARQ. Both peers advertise
+  `fec: ["none", "xor"]`; the host offers `xor` only when the peer advertises
+  it, otherwise the link keeps the plain F1 dialect. Incoming parity is always
+  understood, even when the local sender policy is `off`. FEC does not change
+  the ARQ/relay fallback guarantees.
 - The relay never forwards `TUNNEL` frames; it still returns
   `not_implemented`. TUN is P2P-only in this release.
 

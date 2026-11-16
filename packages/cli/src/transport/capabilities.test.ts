@@ -90,7 +90,7 @@ describe("buildCapabilities", () => {
     expect(enabled.tunnel).toEqual({
       version: 1,
       arq: "selective-repeat",
-      fec: ["none"],
+      fec: ["none", "xor"],
       crypto: "aes-256-gcm",
       keyMode: "shared-secret",
       maxFrameSize: TUNNEL_MAX_FRAME_BYTES,

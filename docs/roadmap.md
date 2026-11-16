@@ -45,10 +45,11 @@ P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公�
 生产部署尚未执行。F2 listener snapshot-only 已实现、提交（`147974f`）并归档；
 本地 live e2e（`E2E_LISTENER=1` + P2P viewer，2026-11-16）已通过。F1 TUN profile
 已实现、提交（`1cbebc8`）并通过 tunnel live e2e（session-token 与 shared-secret
-两种 keyMode；P2P-only AEAD + selective-repeat ARQ；XOR FEC 暂缓到 F1.1）。
-F3 已实现、提交（`53f6861`）：LAN 提示 + mDNS/peer fan-out 设计评估（fan-out
-不实现、默认关闭）。至此 F0/F1/F2/F3 四个 v1.1 子任务均完成本地实现与验收；
-剩余为环境依赖验证、XOR FEC 后续项与生产部署。
+两种 keyMode；P2P-only AEAD + selective-repeat ARQ）；F1.1 XOR FEC 已实现
+（`TOKIMEKI_TUNNEL_FEC=xor`，capability `fec:["none","xor"]`，单丢包 parity
+恢复，多丢包/丢 parity 仍走 ARQ）。F3 已实现、提交（`53f6861`）：LAN 提示 +
+mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0/F1/F1.1/F2/F3
+五个 v1.1 子任务均完成本地实现与验收；剩余为环境依赖验证与生产部署。
 
 - **F0 P2P 传输增强（已完成并归档，`b8c9ec4`）**：新增 capability-gated
   `FRAGMENT` 帧（0x08）实现
@@ -64,12 +65,15 @@ F3 已实现、提交（`53f6861`）：LAN 提示 + mDNS/peer fan-out 设计评�
   路径保持现有 v1 帧与流控，TUNNEL 仍不转发。默认 `TOKIMEKI_TUNNEL=off`；
   `auto` 需双方 capability/keyMode 匹配。默认由 session token 派生密钥时 relay
   可推导，只作传输加固；relay-blind 需独立 `TOKIMEKI_TUNNEL_SECRET` 带外共享。
-  XOR FEC（`TOKIMEKI_TUNNEL_FEC=xor`）本版暂缓，capability 只声明
-  `fec:["none"]`。本地 live e2e（`E2E_TUNNEL=1`，session-token 与 shared-secret
-  各一次）、listener+P2P、F0 P2P 快照、flow-control+secret 与 host 重连已通过。
+  XOR FEC（`TOKIMEKI_TUNNEL_FEC=xor`）由 F1.1 补齐：capability 声明
+  `fec:["none","xor"]`，每 8 条 data 记录发一条 AEAD parity，接收端恢复恰好
+  1 条丢失记录；丢 parity/多丢包继续依赖 ARQ。本地 live e2e（`E2E_TUNNEL=1`，
+  session-token 与 shared-secret 各一次）、listener+P2P、F0 P2P 快照、
+  flow-control+secret 与 host 重连已通过。
   尚未验证：强制丢包/乱序注入、secret 不匹配的 live 回退、真实跨公网高丢包；
+  FEC 单丢包恢复目前只有单元/TunnelTransport 集成证据，没有真实丢包 e2e；
   host/attach 的 tunnel 切换目前只有 live e2e 覆盖，没有纯单元测试（单测覆盖
-  crypto/ARQ/capability/TunnelTransport 本体）。
+  crypto/ARQ/FEC/capability/TunnelTransport 本体）。
 - **F2 听众模式（已实现并提交 `147974f`，本地 live e2e 通过）**：任务
   `.trellis/tasks/11-16-v1-1-f2-listener`。只读、无 ack/背压，第一版
   snapshot-only（周期全量快照），独立上限 `TOKIMEKI_MAX_LISTENERS`；本地
@@ -79,8 +83,8 @@ F3 已实现、提交（`53f6861`）：LAN 提示 + mDNS/peer fan-out 设计评�
   不改变选路）。mDNS 不采用（不作发现权威）；peer fan-out 仅完成 leader 选举/
   保序/信任/故障切换设计，默认 off、不在本版实现。
 - 交付顺序：Transport/capabilities/golden 骨架 → listener snapshot-only →
-  AEAD（先定密钥威胁模型）→ unreliable DataChannel ARQ → FEC → LAN 选路 →
-  peer fan-out（仅设计/实验开关）。
+  AEAD（先定密钥威胁模型）→ unreliable DataChannel ARQ → FEC（F1.1 已完成 XOR
+  单丢包）→ LAN 选路 → peer fan-out（仅设计/实验开关）。
 
 ## v2（独立任务）
 

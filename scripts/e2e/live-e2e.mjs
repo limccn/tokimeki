@@ -23,6 +23,9 @@
  *                            data path; requires E2E_P2P_MODE=auto
  *   E2E_TUNNEL_SECRET        optional >=16-byte shared secret for relay-blind
  *                            tunnel keys (host and viewers use the same value)
+ *   E2E_TUNNEL_FEC           "xor" enables XOR parity for the tunnel; requires
+ *                            E2E_TUNNEL=1. Without injected packet loss this
+ *                            only asserts negotiation, not recovery.
  *   E2E_TIMEOUT_MS           default: 45000
  *   E2E_DUMP_DIR             on failure, write each process's full output here
  *
@@ -56,6 +59,7 @@ const flowControl = process.env.E2E_FLOW_CONTROL === "1";
 const listenerMode = process.env.E2E_LISTENER === "1";
 const tunnelMode = process.env.E2E_TUNNEL === "1";
 const tunnelSecret = process.env.E2E_TUNNEL_SECRET;
+const tunnelFec = process.env.E2E_TUNNEL_FEC;
 
 if (!relayUrl || !masterToken) {
   console.error("TOKIMEKI_RELAY_URL and TOKIMEKI_MASTER_TOKEN are required");
@@ -67,6 +71,14 @@ if (flowControl && p2pMode !== "off") {
 }
 if (tunnelMode && p2pMode === "off") {
   console.error("E2E_TUNNEL=1 requires E2E_P2P_MODE=auto; the TUN profile is P2P-only");
+  process.exit(2);
+}
+if (tunnelFec !== undefined && tunnelFec !== "off" && tunnelFec !== "xor") {
+  console.error("E2E_TUNNEL_FEC must be off or xor");
+  process.exit(2);
+}
+if (tunnelFec === "xor" && !tunnelMode) {
+  console.error("E2E_TUNNEL_FEC=xor requires E2E_TUNNEL=1");
   process.exit(2);
 }
 
@@ -89,6 +101,7 @@ function baseEnv() {
     TOKIMEKI_ICE_TRANSPORT_POLICY: icePolicy,
     ...(listenerMode ? { TOKIMEKI_LISTENER_SNAPSHOT_MS: "500" } : {}),
     ...(tunnelMode ? { TOKIMEKI_TUNNEL: "auto" } : {}),
+    ...(tunnelMode && tunnelFec !== undefined ? { TOKIMEKI_TUNNEL_FEC: tunnelFec } : {}),
     ...(tunnelSecret === undefined ? {} : { TOKIMEKI_TUNNEL_SECRET: tunnelSecret }),
     TOKIMEKI_LOG_LEVEL: "debug",
   };
@@ -373,6 +386,15 @@ async function main() {
             ? "tunnel used shared-secret keyMode (relay cannot derive the keys)"
             : "tunnel used session-token keyMode (relay can derive; not relay-blind)",
         );
+        if (tunnelFec === "xor") {
+          if (!/tunnel ready for .*fec=xor/.test(host.output)) {
+            throw new Error("tunnel did not negotiate XOR FEC");
+          }
+          // The e2e does not inject packet loss, so this only proves the XOR
+          // sender policy was negotiated. Single-loss recovery has unit and
+          // TunnelTransport integration coverage; real-loss e2e is unverified.
+          pass("tunnel negotiated XOR FEC (no packet loss injected; recovery unverified)");
+        }
       }
       await new Promise((r) => setTimeout(r, 300));
       attach2.child.write("p2p-live\r");

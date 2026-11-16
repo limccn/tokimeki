@@ -27,7 +27,7 @@ export type IceTransportPolicy = "all" | "relay";
 export type PiTuiMode = "fullscreen" | "regular";
 /** TUN profile switch (`TOKIMEKI_TUNNEL`). F1 is opt-in. */
 export type TunnelMode = "off" | "auto";
-/** XOR FEC is recognized but deferred; `xor` normalizes to `off` with a warning. */
+/** Local parity sender policy (`TOKIMEKI_TUNNEL_FEC`). */
 export type TunnelFecMode = "off" | "xor";
 
 export interface TerminalSize {
@@ -46,7 +46,7 @@ export interface CommonConfig {
   readonly iceTransportPolicy: IceTransportPolicy;
   /** Opt-in v1.1 TUN profile; default off. P2P-only. */
   readonly tunnel: TunnelMode;
-  /** Normalized FEC setting. F1 ships `none`, so `xor` becomes `off`. */
+  /** Local parity sender policy; `off` never sends FEC records. */
   readonly tunnelFec: TunnelFecMode;
   readonly tunnelKeyMode: TunnelKeyMode;
   /** Shared secret for relay-blind mode; null derives from the session token. */
@@ -361,20 +361,12 @@ function parseTunnelMode(env: NodeJS.ProcessEnv): TunnelMode {
   );
 }
 
-function parseTunnelFec(env: NodeJS.ProcessEnv, warnings: string[]): TunnelFecMode {
+function parseTunnelFec(env: NodeJS.ProcessEnv): TunnelFecMode {
   const raw = optionalEnv(env, "TOKIMEKI_TUNNEL_FEC");
   if (raw === undefined) return "off";
   const normalized = raw.trim().toLowerCase();
   if (normalized === "off" || normalized === "none" || normalized === "0") return "off";
-  if (normalized === "xor") {
-    // F1 ships `fec: ["none"]`; claiming XOR without an implementation would
-    // weaken the compatibility contract, so the request is downgraded loudly.
-    warnings.push(
-      "TOKIMEKI_TUNNEL_FEC=xor is not implemented in this release; " +
-        "XOR FEC is deferred and the tunnel runs without FEC",
-    );
-    return "off";
-  }
+  if (normalized === "xor") return "xor";
   throw new ConfigError(
     `TOKIMEKI_TUNNEL_FEC must be one of off, xor (received ${JSON.stringify(raw)})`,
   );
@@ -401,7 +393,7 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
   const logLevel = parseLogLevel(env, warnings);
   const p2p = parseP2P(env);
   const tunnel = parseTunnelMode(env);
-  const tunnelFec = parseTunnelFec(env, warnings);
+  const tunnelFec = parseTunnelFec(env);
   const tunnelSecret = parseTunnelSecret(env, tunnel);
   if (tunnel === "auto" && p2p === "off") {
     warnings.push("TOKIMEKI_TUNNEL=auto requires P2P; the tunnel will not be used");

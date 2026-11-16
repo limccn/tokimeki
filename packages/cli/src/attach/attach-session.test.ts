@@ -316,20 +316,23 @@ describe("attach listener mode", () => {
 });
 
 describe("attach tunnel negotiation", () => {
-  function tunnelOffer(keyMode: "session-token" | "shared-secret"): {
+  function tunnelOffer(
+    keyMode: "session-token" | "shared-secret",
+    fec: "none" | "xor" = "none",
+  ): {
     sdp: string;
     type: "offer";
     tunnel: {
       version: number;
       keyMode: "session-token" | "shared-secret";
-      fec: "none";
+      fec: "none" | "xor";
       initialSeq: number;
     };
   } {
     return {
       sdp: "v=0",
       type: "offer",
-      tunnel: { version: 1, keyMode, fec: "none", initialSeq: 0 },
+      tunnel: { version: 1, keyMode, fec, initialSeq: 0 },
     };
   }
 
@@ -339,7 +342,7 @@ describe("attach tunnel negotiation", () => {
     expect(viewer.client.options.capabilities.tunnel).toEqual({
       version: 1,
       arq: "selective-repeat",
-      fec: ["none"],
+      fec: ["none", "xor"],
       crypto: "aes-256-gcm",
       keyMode: "session-token",
       maxFrameSize: 16_339,
@@ -393,6 +396,61 @@ describe("attach tunnel negotiation", () => {
         (control) =>
           (control as { type?: string; reason?: string }).type === "transport" &&
           (control as { reason?: string }).reason === "tunnel key mode mismatch",
+      ),
+    );
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+
+  it("accepts an XOR offer when the local FEC policy allows it", async () => {
+    // P2P is disabled so the accepted offer stops before creating a native
+    // peer; this test only covers offer parsing and the refusal gate.
+    const { client, done } = makeSession("viewer", {
+      tunnel: "auto",
+      tunnelFec: "xor",
+      p2p: "off",
+    });
+    await waitFor(() => client.options.role !== undefined && client.started);
+    client.emitMessage({
+      v: PROTOCOL_VERSION,
+      type: "signal",
+      to: client.options.clientId,
+      from: "host-1",
+      kind: "offer",
+      payload: tunnelOffer("session-token", "xor"),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(
+      client.controls.some(
+        (control) =>
+          (control as { type?: string; mode?: string }).type === "transport" &&
+          (control as { mode?: string }).mode === "relay",
+      ),
+    ).toBe(false);
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+
+  it("refuses an offer with an unknown FEC mode", async () => {
+    const { client, done } = makeSession("viewer", { tunnel: "auto" });
+    await waitFor(() => client.options.role !== undefined && client.started);
+    client.emitMessage({
+      v: PROTOCOL_VERSION,
+      type: "signal",
+      to: client.options.clientId,
+      from: "host-1",
+      kind: "offer",
+      payload: {
+        sdp: "v=0",
+        type: "offer",
+        tunnel: { version: 1, keyMode: "session-token", fec: "rs", initialSeq: 0 },
+      },
+    });
+    await waitFor(() =>
+      client.controls.some(
+        (control) =>
+          (control as { type?: string; reason?: string }).type === "transport" &&
+          (control as { reason?: string }).reason === "unsupported offer parameters",
       ),
     );
     client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });

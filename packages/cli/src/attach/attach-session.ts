@@ -38,6 +38,7 @@ import type { RelayConnectionState, RelayFatalError } from "../transport/relay-t
 import { RouteSelector } from "../transport/route-selector.js";
 import {
   parseTunnelOffer,
+  type TunnelFecMode,
   type TunnelOfferParams,
   tunnelOfferCompatible,
 } from "../transport/tunnel/capability.js";
@@ -100,6 +101,7 @@ class AttachSession {
   #iceTransportPolicy: IceTransportPolicy;
   #peer: P2PPeer | null = null;
   #tunnel: TunnelTransport | null = null;
+  #tunnelFec: TunnelFecMode | null = null;
   #p2pReady = false;
   #p2pSnapshotSeen = false;
   #p2pBufferOverflow = false;
@@ -518,6 +520,10 @@ class AttachSession {
     });
     this.#peer = peer;
     if (tunnelOffer !== null) {
+      // The host decides parity per link; this endpoint only sends parity when
+      // its local policy also allows it. Receiving peer parity always works.
+      const fec: TunnelFecMode =
+        tunnelOffer.fec === "xor" && this.#config.tunnelFec === "xor" ? "xor" : "none";
       try {
         this.#tunnel = new TunnelTransport({
           role: "viewer",
@@ -525,12 +531,14 @@ class AttachSession {
           sessionToken: this.#config.sessionToken,
           keyMode: this.#config.tunnelKeyMode,
           secret: this.#config.tunnelSecret,
+          fec,
           logger: this.#logger,
           sendFrame: (bytes) => peer.send(bytes),
           onFrame: (bytes) => this.#handleDcFrame(bytes, true),
           onFailure: (reason) => this.#handleTunnelFailure(reason),
         });
-        this.#logger.info(`tunnel negotiated (keyMode=${this.#config.tunnelKeyMode}, fec=none)`);
+        this.#tunnelFec = fec;
+        this.#logger.info(`tunnel negotiated (keyMode=${this.#config.tunnelKeyMode}, fec=${fec})`);
       } catch (error) {
         this.#logger.warn(`tunnel setup failed: ${formatError(error)}`);
         this.#disposeP2P("tunnel setup failed");
@@ -563,7 +571,9 @@ class AttachSession {
     if (stats !== undefined) {
       this.#logger.debug(
         `tunnel stats: sent=${stats.sentRecords} received=${stats.receivedRecords} ` +
-          `retransmits=${stats.retransmits} decryptFailures=${stats.decryptFailures}`,
+          `retransmits=${stats.retransmits} decryptFailures=${stats.decryptFailures} ` +
+          `fecGroups=${stats.fecGroupsSent} fecRecovered=${stats.fecRecovered} ` +
+          `fecDropped=${stats.fecParityDropped}`,
       );
     }
     this.#handleP2PFailure(`tunnel: ${reason}`);
@@ -587,7 +597,7 @@ class AttachSession {
       this.#logger.info(
         this.#tunnel === null
           ? `p2p transport ready: ${mode}`
-          : `p2p tunnel ready: ${mode} (fec=none)`,
+          : `p2p tunnel ready: ${mode} (fec=${this.#tunnelFec ?? "none"})`,
       );
       this.#flushDcBuffer();
       return;
@@ -618,6 +628,7 @@ class AttachSession {
     this.#peer = null;
     this.#tunnel?.dispose();
     this.#tunnel = null;
+    this.#tunnelFec = null;
     this.#p2pReady = false;
     this.#p2pSnapshotSeen = false;
     this.#p2pBufferOverflow = false;

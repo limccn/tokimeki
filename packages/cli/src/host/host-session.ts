@@ -42,8 +42,11 @@ import { RouteSelector } from "../transport/route-selector.js";
 import {
   buildTunnelOffer,
   matchingTunnelCapability,
+  selectTunnelFec,
+  type TunnelFecMode,
   tunnelCapabilitiesCompatible,
 } from "../transport/tunnel/capability.js";
+import { TUNNEL_FEC_OUTPUT_PAYLOAD_MAX_BYTES } from "../transport/tunnel/fec.js";
 import { TunnelTransport } from "../transport/tunnel/tunnel-transport.js";
 import type { Transport } from "../transport/types.js";
 import { HostPty, type PtyExitInfo } from "./host-pty.js";
@@ -102,6 +105,8 @@ interface HostP2PLink {
    */
   tunnel: TunnelTransport | null;
   tunnelKeyMode: TunnelKeyMode | null;
+  /** Negotiated parity sender policy for this link (null when no tunnel). */
+  tunnelFec: TunnelFecMode | null;
   mode: TransportMode | null;
   ready: boolean;
   sentFrames: number;
@@ -227,9 +232,10 @@ class HostSession {
   readonly #fragmentationViewers = new Set<string>();
   /**
    * Viewers whose `hello`/`peer-joined` capabilities match this build's TUN
-   * dialect. Only these viewers get an unreliable DataChannel and AEAD/ARQ.
+   * dialect, mapped to the parity policy negotiated for that link. Only these
+   * viewers get an unreliable DataChannel and AEAD/ARQ.
    */
-  readonly #tunnelViewers = new Set<string>();
+  readonly #tunnelViewers = new Map<string, TunnelFecMode>();
   readonly #p2pRetryUsed = new Set<string>();
   readonly #p2pRetryTimers = new Map<string, NodeJS.Timeout>();
   #p2pRetriesInFlight = 0;
@@ -650,7 +656,8 @@ class HostSession {
     }
     const peerCapability = matchingTunnelCapability(capabilities);
     if (tunnelCapabilitiesCompatible(peerCapability, this.#config.tunnelKeyMode)) {
-      this.#tunnelViewers.add(clientId);
+      const localFec: TunnelFecMode = this.#config.tunnelFec === "xor" ? "xor" : "none";
+      this.#tunnelViewers.set(clientId, selectTunnelFec(localFec, peerCapability));
       return;
     }
     this.#tunnelViewers.delete(clientId);
@@ -661,6 +668,7 @@ class HostSession {
     if (this.#config.p2p === "off" || this.#closing) return;
     if (this.#p2pLinks.has(clientId)) return;
     const useTunnel = this.#config.tunnel === "auto" && this.#tunnelViewers.has(clientId);
+    const tunnelFec = this.#tunnelViewers.get(clientId) ?? "none";
     const peer = new P2PPeer({
       label: `host:${clientId}`,
       role: "host",
@@ -689,7 +697,9 @@ class HostSession {
             // supplies ordering and reliability; v1 frames must never use this
             // channel.
             dataChannelConfig: { unordered: true, maxRetransmits: 0 },
-            offerMetadata: { tunnel: buildTunnelOffer(this.#config.tunnelKeyMode) },
+            offerMetadata: {
+              tunnel: buildTunnelOffer(this.#config.tunnelKeyMode, tunnelFec),
+            },
           }
         : {}),
     });
@@ -703,6 +713,7 @@ class HostSession {
           sessionToken: this.#config.sessionToken,
           keyMode: this.#config.tunnelKeyMode,
           secret: this.#config.tunnelSecret,
+          fec: tunnelFec,
           logger: this.#logger,
           sendFrame: (bytes) => peer.send(bytes),
           onFrame: (bytes) => this.#handleFrame(bytes, clientId, true),
@@ -729,6 +740,7 @@ class HostSession {
       peer,
       tunnel,
       tunnelKeyMode: tunnel === null ? null : this.#config.tunnelKeyMode,
+      tunnelFec: tunnel === null ? null : tunnelFec,
       mode: null,
       ready: false,
       sentFrames: 0,
@@ -775,7 +787,8 @@ class HostSession {
     );
     if (link.tunnel !== null) {
       this.#logger.info(
-        `tunnel ready for ${clientId} (keyMode=${link.tunnelKeyMode ?? "session-token"}, fec=none)`,
+        `tunnel ready for ${clientId} ` +
+          `(keyMode=${link.tunnelKeyMode ?? "session-token"}, fec=${link.tunnelFec ?? "none"})`,
       );
     }
   }
@@ -811,7 +824,8 @@ class HostSession {
       this.#logger.debug(
         `tunnel stats for ${clientId}: sent=${stats.sentRecords} ` +
           `received=${stats.receivedRecords} retransmits=${stats.retransmits} ` +
-          `decryptFailures=${stats.decryptFailures}`,
+          `decryptFailures=${stats.decryptFailures} fecGroups=${stats.fecGroupsSent} ` +
+          `fecRecovered=${stats.fecRecovered} fecDropped=${stats.fecParityDropped}`,
       );
     }
     this.#logger.warn(`tunnel unavailable for ${clientId} (${reason}); using relay`);
@@ -974,13 +988,18 @@ class HostSession {
 
   /**
    * When the TUN profile is enabled, keep every OUTPUT frame inside one AEAD
+   * record. With XOR parity enabled the payload is capped further so the
+   * parity record for a full group (metadata + max frame) still fits one AEAD
    * record. The same split is safe on the relay (slightly smaller frames), so
    * one frame can travel either path without re-encoding.
    */
   #outputPayloadMax(): number {
-    return this.#config.tunnel === "auto" && this.#config.p2p !== "off"
-      ? TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES
-      : OUTPUT_PAYLOAD_MAX;
+    if (this.#config.tunnel !== "auto" || this.#config.p2p === "off") {
+      return OUTPUT_PAYLOAD_MAX;
+    }
+    return this.#config.tunnelFec === "xor"
+      ? TUNNEL_FEC_OUTPUT_PAYLOAD_MAX_BYTES
+      : TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES;
   }
 
   #sendOutput(seq: number, payload: Uint8Array): void {

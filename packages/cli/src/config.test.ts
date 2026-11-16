@@ -336,12 +336,22 @@ describe("tunnel configuration", () => {
     throw new Error("expected ConfigError");
   });
 
-  it("normalizes the deferred XOR FEC request with a warning", () => {
+  it("accepts XOR FEC and keeps it for the sender policy", () => {
     const config = loadHostConfig({
       env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_FEC: "xor" }),
     });
-    expect(config.tunnelFec).toBe("off");
-    expect(config.warnings.some((warning) => warning.includes("XOR FEC is deferred"))).toBe(true);
+    expect(config.tunnelFec).toBe("xor");
+    expect(config.warnings.some((warning) => warning.includes("FEC"))).toBe(false);
+  });
+
+  it("normalizes off/none aliases without a warning", () => {
+    for (const value of ["off", "none", "0"]) {
+      const config = loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_FEC: value }),
+      });
+      expect(config.tunnelFec).toBe("off");
+      expect(config.warnings.some((warning) => warning.includes("FEC"))).toBe(false);
+    }
   });
 
   it("rejects unknown tunnel modes and FEC values", () => {

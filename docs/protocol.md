@@ -3,8 +3,9 @@
 > 状态：v1 实现完成（Phase 6）；v1.1 F0 已在 v1 基线上实现（`FRAGMENT 0x08`、
 > P2P 直发快照、ICE 到期自动刷新、provider 重试一次），v1.1 F2 已实现只读
 > `listener`（snapshot-only）角色；v1.1 F1 已实现 P2P-only TUN profile
-> （AES-256-GCM + selective-repeat ARQ，XOR FEC 在本版暂缓）；单测、relay
-> 测试与本地 live e2e（session-token 与 shared-secret）通过。
+> （AES-256-GCM + selective-repeat ARQ），v1.1 F1.1 已实现 XOR FEC
+> （单丢包 parity 恢复）；单测、relay 测试与本地 live e2e（session-token 与
+> shared-secret）通过。
 > 生产部署、跨 NAT/TURN 与真实 TUI 的验收记录见 `docs/deployment.md` §7；wire
 > `v` 仍为 1，F0/F1/F2 新增项是 capability-gated 可选扩展。
 > 规范性实现：`packages/protocol`；语言无关向量：`packages/protocol/test/vectors/`。
@@ -169,7 +170,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `protocolVersion` | number | 可选 |
 | `transports` | `modes: string[]`, `fragmentation?` | v1 使用 `modes`；v1.1 F0 使用 `fragmentation: {version, maxFrameBytes, maxMessageBytes}` |
 | `snapshot` | `formats: string[]`, `maxBytes` | v1 使用；预期格式含 `xterm-serialize`、`raw-ring` |
-| `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `keyMode`, `maxFrameSize` | v1.1 F1 使用 `version:1`、`arq:"selective-repeat"`、`crypto:"aes-256-gcm"`、`keyMode:"session-token"\|"shared-secret"`、`maxFrameSize:16339`；`fec:["none"]`（XOR 暂缓） |
+| `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `keyMode`, `maxFrameSize` | v1.1 F1 使用 `version:1`、`arq:"selective-repeat"`、`crypto:"aes-256-gcm"`、`keyMode:"session-token"\|"shared-secret"`、`maxFrameSize:16339`；v1.1 F1.1 的 `fec:["none","xor"]`（XOR 单丢包 parity） |
 | `listener` | `modes: string[]` | v1.1 F2 使用 `snapshot-only`；`safe-boundary` 仍预留 |
 | `peerRelay` | `version`, `roles: string[]` | v1.1 预留 |
 
@@ -370,15 +371,16 @@ DataChannel 上用 selective-repeat ARQ + AES-256-GCM 承载完整的 `INPUT`/`O
   "tunnel": {
     "version": 1,
     "arq": "selective-repeat",
-    "fec": ["none"],
+    "fec": ["none", "xor"],
     "crypto": "aes-256-gcm",
     "keyMode": "session-token",
     "maxFrameSize": 16339
   }
   ```
 
-- `fec` 首版只声明 `["none"]`；`TOKIMEKI_TUNNEL_FEC=xor` 被识别但降级为无 FEC
-  并记录警告。XOR FEC 不影响 ARQ 正确性，留待 F1.1。
+- v1.1 F1.1 声明 `fec:["none","xor"]`；接收端始终能解析/利用 peer 发来的
+  `fec` parity，即使本地发送策略为 `off`。`TOKIMEKI_TUNNEL_FEC=off`（默认）时
+  发送端不产生 parity；`xor` 时对完整组发送 parity。
 - host 只有在 viewer 的 capability 与本地 `version`/`arq`/`crypto`/`keyMode`/
   `maxFrameSize` 完全兼容时，才创建 `unordered:true, maxRetransmits:0` 的
   DataChannel，并在 `offer` signal payload 中加入：
@@ -387,6 +389,9 @@ DataChannel 上用 selective-repeat ARQ + AES-256-GCM 承载完整的 `INPUT`/`O
   "tunnel": { "version": 1, "keyMode": "session-token", "fec": "none", "initialSeq": 0 }
   ```
 
+- `offer.tunnel.fec` 为 `"none"` 或 `"xor"`。host 仅在本端 `TOKIMEKI_TUNNEL_FEC=xor`
+  且 peer capability 含 `xor` 时 offer `"xor"`；否则回落 `"none"`，不拒绝会话。
+  viewer 接受两种值；只有本地策略也是 `xor` 时才发送 parity。
 - viewer 校验 offer 参数；`TOKIMEKI_TUNNEL=off`、keyMode 不匹配或参数未知时
   必须拒绝该次 P2P，并发送 `transport{mode:"relay",state:"failed"}`，绝不能在
   unreliable channel 上运行 v1 帧。
@@ -415,7 +420,7 @@ v2h  = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
 |---|---:|---|
 | 0 | 1 | version (`1`) |
 | 1 | 1 | type (`1=data`, `2=ack`, `3=fec`, `4=ping`) |
-| 2 | 1 | flags（bit0 = FEC parity；首版为 0） |
+| 2 | 1 | flags（bit0 = FEC parity；data/ack 为 0） |
 | 3 | 1 | reserved (`0`) |
 | 4 | 4 | seq u32BE |
 | 8 | 4 | ackSeq u32BE（next expected；ACK/data 使用） |
@@ -428,7 +433,9 @@ v2h  = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
 - 明文 payload 是一条完整终端帧（`INPUT` 或 `OUTPUT` 字节，包含帧类型字节）。
   `TUNNEL_MAX_FRAME_BYTES = 16384 - 1 - 28 - 16 = 16339`；tunnel 启用时 host
   把 OUTPUT payload 限制为 `16339 - 9 = 16330`，viewer 把 INPUT payload 限制为
-  `16339 - 1 = 16338`，以保证整帧落在一条 DataChannel 消息内。
+  `16339 - 1 = 16338`，以保证整帧落在一条 DataChannel 消息内。启用 XOR FEC 时
+  为进一步容纳 parity 元数据，OUTPUT payload 上限为 `16339 - 22 - 9 = 16308`，
+  INPUT payload 上限为 `16339 - 22 - 1 = 16316`（其中 22 = FEC 元数据上限）。
 - AAD（大端）：
 
   ```text
@@ -454,10 +461,34 @@ v2h  = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
 - ACK 记录本身不进入 ARQ 队列，也不被 ACK；ACK 丢失由数据重传触发重复 ACK。
 - 隧道失败只影响数据面：host 重新快照、viewer 恢复 relay，PTY/TUI 会话不退出。
 
-**FEC**
+**XOR FEC（v1.1 F1.1）**
 
-首版只实现 `none`。capability 不得声明 `xor`，直到 XOR parity 的 wire layout
-被冻结并有单元/e2e 覆盖。
+- FEC 是 ARQ 的补充，不改变正确性依赖：丢 parity、多丢包、恢复缓存淘汰或元数据
+  非法时都继续由 ARQ 恢复或回退 relay。
+- 发送端把连续 data 记录按最多 8 条一组；只有完整组才生成一条 `fec` 记录，
+  尾部不足一组依赖 ARQ。组内 plaintext 按组内最大长度零填充后逐字节 XOR 得到
+  parity。重传不重复生成 parity；组缓冲与 parity 长度有界。
+- `fec` 记录使用现有 `TUNNEL` AEAD 信封：`type=3`、`flags` bit0=1、
+  `seq=startSeq`、`ackSeq=0`、`ackBits=0`。其 plaintext 布局：
+
+  ```text
+  [startSeq u32BE][count u8][reserved u8]
+  [length u16BE * count]
+  [parity bytes: max(lengths)]
+  ```
+
+  `count` 为 1..8；`lengths` 是每条 data plaintext 的原始长度；parity 长度为
+  组内最大长度，且整条 `fec` plaintext 不超过一条 `TUNNEL` 记录的 16339 字节
+  预算。`fec` 记录不进入 ARQ 队列、不被 ACK，也不重传。
+- 接收端保存最近 data plaintext（上限 64 条 / 1 MiB / 30 s）。收到 parity 后：
+  先经同一 key/AAD 解密验证；若组内恰好缺少 1 条且其余记录长度与元数据一致，
+  则重建该 plaintext 并交给正常 ARQ 接收路径（仍去重、排序、ACK）。缺少多条、
+  长度不一致或记录已被清理时不恢复。
+- AEAD 失败、未知版本/类型、错误方向、缺失 parity flag、元数据非法或超限的
+  `fec` 记录一律丢弃并计数，不改变 ARQ/会话状态；日志只记录组数、恢复次数与
+  丢弃原因，不记录 plaintext、密钥、nonce 或 ciphertext。
+- 旧 peer 的 capability 不含 `xor` 时 host offer 回落 `"none"`；v1.1 F1 peer
+  仍可建立不使用 FEC 的隧道，不会因 FEC 能力差异拒绝会话。
 
 ## 8. 错误码与关闭码
 
@@ -556,7 +587,11 @@ Envelope：
 
 1. **应用层隧道**：`TUNNEL 0x06`、`TUNNEL_TO 0x07` 以及 `0x09..0x7F` 扩展区间。`0x08` 已在 v1.1 F0 分配给 `FRAGMENT`（capability-gated P2P 分片，relay 拒绝）。v1.1 F1 的 `TUNNEL 0x06` 已用于 P2P-only 内层 AEAD/ARQ 记录（§7.4）；relay 仍返回 `not_implemented`，`TUNNEL_TO` 仍预留。v1 relay 对 0x06/0x07 返回 `not_implemented`；其他未知字节按 `unknown_frame_type` 处理。ARQ/FEC/AEAD 的跨语言 wire 方言由本文与 golden vectors 冻结；OS TUN/VPN、文件传输、任意 IP 不属于 TUN profile。
 2. **listener 角色**：v1.1 F2 已激活 `hello.role = "listener"`（只读、snapshot-only、不参与 resize/输入/ack/背压/P2P）。更早的 v1 relay 返回 `not_implemented`。`safe-boundary`、listener 增量输出与 listener P2P 仍预留。
-3. **Capabilities**：`peerRelay` 预留；`tunnel` 在 v1.1 F1 可用（P2P-only、`fec:["none"]`）；`transports`、`snapshot`、`listener`（`snapshot-only`）在 v1.1 可用；`transports.fragmentation` 在 v1.1 F0 可用（仅 P2P 大帧分片/直发快照）。未知 capability 必须忽略，不能拒绝连接。
+3. **Capabilities**：`peerRelay` 预留；`tunnel` 在 v1.1 F1 可用（P2P-only），
+   v1.1 F1.1 增加 `fec:["none","xor"]`（XOR 单丢包 parity）；`transports`、
+   `snapshot`、`listener`（`snapshot-only`）在 v1.1 可用；`transports.fragmentation`
+   在 v1.1 F0 可用（仅 P2P 大帧分片/直发快照）。未知 capability 必须忽略，
+   不能拒绝连接。
 4. **transport.via**：`host`、`peer:<id>`、`relay` 预留，v1 可忽略。
 5. v1.1 新增控制消息（如 `tunnel.*`、`listener.*`）时，v1 relay 应识别预留命名空间并返回 `not_implemented`，而不是静默丢弃。
 

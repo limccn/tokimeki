@@ -1,12 +1,17 @@
 import {
   decodeFrame,
+  decodeTunnelRecord,
   encodeFrame,
+  TUNNEL_FLAG_FEC_PARITY,
   TUNNEL_INPUT_PAYLOAD_MAX_BYTES,
   type TunnelKeyMode,
 } from "@limccn/tokimeki-protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Logger } from "../../logger.js";
+import type { TunnelFecMode } from "./capability.js";
+import { deriveTunnelKeys, TunnelCipher } from "./crypto.js";
+import { encodeXorFecGroup, TUNNEL_FEC_INPUT_PAYLOAD_MAX_BYTES } from "./fec.js";
 import { TunnelTransport } from "./tunnel-transport.js";
 
 const logger = new Logger({ level: "silent", write: () => {} });
@@ -56,6 +61,8 @@ function makeHarness(
     hostKeyMode?: TunnelKeyMode;
     viewerKeyMode?: TunnelKeyMode;
     viewerMaxOutboundBytes?: number;
+    hostFec?: TunnelFecMode;
+    viewerFec?: TunnelFecMode;
   } = {},
 ): Harness {
   const hostToViewer: Uint8Array[] = [];
@@ -70,6 +77,7 @@ function makeHarness(
     sessionId: SESSION_ID,
     sessionToken: SESSION_TOKEN,
     keyMode: options.hostKeyMode ?? "session-token",
+    fec: options.hostFec ?? "none",
     logger,
     sendFrame: (bytes) => {
       hostToViewer.push(payloadOf(bytes));
@@ -87,6 +95,7 @@ function makeHarness(
     keyMode: options.viewerKeyMode ?? "session-token",
     secret:
       (options.viewerKeyMode ?? "session-token") === "shared-secret" ? SHARED_SECRET : undefined,
+    fec: options.viewerFec ?? "none",
     logger,
     sendFrame: (bytes) => {
       viewerToHost.push(payloadOf(bytes));
@@ -135,6 +144,18 @@ function makeHarness(
 
 function outputFrame(seq: number, payload = `frame-${seq}`): Uint8Array {
   return encodeFrame({ type: "output", seq, payload: new TextEncoder().encode(payload) });
+}
+
+type TunnelHeader = ReturnType<typeof decodeTunnelRecord>["header"];
+
+function headers(records: readonly Uint8Array[]): TunnelHeader[] {
+  return records.map((record) => decodeTunnelRecord(record).header);
+}
+
+function dropRecord(records: Uint8Array[], predicate: (header: TunnelHeader) => boolean): void {
+  const index = records.findIndex((record) => predicate(decodeTunnelRecord(record).header));
+  if (index < 0) throw new Error("expected tunnel record not found");
+  records.splice(index, 1);
 }
 
 beforeEach(() => {
@@ -306,5 +327,176 @@ describe("TunnelTransport", () => {
     harness.viewer.dispose();
     advance(10_000);
     expect(harness.hostFailures).toEqual([]);
+  });
+});
+
+describe("TunnelTransport XOR FEC", () => {
+  const GROUP = 8;
+
+  function sendGroup(harness: Harness): Uint8Array[] {
+    const frames: Uint8Array[] = [];
+    for (let seq = 0; seq < GROUP; seq += 1) {
+      const frame = outputFrame(seq, `fec-frame-${seq}`);
+      frames.push(frame);
+      expect(harness.host.send(frame)).toBe(true);
+    }
+    return frames;
+  }
+
+  it("emits one parity record per full group when XOR is enabled", () => {
+    const harness = makeHarness({ hostFec: "xor" });
+    const frames = sendGroup(harness);
+    const fecRecords = headers(harness.hostToViewer).filter((header) => header.type === "fec");
+    expect(fecRecords).toHaveLength(1);
+    expect((fecRecords[0]?.flags ?? 0) & TUNNEL_FLAG_FEC_PARITY).toBe(TUNNEL_FLAG_FEC_PARITY);
+    expect(fecRecords[0]?.seq).toBe(0);
+    expect(harness.host.stats.fecGroupsSent).toBe(1);
+
+    harness.pump();
+    expect(harness.viewerFrames).toEqual(frames);
+    expect(harness.viewerFailures).toEqual([]);
+  });
+
+  it("recovers a single dropped data record from parity before the ARQ timeout", () => {
+    const harness = makeHarness({ hostFec: "xor", viewerFec: "xor" });
+    const frames = sendGroup(harness);
+    dropRecord(harness.hostToViewer, (header) => header.type === "data" && header.seq === 3);
+    harness.pump();
+
+    expect(harness.viewerFrames).toEqual(frames);
+    expect(harness.viewer.stats.fecRecovered).toBe(1);
+    expect(harness.viewer.stats.retransmits).toBe(0);
+    expect(harness.viewerFailures).toEqual([]);
+    expect(harness.host.pendingCount).toBe(0);
+  });
+
+  it("falls back to ARQ when the parity record is lost", () => {
+    const harness = makeHarness({ hostFec: "xor", viewerFec: "xor" });
+    sendGroup(harness);
+    dropRecord(harness.hostToViewer, (header) => header.type === "data" && header.seq === 3);
+    dropRecord(harness.hostToViewer, (header) => header.type === "fec");
+    harness.pump();
+    expect(harness.viewerFrames).toHaveLength(3);
+    expect(harness.viewer.stats.fecRecovered).toBe(0);
+
+    advance(200);
+    harness.pump();
+    expect(harness.viewerFrames).toHaveLength(GROUP);
+    expect(harness.host.stats.retransmits).toBeGreaterThan(0);
+  });
+
+  it("does not recover when more than one record is missing", () => {
+    const harness = makeHarness({ hostFec: "xor", viewerFec: "xor" });
+    sendGroup(harness);
+    dropRecord(harness.hostToViewer, (header) => header.type === "data" && header.seq === 2);
+    dropRecord(harness.hostToViewer, (header) => header.type === "data" && header.seq === 5);
+    harness.pump();
+    expect(harness.viewerFrames).toHaveLength(2);
+    expect(harness.viewer.stats.fecRecovered).toBe(0);
+
+    advance(200);
+    harness.pump();
+    expect(harness.viewerFrames).toHaveLength(GROUP);
+  });
+
+  it("sends no parity records when FEC is off", () => {
+    const harness = makeHarness();
+    const frames = sendGroup(harness);
+    expect(headers(harness.hostToViewer).some((header) => header.type === "fec")).toBe(false);
+    harness.pump();
+    expect(harness.viewerFrames).toEqual(frames);
+  });
+
+  it("accepts peer parity while sending without FEC", () => {
+    const harness = makeHarness({ hostFec: "xor", viewerFec: "none" });
+    const frames = sendGroup(harness);
+    expect(harness.viewer.fec).toBe("none");
+    dropRecord(harness.hostToViewer, (header) => header.type === "data" && header.seq === 4);
+    harness.pump();
+    expect(harness.viewerFrames).toEqual(frames);
+    expect(harness.viewer.stats.fecRecovered).toBe(1);
+  });
+
+  it("splits FEC-enabled input at the parity-safe frame size", () => {
+    const harness = makeHarness({ viewerFec: "xor" });
+    const input = new Uint8Array(TUNNEL_FEC_INPUT_PAYLOAD_MAX_BYTES + 10).fill(0x42);
+    expect(harness.viewer.sendTerminalInput(input)).toBe(true);
+    harness.pump();
+    expect(harness.hostFrames).toHaveLength(2);
+    const payload = Buffer.concat(
+      harness.hostFrames.map((frame) => {
+        const decoded = decodeFrame(frame);
+        if (decoded.type !== "input") throw new Error("expected input");
+        return Buffer.from(decoded.payload);
+      }),
+    );
+    expect(payload).toEqual(Buffer.from(input));
+  });
+
+  it("drops malformed or unauthenticated parity without delivering frames", () => {
+    const harness = makeHarness();
+    const keys = deriveTunnelKeys({
+      keyMode: "session-token",
+      sessionId: SESSION_ID,
+      sessionToken: SESSION_TOKEN,
+    });
+    const cipher = new TunnelCipher({
+      keys,
+      sendDirection: "hostToViewer",
+      sessionId: SESSION_ID,
+      nonceSource: counterNonce(9000),
+    });
+    const validGroup = encodeXorFecGroup({
+      startSeq: 0,
+      count: 1,
+      lengths: [1],
+      parity: new Uint8Array([7]),
+    });
+
+    // Count 0 is invalid metadata.
+    harness.viewer.receive(
+      cipher.seal({
+        type: "fec",
+        flags: TUNNEL_FLAG_FEC_PARITY,
+        seq: 0,
+        plaintext: new Uint8Array(6),
+      }),
+    );
+    expect(harness.viewer.stats.fecParityDropped).toBe(1);
+
+    // A parity record without the parity flag is ignored.
+    harness.viewer.receive(cipher.seal({ type: "fec", flags: 0, seq: 0, plaintext: validGroup }));
+    expect(harness.viewer.stats.fecParityDropped).toBe(2);
+
+    // Header seq and metadata startSeq must agree.
+    harness.viewer.receive(
+      cipher.seal({
+        type: "fec",
+        flags: TUNNEL_FLAG_FEC_PARITY,
+        seq: 0,
+        plaintext: encodeXorFecGroup({
+          startSeq: 5,
+          count: 1,
+          lengths: [1],
+          parity: new Uint8Array([7]),
+        }),
+      }),
+    );
+    expect(harness.viewer.stats.fecParityDropped).toBe(3);
+
+    // A tampered parity record fails AEAD and changes no FEC state.
+    const sealed = cipher.seal({
+      type: "fec",
+      flags: TUNNEL_FLAG_FEC_PARITY,
+      seq: 0,
+      plaintext: validGroup,
+    });
+    const tampered = new Uint8Array(sealed);
+    tampered[tampered.byteLength - 1] = (tampered[tampered.byteLength - 1] ?? 0) ^ 0xff;
+    harness.viewer.receive(tampered);
+    expect(harness.viewer.stats.decryptFailures).toBe(1);
+    expect(harness.viewer.stats.fecParityDropped).toBe(3);
+    expect(harness.viewerFrames).toEqual([]);
+    expect(harness.viewerFailures).toEqual([]);
   });
 });
