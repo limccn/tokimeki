@@ -38,11 +38,11 @@ candidate、跨公网 3-viewer、跨机器 1006 复测、P2P 直连成功率/长
 
 ## v1.1（独立任务，不阻塞 v1）
 
-状态（2026-11-16）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建；首个子
-任务 F0 `.trellis/tasks/11-15-v1-1-f0-p2p-transport` **已实现并通过本地验证**
-（typecheck/lint/276 tests/75 relay tests/build、P2P 快照 e2e、live-e2e 1–4、
-host 重连）。F0 新能力的真实跨公网 NAT/TURN 复测与生产部署尚未执行；
-F1/F2/F3 在 F0 验收后按交付顺序拆子任务。
+状态（2026-11-16）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建。F0 已实现、
+本地验证并归档（提交 `b8c9ec4`：typecheck/lint/276 tests/75 relay tests/build、
+P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公网 NAT/TURN 复测与
+生产部署尚未执行。当前进入 F2 listener snapshot-only 规划
+（`.trellis/tasks/11-16-v1-1-f2-listener`，planning）；F1/F3 在后续按顺序拆子任务。
 
 - **F0 P2P 传输增强**：新增 capability-gated `FRAGMENT` 帧（0x08）实现
   DataChannel 分片/重组；P2P 直发 `SNAPSHOT`（peer 不支持或发送失败时回退
