@@ -28,6 +28,9 @@
  *                            only asserts negotiation, not recovery.
  *   E2E_TIMEOUT_MS           default: 45000
  *   E2E_DUMP_DIR             on failure, write each process's full output here
+ *   E2E_CLI_ENTRY            CLI entry to run (default: local
+ *                            packages/cli/dist/index.js); point this at an
+ *                            installed npm package to verify a published release
  *
  * The test starts a host CLI in a PTY and two attach CLIs, then checks:
  * snapshot restore, bidirectional input, broadcast, resize, reconnect, and
@@ -35,13 +38,19 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pty from "@homebridge/node-pty-prebuilt-multiarch";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const cli = join(root, "packages/cli/dist/index.js");
+const cli = process.env.E2E_CLI_ENTRY
+  ? resolve(process.env.E2E_CLI_ENTRY)
+  : join(root, "packages/cli/dist/index.js");
+if (!existsSync(cli)) {
+  console.error(`CLI entry not found: ${cli}`);
+  process.exit(2);
+}
 const fakeTui = join(root, "scripts/e2e/fake-tui.mjs");
 const timeoutMs = Number(process.env.E2E_TIMEOUT_MS ?? 45_000);
 const dumpDir = process.env.E2E_DUMP_DIR;
@@ -186,6 +195,26 @@ function waitFor(state, needle, timeout = timeoutMs, label = needle) {
   return waitForCheck(state, () => state.output.includes(needle), timeout, label);
 }
 
+/**
+ * Match a log phrase after PTY reflow. Reflow can split a line anywhere and
+ * can duplicate the boundary character, so compare on compacted text and allow
+ * each character to repeat.
+ */
+function logIncludes(text, phrase) {
+  const compact = normalizeLog(text.slice(-262_144)).replace(/\s+/g, "");
+  const pattern = phrase
+    .replace(/\s+/g, "")
+    .split("")
+    .map((ch) => `${ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}+`)
+    .join("");
+  return new RegExp(pattern).test(compact);
+}
+
+/** Wait for a log line that PTY reflow may have split across cursor codes. */
+function waitForLog(state, needle, timeout = timeoutMs, label = needle) {
+  return waitForCheck(state, () => logIncludes(state.output, needle), timeout, label);
+}
+
 /** Search only the tail so multi-megabyte burst output stays cheap to scan. */
 function waitForRecent(state, needle, timeout = timeoutMs, label = needle) {
   return waitForCheck(state, () => state.output.slice(-262_144).includes(needle), timeout, label);
@@ -193,6 +222,14 @@ function waitForRecent(state, needle, timeout = timeoutMs, label = needle) {
 
 function countOccurrences(text, needle) {
   return text.split(needle).length - 1;
+}
+
+/**
+ * Strip terminal control sequences and line wrapping so log assertions survive
+ * PTY reflow (a narrow host can split a log line across cursor-position codes).
+ */
+function normalizeLog(text) {
+  return text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\s+/g, " ");
 }
 
 function waitForCount(state, needle, count, timeout = timeoutMs, label = needle) {
@@ -241,7 +278,7 @@ function pass(message) {
 }
 
 async function main() {
-  console.log(`session=${session} relay=${relayUrl}`);
+  console.log(`session=${session} relay=${relayUrl} cli=${cli}`);
 
   const host = start("host", ["run", "--", process.execPath, fakeTui], hostEnv(), 90, 28);
   await waitFor(host, "TOKIMEKI_E2E_READY");
@@ -378,7 +415,8 @@ async function main() {
       if (tunnelMode) {
         await waitForCount(host, "tunnel ready for", 2, 20_000, "tunnel ready for");
         const expectedKeyMode = tunnelSecret ? "shared-secret" : "session-token";
-        if (!new RegExp(`tunnel ready for .*keyMode=${expectedKeyMode}`).test(host.output)) {
+        const hostLog = normalizeLog(host.output);
+        if (!new RegExp(`tunnel ready for .*keyMode=\\s*=?${expectedKeyMode}`).test(hostLog)) {
           throw new Error(`tunnel did not negotiate keyMode=${expectedKeyMode}`);
         }
         pass(
@@ -387,7 +425,7 @@ async function main() {
             : "tunnel used session-token keyMode (relay can derive; not relay-blind)",
         );
         if (tunnelFec === "xor") {
-          if (!/tunnel ready for .*fec=xor/.test(host.output)) {
+          if (!/tunnel ready for .*fec=xor/.test(hostLog)) {
             throw new Error("tunnel did not negotiate XOR FEC");
           }
           // The e2e does not inject packet loss, so this only proves the XOR
@@ -398,9 +436,9 @@ async function main() {
       }
       await new Promise((r) => setTimeout(r, 300));
       attach2.child.write("p2p-live\r");
-      await waitFor(host, "p2p input received over data channel", 20_000);
+      await waitForLog(host, "p2p input received over data channel", 20_000);
       await waitFor(attach2, "ECHO:p2p-live", 20_000);
-      if (tunnelMode && /tunnel unavailable for/.test(host.output)) {
+      if (tunnelMode && /tunnel unavailable for/.test(normalizeLog(host.output))) {
         throw new Error("the tunnel fell back to the relay during the tunnel run");
       }
       p2pDataPath = true;

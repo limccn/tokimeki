@@ -2,8 +2,9 @@
 
 > 状态：v1 已部署到生产 Cloudflare。生产 URL 为 `https://relay.tokiapi.app`
 > （Worker `tokimeki-relay`，当前 100% 流量版本
-> `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`，2026-11-13 发布；代码与
-> `293d1eba-6359-4166-b7f5-50a45f57bf5b` 相同，含 host relay 重连修复）。
+> `1104916c-f188-4cc5-8df6-e34ca557ffae`，2026-11-16 发布，含 v1.1 F2
+> 只读 listener 角色；上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
+> 可作为回滚参考，含 host relay 重连修复）。
 > `TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_COTURN_SECRET` 与 `TOKIMEKI_TURN_API_TOKEN`
 > 已通过 `wrangler secret put` 上传；`TOKIMEKI_TURN_KEY_ID` 为 vars（Cloudflare TURN
 > 验证用，当前 provider=coturn 时不生效）。当前 `TOKIMEKI_TURN_PROVIDER=coturn`，
@@ -329,13 +330,20 @@ curl -sS https://relay.tokiapi.app/healthz
 #  "turnProvider":"coturn","turnConfigured":true}
 ```
 
-**当前部署状态（2026-11-13）**：
+**当前部署状态（2026-11-16）**：
 
 - Worker `tokimeki-relay` 已部署，URL `https://relay.tokiapi.app`。当前 100% 流量版本
-  `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`（2026-11-13 发布）；代码与
-  `293d1eba-6359-4166-b7f5-50a45f57bf5b` 相同。上一版本
+  `1104916c-f188-4cc5-8df6-e34ca557ffae`（2026-11-16 发布，含 v1.1 F2 只读
+  listener 角色）。上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
+  （2026-11-13，含 host relay 重连修复）可作为回滚参考；更早的
   `ee0e0f3c-9f99-4647-9604-91e2abddc20e`（Cloudflare 验证配置）与
-  `da0dde29-66e0-425e-85c0-49d053316186` 可作为回滚参考，但 secret 不回滚。
+  `da0dde29-66e0-425e-85c0-49d053316186` 也保留。secret 不回滚。
+- 2026-11-16 的发布为纯代码部署（`npm run deploy:prod`），**未轮换**
+  `TOKIMEKI_MASTER_TOKEN`；生产 token 继续保存在仓库外受控位置，不写入仓库、日志或
+  命令历史。
+- 2026-11-16 使用 npmjs `@limccn/tokimeki@0.1.1` 对该版本复跑生产 e2e：
+  relay-only、P2P、listener、TUN+XOR FEC、shared-secret 通过；流控 `pause` 在
+  30 秒内未观察到（见 §7.3 与已知跨境限制）。
 - `TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_COTURN_SECRET`、`TOKIMEKI_TURN_API_TOKEN` 为生产
   secret，均已上传；生产 token 保存在仓库外的受控位置，不写入仓库、日志或命令历史。
   2026-11-13 通过 `wrangler secret put`（stdin）轮换了 `TOKIMEKI_COTURN_SECRET`，两台
@@ -427,6 +435,7 @@ PTY 前给出可操作错误。TLS 代理场景请确认 `TOKIMEKI_RELAY_URL` �
 | 2026-11-13 六条 coturn URL 配置 `--dry-run`（provider=cloudflare，不生效） | 通过 |
 | 2026-11-13 切回 provider=coturn 后六条 URL `--dry-run` | 通过 |
 | 2026-11-13 切回 coturn + 六条 URL 生产发布 | 成功，版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6` |
+| 2026-11-16 v1.1 F2 listener relay 代码发布 | 成功，100% 版本 `1104916c-f188-4cc5-8df6-e34ca557ffae` |
 
 > 2026-11-13 host 重连修复后：`npm test` 13 files / 219 tests、`npm run test:relay`
 > 5 files / 60 tests（含 4 条 host 重连回归）、`npm run typecheck` 均通过；新增 host
@@ -638,6 +647,40 @@ pause → resume → 4 MiB burst 结束标记到达两个 viewer。生产流控�
 已知网络限制：本机到 `*.workers.dev` 的 DNS 被污染且 TLS SNI 被重置，无法直接使用
 workers.dev；自定义域名 `relay.tokiapi.app` 可达，但跨境链路存在约 40% 的间歇性
 TLS/HTTP 停顿和 30 秒级中断，生产 e2e 可能需要重跑。
+
+2026-11-16 生产 live e2e（npmjs `@limccn/tokimeki@0.1.1`，relay 版本
+`1104916c`）：
+
+验证目标是用已发布的 npm 包（不是本地 `packages/cli/dist`）跑生产链路，并确认
+新部署的 listener 角色。安装到干净临时目录：
+
+```bash
+npm install --prefix <tmp> @limccn/tokimeki@0.1.1 \
+  --@limccn:registry=https://registry.npmjs.org
+export E2E_CLI_ENTRY=<tmp>/node_modules/@limccn/tokimeki/dist/index.js
+```
+
+结果：
+
+- relay-only（`E2E_P2P_MODE=off`）：`E2E PASS`。
+- P2P required（`REQUIRE_P2P=1 E2E_P2P_MODE=auto`）：`E2E PASS`，
+  `P2P transports: p2p-direct, host->prflx, lan=yes`。
+- listener（`E2E_LISTENER=1 E2E_P2P_MODE=off`）：`E2E PASS`；立即/周期快照、
+  listener 输入被忽略、host exit 到达 listener。
+- TUN + XOR FEC（`E2E_TUNNEL=1 E2E_TUNNEL_FEC=xor`）：`E2E PASS`；
+  `keyMode=session-token`、`fec=xor`，TUN 数据面承载 host 输出与 viewer 输入。
+- TUN shared-secret（`E2E_TUNNEL=1 E2E_TUNNEL_SECRET=<dummy>`）：`E2E PASS`；
+  `keyMode=shared-secret`（relay 不能推导密钥）。
+- 流控（`E2E_P2P_MODE=off E2E_FLOW_CONTROL=1 E2E_SECRET_CHECK=1`）：未通过。
+  错误 token、初始快照、输入/广播、resize、secret 隔离均通过；暂停 attach1
+  stdout 后 30 秒内未观察到 relay `pause`。与 2026-11-13 第二次生产尝试相同，
+  属于跨境时序/带宽导致的已知限制（本地 loopback 确定性通过）。
+- host 重连脚本只接受 `ws://`，生产 `wss://` 不适用；由 §7.2 第 5 组覆盖。
+
+本次同时修复了 harness 的 PTY 重排误判：生产 80 列重排会把
+`keyMode=session-token` / `p2p input received over data channel` 拆行并插入
+cursor-position 码。`live-e2e.mjs` 现对隧道日志做 ANSI/空白归一化后再断言；
+`E2E_CLI_ENTRY` 也支持 `scripts/e2e/host-relay-reconnect.mjs`。
 
 ### 7.4 跨机器生产验收（2026-11-13）
 

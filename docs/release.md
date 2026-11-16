@@ -62,6 +62,27 @@ GitHub Release.
 
    Also check the Actions run and the GitHub Packages pages.
 
+   For a live end-to-end check of the published CLI (not the local build),
+   install it into a clean directory and point the e2e harness at it:
+
+   ```bash
+   npm install --prefix /tmp/tokimeki-e2e @limccn/tokimeki@0.1.2 \
+     --@limccn:registry=https://registry.npmjs.org
+   E2E_CLI_ENTRY=/tmp/tokimeki-e2e/node_modules/@limccn/tokimeki/dist/index.js \
+     E2E_P2P_MODE=off \
+     TOKIMEKI_RELAY_URL=ws://127.0.0.1:8787 \
+     TOKIMEKI_MASTER_TOKEN=<dev master token> \
+     node scripts/e2e/live-e2e.mjs
+   ```
+
+   `E2E_CLI_ENTRY` defaults to `packages/cli/dist/index.js` and also works
+   with `scripts/e2e/host-relay-reconnect.mjs`. Repeat the run with
+   `REQUIRE_P2P=1 E2E_P2P_MODE=auto` for the P2P data path and with
+   `E2E_P2P_MODE=off E2E_FLOW_CONTROL=1 E2E_SECRET_CHECK=1` for relay flow
+   control and PTY secret isolation. The `--@limccn:registry` flag is needed
+   when the machine's npm user config maps the `@limccn` scope to GitHub
+   Packages.
+
 ## One-time GitHub setup
 
 - Add an `NPM_TOKEN` repository secret
