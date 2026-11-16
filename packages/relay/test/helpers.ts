@@ -194,6 +194,8 @@ export interface ConnectOptions {
   readonly role?: string;
   readonly token?: string | null;
   readonly master?: string;
+  /** Set `X-Tokimeki-Listener: 1` (Worker-assigned listener role). */
+  readonly listener?: boolean;
 }
 
 export async function connectWorker(
@@ -206,6 +208,9 @@ export async function connectWorker(
   }
   if (options.master !== undefined) {
     headers["x-tokimeki-master"] = options.master;
+  }
+  if (options.listener === true) {
+    headers["x-tokimeki-listener"] = "1";
   }
   const response = await SELF.fetch(`https://relay.test/ws/${sessionId}`, { headers });
   if (response.status !== 101 || response.webSocket == null) {
@@ -275,6 +280,21 @@ export async function openViewer(
     ...options,
   });
   socket.send(helloFor(sessionId, "viewer", clientId));
+  await socket.waitForType("welcome");
+  return socket;
+}
+
+export async function openListener(
+  sessionId: string,
+  clientId: string,
+  options: ConnectOptions = {},
+): Promise<TestSocket> {
+  const socket = await connectWorker(sessionId, {
+    token: SESSION_TOKEN,
+    listener: true,
+    ...options,
+  });
+  socket.send(helloFor(sessionId, "listener", clientId));
   await socket.waitForType("welcome");
   return socket;
 }

@@ -53,6 +53,7 @@
   //   TOKIMEKI_MASTER_TOKEN            (secret, required) host authentication; unset rejects all hosts
   //   TOKIMEKI_SESSION_TTL_SECONDS     default 86400 host-offline grace
   //   TOKIMEKI_MAX_CLIENTS_PER_SESSION default 8
+  //   TOKIMEKI_MAX_LISTENERS           default 8 read-only snapshot-only clients
   //   TOKIMEKI_ICE_TRANSPORT_POLICY    all | relay (default all)
   //   TOKIMEKI_STUN_URLS               default stun:stun.cloudflare.com:3478
   //   TOKIMEKI_TURN_PROVIDER           auto | coturn | cloudflare | none (default auto)

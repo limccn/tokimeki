@@ -10,33 +10,38 @@
 export const PROTOCOL_VERSION = 1;
 
 /**
- * Active v1 connection roles.
+ * Active connection roles.
  *
  * - `host` owns the PTY and is the only role allowed to send terminal output.
  * - `viewer` is a full shared-control client (input + output).
  * - `observer` watches control-plane / agent events but does not receive PTY data.
  * - `agent` is reserved for a future agent coordinator transport.
+ * - `listener` is the v1.1 snapshot-only read-only role. It never sends input,
+ *   resize, resync, ACKs, or signals, and only receives relay `SNAPSHOT_TO`
+ *   frames. Pre-v1.1 relays reject it with `not_implemented`.
  */
-export const ROLES = ["host", "viewer", "observer", "agent"] as const;
+export const ROLES = ["host", "viewer", "observer", "agent", "listener"] as const;
 export type Role = (typeof ROLES)[number];
 
 /**
- * Reserved v1.1 role. v1 relays must reject `listener` with a structured
- * `not_implemented` error instead of silently downgrading it.
+ * Roles reserved by a later protocol revision.
+ *
+ * Empty since v1.1 activated `listener`. Kept exported so implementations can
+ * keep a single active/reserved split and future revisions can add entries.
  */
-export const RESERVED_ROLES = ["listener"] as const;
+export const RESERVED_ROLES = [] as const;
 export type ReservedRole = (typeof RESERVED_ROLES)[number];
 
 /** Every role string accepted by the `hello` schema (active + reserved). */
 export const ALL_ROLES = [...ROLES, ...RESERVED_ROLES] as const;
 export type AnyRole = (typeof ALL_ROLES)[number];
 
-/** True for roles the v1 relay/CLI can route. */
+/** True for roles the relay/CLI can route. */
 export function isActiveRole(role: string): role is Role {
   return (ROLES as readonly string[]).includes(role);
 }
 
-/** True for roles reserved by a later protocol revision (`listener`). */
+/** True for roles reserved by a later protocol revision. */
 export function isReservedRole(role: string): role is ReservedRole {
   return (RESERVED_ROLES as readonly string[]).includes(role);
 }
@@ -149,6 +154,114 @@ export const MAX_SIGNAL_PAYLOAD_BYTES = 65_536;
  * every frame stays inside the SCTP interop budget.
  */
 export const MAX_DATACHANNEL_MESSAGE_BYTES = 16_384;
+
+/**
+ * Fixed header size of the v1.1 `FRAGMENT` frame (0x08).
+ *
+ * Layout: type(1) + messageId u32BE(4) + fragmentIndex u16BE(2) +
+ * fragmentCount u16BE(2) + totalBytes u32BE(4) = 13 bytes.
+ */
+export const FRAGMENT_HEADER_BYTES = 13;
+
+/** Largest chunk carried by one DataChannel fragment message. */
+export const MAX_FRAGMENT_CHUNK_BYTES = MAX_DATACHANNEL_MESSAGE_BYTES - FRAGMENT_HEADER_BYTES;
+
+/** Maximum fragments for a 1 MiB frame using canonical chunk sizes. */
+export const MAX_FRAGMENT_COUNT = Math.ceil(MAX_FRAME_BYTES / MAX_FRAGMENT_CHUNK_BYTES);
+
+/**
+ * v1.1 TUN profile wire version (`TUNNEL 0x06` inner record).
+ *
+ * v1 relays never forward `TUNNEL` frames. F1 runs the tunnel only on an
+ * unreliable WebRTC DataChannel between a host and a viewer.
+ */
+export const TUNNEL_RECORD_VERSION = 1;
+
+/**
+ * Inner record types carried by a `TUNNEL` (0x06) frame.
+ *
+ * `data` carries one complete terminal frame (INPUT/OUTPUT). `ack` carries
+ * selective ACK state. `fec`/`ping` are reserved by the record layout; F1 only
+ * emits `data` and `ack`.
+ */
+export const TUNNEL_RECORD_TYPES = {
+  data: 1,
+  ack: 2,
+  fec: 3,
+  ping: 4,
+} as const;
+export type TunnelRecordType = keyof typeof TUNNEL_RECORD_TYPES;
+export type TunnelRecordTypeValue = (typeof TUNNEL_RECORD_TYPES)[TunnelRecordType];
+
+/** Bit 0 of `flags`: the record is an XOR-FEC parity record (reserved in F1). */
+export const TUNNEL_FLAG_FEC_PARITY = 0x01;
+
+/** Fixed tunnel record header: 22 metadata bytes + 12-byte GCM nonce. */
+export const TUNNEL_RECORD_HEADER_BYTES = 28;
+
+/** AES-256-GCM nonce size (96 bits). */
+export const TUNNEL_NONCE_BYTES = 12;
+
+/** AES-256-GCM authentication tag size. */
+export const TUNNEL_TAG_BYTES = 16;
+
+/** Derived direction key size. */
+export const TUNNEL_KEY_BYTES = 32;
+
+/** Minimum `TOKIMEKI_TUNNEL_SECRET` length in UTF-8 bytes. */
+export const MIN_TUNNEL_SECRET_BYTES = 16;
+
+/**
+ * Largest plaintext (one complete terminal frame) carried by one tunnel record.
+ *
+ * `MAX_DATACHANNEL_MESSAGE_BYTES` includes the outer `TUNNEL` frame type byte,
+ * the 28-byte tunnel header, and the 16-byte GCM tag. 16384 - 1 - 28 - 16 =
+ * 16339 bytes.
+ */
+export const TUNNEL_MAX_FRAME_BYTES =
+  MAX_DATACHANNEL_MESSAGE_BYTES - 1 - TUNNEL_RECORD_HEADER_BYTES - TUNNEL_TAG_BYTES;
+
+/** Largest terminal payload in one tunneled OUTPUT frame (9-byte frame header). */
+export const TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES = TUNNEL_MAX_FRAME_BYTES - 9;
+
+/** Largest terminal payload in one tunneled INPUT frame (1-byte frame header). */
+export const TUNNEL_INPUT_PAYLOAD_MAX_BYTES = TUNNEL_MAX_FRAME_BYTES - 1;
+
+/** Largest tunnel record wire size, excluding the outer 0x06 frame type byte. */
+export const TUNNEL_MAX_RECORD_BYTES =
+  TUNNEL_RECORD_HEADER_BYTES + TUNNEL_MAX_FRAME_BYTES + TUNNEL_TAG_BYTES;
+
+/** Direction bytes bound into the AEAD AAD. */
+export const TUNNEL_DIRECTIONS = {
+  hostToViewer: 1,
+  viewerToHost: 2,
+} as const;
+export type TunnelDirectionName = keyof typeof TUNNEL_DIRECTIONS;
+export type TunnelDirectionValue = (typeof TUNNEL_DIRECTIONS)[TunnelDirectionName];
+
+/**
+ * HKDF info labels. The exact byte layout is part of the wire contract:
+ *
+ * ```text
+ * prk = HKDF-Extract(salt = UTF-8(sessionId), ikm)
+ * h2v = HKDF-Expand(prk, "tokimeki-tunnel-v1/host-to-viewer", 32)
+ * v2h = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
+ * ```
+ */
+export const TUNNEL_HKDF_LABELS = {
+  hostToViewer: "tokimeki-tunnel-v1/host-to-viewer",
+  viewerToHost: "tokimeki-tunnel-v1/viewer-to-host",
+} as const;
+
+/** Tunnel capability keyMode strings. */
+export const TUNNEL_KEY_MODES = ["session-token", "shared-secret"] as const;
+export type TunnelKeyMode = (typeof TUNNEL_KEY_MODES)[number];
+
+/** Tunnel capability `arq` value implemented by F1. */
+export const TUNNEL_ARQ_MODE = "selective-repeat";
+
+/** Tunnel capability `crypto` value implemented by F1. */
+export const TUNNEL_CRYPTO_MODE = "aes-256-gcm";
 
 /** Upper bound for terminal `cols` / `rows` values in control messages. */
 export const MAX_TERMINAL_DIMENSION = 10_000;

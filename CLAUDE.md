@@ -18,13 +18,20 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.0)
+## Release identity (0.1.2)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.0`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.0`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.2`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.2`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@tokimeki/relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
+- `npm run release:bump -- <version>` updates the root/workspace versions,
+  exact protocol dependencies, and `package-lock.json`; `npm run
+  release:check -- <version>` verifies them.
+- Pushing a `v<version>` tag triggers `.github/workflows/release.yml`, which
+  verifies first, then publishes protocol before CLI to npmjs (`NPM_TOKEN`)
+  and GitHub Packages (`GITHUB_TOKEN`), and finally creates the GitHub
+  Release.
 - Release steps are documented in `docs/release.md`; do not run
   `npm publish`, create tags, or deploy production without explicit user
   authorization.
@@ -37,6 +44,7 @@ packages/relay/      Worker + SessionDO: auth, routing, flow control, TURN issua
 packages/cli/        CLI: cli/config, host PTY, attach viewer, transport, terminal mirror
 scripts/e2e/         live e2e / cross-machine helpers
 scripts/perf/        local + cross-NAT performance harnesses (results gitignored)
+scripts/release/     version bump/check helper used by the release workflow
 docs/                protocol, deployment, CLI, Cloudflare deploy, release, roadmap
 assets/              README icon
 .trellis/            local Trellis tasks/specs (gitignored)
@@ -49,14 +57,20 @@ assets/              README icon
   host; constant-time comparisons; master token equal to session token is
   rejected; master header removed before forwarding to the DO.
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
-  host/viewer/observer/agent; viewer `INPUT`/`RESYNC_REQ` to host; host
+  host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
-  reserved `listener`/`TUNNEL` return `not_implemented`; lazy schema only on
+  reserved `TUNNEL` returns `not_implemented`; lazy schema only on
   authenticated host hello.
+- Listeners are read-only snapshot-only clients: `X-Tokimeki-Listener: 1` at
+  the Worker selects the role (master token still wins as host), they are
+  capped by `TOKIMEKI_MAX_LISTENERS` (default 8) on top of `maxClients`, receive
+  relay `SNAPSHOT_TO` only, and are excluded from `OUTPUT`, ACK/unacked bytes,
+  pause/resume, slow-consumer, resize, and P2P. INPUT/resize/resync/ack/signal/
+  transport from a listener returns `invalid_role`.
 - Flow control: ACK-driven `unackedBytes` high water 1 MiB, low water 256 KiB,
   hard limit 8 MiB, ACK ring 256; `pause`/`resume` control messages; slow
-  consumers close with code 4000. Resize is throttled (250 ms trailing) and
-  resync is throttled (500 ms).
+  consumers close with code 4000. Listeners never enter this accounting.
+  Resize is throttled (250 ms trailing) and resync is throttled (500 ms).
 - Snapshots: host sends `SNAPSHOT_TO` at `seq=N`, then resumes `>N`; viewers
   clear and apply the snapshot; P2P switch snapshots also use relay
   `SNAPSHOT_TO` in v1.
@@ -69,14 +83,26 @@ assets/              README icon
 
 ## CLI notes
 
-- `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach`, `doctor`; all
-  runtime config comes from env (`.env.example` is the reference).
+- `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach` (`--listen` for
+  read-only listener mode), `doctor`; all runtime config comes from env
+  (`.env.example` is the reference).
 - `host/`: node-pty, Windows ConPTY, headless xterm mirror, mode tracker,
-  resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup.
+  resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup, and a
+  separate periodic listener snapshot timer (`TOKIMEKI_LISTENER_SNAPSHOT_MS`,
+  default 1000 ms) that never pauses the PTY.
 - `attach/`: raw terminal, alternate screen, snapshot apply, seq reducer,
-  reconnect/resync, terminal restore.
-- `transport/`: relay client, P2P peer (node-datachannel), route selector,
-  ICE/TURN config, signal limits.
+  reconnect/resync, terminal restore; listener mode sends no input/resize/ACK/
+  resync/P2P and Ctrl-C exits only the local listener.
+- `transport/`: relay client, P2P peer (node-datachannel), fragmentation,
+  ICE config/refresh, P2P retry policy, route selector, ICE/TURN config, signal
+  limits.
+- `transport/tunnel/`: v1.1 F1/F1.1 TUN profile — HKDF direction keys +
+  AES-256-GCM records (`crypto.ts`), selective-repeat ARQ (`arq.ts`), XOR
+  parity (`fec.ts`), capability/offer negotiation (`capability.ts`), and the
+  P2P endpoint (`tunnel-transport.ts`). It is opt-in (`TOKIMEKI_TUNNEL=auto`),
+  P2P-only, and falls back to the relay; the relay still rejects `TUNNEL` with
+  `not_implemented`. `TOKIMEKI_TUNNEL_FEC=xor` advertises and negotiates
+  `fec:["none","xor"]` for single-loss parity; default `off` keeps F1 behavior.
 - Exit codes: `0` success, `1` runtime/connection (including a failed
   `doctor` check and Commander usage errors), `2` invalid `TOKIMEKI_*`
   configuration at host/attach startup.
@@ -121,18 +147,34 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   README examples, or committed files.
 - The relay can see terminal bytes by design; P2P/TURN change the transport,
   not the trust model. Do not describe the relay as end-to-end encrypted.
+  TUN's default `session-token` keyMode is derivable by the relay; only
+  `TOKIMEKI_TUNNEL_SECRET` (`shared-secret`) may be called relay-blind.
+- `TOKIMEKI_TUNNEL_SECRET` is scrubbed from the hosted PTY environment and
+  redacted from logs; never log tunnel keys, nonces, ciphertext, or plaintext.
 - Production deploy/provider/secret changes need explicit user approval.
 - Scan changes for master/session/TURN secrets before committing.
 
 ## Known limitations (0.1)
 
-- Strict NAT↔NAT validation, production edge hibernation/TTL long-run, and
-  real Claude/pi TUI manual acceptance remain environment-dependent.
-- v1 has no DataChannel fragmentation (messages ≤16 KiB), no automatic TURN
-  provider refresh/retry, and no listener/tunnel runtime; these are v1.1+
-  roadmap items.
+- Strict NAT↔NAT (including P2P attempts and relay fallback) and real Claude/pi
+  TUI interaction were manually confirmed at the e2e layer on 2026-11-16; this
+  is not long-run/production, direct-path success-rate, or exhaustive
+  interaction acceptance. Production edge hibernation/TTL long-run remains
+  environment-dependent.
+- v1.1 F0 adds capability-gated `FRAGMENT 0x08` DataChannel fragmentation,
+  P2P direct snapshots, automatic ICE refresh, and one provider retry. v1.1 F2
+  adds the read-only snapshot-only `listener` role. v1.1 F1 adds the opt-in
+  P2P-only TUN profile (AEAD + selective-repeat ARQ); F1.1 adds opt-in XOR
+  parity (`TOKIMEKI_TUNNEL_FEC=xor`, capability `fec:["none","xor"]`) for
+  exactly-one-record recovery, with multi-loss/lost-parity still on ARQ. Local
+  tunnel e2e passes for session-token and shared-secret key modes; cross-machine
+  tunnel e2e, forced loss/reorder injection (including FEC recovery), and
+  secret-mismatch fallback remain to be run. The host/attach tunnel switch has
+  no pure unit test (live e2e covers it). There is still no listener
+  incremental/safe-boundary output.
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
-  tests (delivery worked); link-quality work (selective-repeat/ARQ) is future.
+  tests (delivery worked); link-quality work beyond the F1/F1.1 tunnel
+  (fragmentation-independent ARQ tuning, Reed-Solomon/multi-loss FEC) is future.
 
 ## Documentation
 

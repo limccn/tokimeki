@@ -17,8 +17,20 @@
  *                            cannot see their names
  *   E2E_FLOW_CONTROL=1       pause one viewer during a 4 MiB burst and require
  *                            relay pause/resume; requires E2E_P2P_MODE=off
+ *   E2E_LISTENER=1           add `attach --listen`, require immediate/periodic
+ *                            snapshots, and prove listener input is ignored
+ *   E2E_TUNNEL=1             enable `TOKIMEKI_TUNNEL=auto` and require the TUN
+ *                            data path; requires E2E_P2P_MODE=auto
+ *   E2E_TUNNEL_SECRET        optional >=16-byte shared secret for relay-blind
+ *                            tunnel keys (host and viewers use the same value)
+ *   E2E_TUNNEL_FEC           "xor" enables XOR parity for the tunnel; requires
+ *                            E2E_TUNNEL=1. Without injected packet loss this
+ *                            only asserts negotiation, not recovery.
  *   E2E_TIMEOUT_MS           default: 45000
  *   E2E_DUMP_DIR             on failure, write each process's full output here
+ *   E2E_CLI_ENTRY            CLI entry to run (default: local
+ *                            packages/cli/dist/index.js); point this at an
+ *                            installed npm package to verify a published release
  *
  * The test starts a host CLI in a PTY and two attach CLIs, then checks:
  * snapshot restore, bidirectional input, broadcast, resize, reconnect, and
@@ -26,13 +38,19 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pty from "@homebridge/node-pty-prebuilt-multiarch";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const cli = join(root, "packages/cli/dist/index.js");
+const cli = process.env.E2E_CLI_ENTRY
+  ? resolve(process.env.E2E_CLI_ENTRY)
+  : join(root, "packages/cli/dist/index.js");
+if (!existsSync(cli)) {
+  console.error(`CLI entry not found: ${cli}`);
+  process.exit(2);
+}
 const fakeTui = join(root, "scripts/e2e/fake-tui.mjs");
 const timeoutMs = Number(process.env.E2E_TIMEOUT_MS ?? 45_000);
 const dumpDir = process.env.E2E_DUMP_DIR;
@@ -47,6 +65,10 @@ const p2pMode = process.env.E2E_P2P_MODE ?? "auto";
 const icePolicy = process.env.E2E_ICE_POLICY ?? "all";
 const secretCheck = process.env.E2E_SECRET_CHECK === "1";
 const flowControl = process.env.E2E_FLOW_CONTROL === "1";
+const listenerMode = process.env.E2E_LISTENER === "1";
+const tunnelMode = process.env.E2E_TUNNEL === "1";
+const tunnelSecret = process.env.E2E_TUNNEL_SECRET;
+const tunnelFec = process.env.E2E_TUNNEL_FEC;
 
 if (!relayUrl || !masterToken) {
   console.error("TOKIMEKI_RELAY_URL and TOKIMEKI_MASTER_TOKEN are required");
@@ -54,6 +76,18 @@ if (!relayUrl || !masterToken) {
 }
 if (flowControl && p2pMode !== "off") {
   console.error("E2E_FLOW_CONTROL=1 requires E2E_P2P_MODE=off so output uses the relay");
+  process.exit(2);
+}
+if (tunnelMode && p2pMode === "off") {
+  console.error("E2E_TUNNEL=1 requires E2E_P2P_MODE=auto; the TUN profile is P2P-only");
+  process.exit(2);
+}
+if (tunnelFec !== undefined && tunnelFec !== "off" && tunnelFec !== "xor") {
+  console.error("E2E_TUNNEL_FEC must be off or xor");
+  process.exit(2);
+}
+if (tunnelFec === "xor" && !tunnelMode) {
+  console.error("E2E_TUNNEL_FEC=xor requires E2E_TUNNEL=1");
   process.exit(2);
 }
 
@@ -74,6 +108,10 @@ function baseEnv() {
     TOKIMEKI_SNAPSHOT_MAX_BYTES: "262144",
     TOKIMEKI_P2P: p2pMode,
     TOKIMEKI_ICE_TRANSPORT_POLICY: icePolicy,
+    ...(listenerMode ? { TOKIMEKI_LISTENER_SNAPSHOT_MS: "500" } : {}),
+    ...(tunnelMode ? { TOKIMEKI_TUNNEL: "auto" } : {}),
+    ...(tunnelMode && tunnelFec !== undefined ? { TOKIMEKI_TUNNEL_FEC: tunnelFec } : {}),
+    ...(tunnelSecret === undefined ? {} : { TOKIMEKI_TUNNEL_SECRET: tunnelSecret }),
     TOKIMEKI_LOG_LEVEL: "debug",
   };
 }
@@ -81,8 +119,9 @@ function baseEnv() {
 function hostEnv() {
   const env = { ...baseEnv(), TOKIMEKI_LOG_LEVEL: "debug" };
   if (secretCheck) {
-    // Dummy values only; the fixture reports presence, never values.
-    env.TOKIMEKI_TUNNEL_SECRET = "e2e-dummy-tunnel-secret";
+    // Dummy values only; the fixture reports presence, never values. Keep a
+    // configured tunnel secret intact so host/viewer key modes still match.
+    if (!tunnelMode) env.TOKIMEKI_TUNNEL_SECRET = "e2e-dummy-tunnel-secret";
     env.TOKIMEKI_COTURN_SECRET = "e2e-dummy-coturn-secret";
     env.TOKIMEKI_TURN_API_TOKEN = "e2e-dummy-turn-api-token";
     env.TOKIMEKI_TURN_CREDENTIAL = "e2e-dummy-turn-credential";
@@ -156,6 +195,26 @@ function waitFor(state, needle, timeout = timeoutMs, label = needle) {
   return waitForCheck(state, () => state.output.includes(needle), timeout, label);
 }
 
+/**
+ * Match a log phrase after PTY reflow. Reflow can split a line anywhere and
+ * can duplicate the boundary character, so compare on compacted text and allow
+ * each character to repeat.
+ */
+function logIncludes(text, phrase) {
+  const compact = normalizeLog(text.slice(-262_144)).replace(/\s+/g, "");
+  const pattern = phrase
+    .replace(/\s+/g, "")
+    .split("")
+    .map((ch) => `${ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}+`)
+    .join("");
+  return new RegExp(pattern).test(compact);
+}
+
+/** Wait for a log line that PTY reflow may have split across cursor codes. */
+function waitForLog(state, needle, timeout = timeoutMs, label = needle) {
+  return waitForCheck(state, () => logIncludes(state.output, needle), timeout, label);
+}
+
 /** Search only the tail so multi-megabyte burst output stays cheap to scan. */
 function waitForRecent(state, needle, timeout = timeoutMs, label = needle) {
   return waitForCheck(state, () => state.output.slice(-262_144).includes(needle), timeout, label);
@@ -163,6 +222,15 @@ function waitForRecent(state, needle, timeout = timeoutMs, label = needle) {
 
 function countOccurrences(text, needle) {
   return text.split(needle).length - 1;
+}
+
+/**
+ * Strip terminal control sequences and line wrapping so log assertions survive
+ * PTY reflow (a narrow host can split a log line across cursor-position codes).
+ */
+function normalizeLog(text) {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI CSI stripping is intentional.
+  return text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\s+/g, " ");
 }
 
 function waitForCount(state, needle, count, timeout = timeoutMs, label = needle) {
@@ -211,7 +279,7 @@ function pass(message) {
 }
 
 async function main() {
-  console.log(`session=${session} relay=${relayUrl}`);
+  console.log(`session=${session} relay=${relayUrl} cli=${cli}`);
 
   const host = start("host", ["run", "--", process.execPath, fakeTui], hostEnv(), 90, 28);
   await waitFor(host, "TOKIMEKI_E2E_READY");
@@ -267,6 +335,38 @@ async function main() {
   await waitFor(attach2, "SIZE=100x30", timeoutMs, "SIZE=100x30");
   pass("resize propagated to PTY and broadcast");
 
+  // v1.1 F2: a read-only listener gets snapshots but cannot influence the PTY.
+  let listener = null;
+  if (listenerMode) {
+    listener = start("listener", ["attach", "--listen"], baseEnv(), 100, 30);
+    await waitFor(listener, "TOKIMEKI_E2E_READY", timeoutMs, "listener initial snapshot");
+    pass("listener received an immediate snapshot");
+
+    const ignored = "listener-input-must-not-echo";
+    listener.child.write(`${ignored}\r`);
+    await new Promise((r) => setTimeout(r, 2_000));
+    const leaked = [host, attach1, attach2].some((state) =>
+      state.output.includes(`ECHO:${ignored}`),
+    );
+    if (leaked) {
+      throw new Error("listener input reached the shared PTY");
+    }
+    pass("listener input was ignored and never reached the PTY");
+
+    // The fixture echoes viewer input; the listener must see it in the next
+    // periodic full snapshot without sending a resync or ACK.
+    const updateMarker = "listener-periodic-e2e";
+    attach2.child.write(`${updateMarker}\r`);
+    await waitFor(attach2, `ECHO:${updateMarker}`, timeoutMs, "viewer echo for listener");
+    await waitForRecent(
+      listener,
+      `ECHO:${updateMarker}`,
+      20_000,
+      "listener periodic snapshot update",
+    );
+    pass("listener received a periodic snapshot update");
+  }
+
   if (flowControl) {
     // Stop draining attach1's stdout. Its relay reader eventually stops ACKing,
     // the relay crosses the 1 MiB unacked high-water mark, and the host pauses
@@ -308,18 +408,40 @@ async function main() {
   // before we type, otherwise attach2's input may still legitimately use relay.
   let p2pDataPath = false;
   if (p2pMode !== "off") {
+    const outputMarker = tunnelMode
+      ? "p2p output started on tunnel"
+      : "p2p output started on data channel";
     try {
-      await waitForCount(
-        host,
-        "p2p output started on data channel",
-        2,
-        20_000,
-        "p2p output on data channel",
-      );
+      await waitForCount(host, outputMarker, 2, 20_000, outputMarker);
+      if (tunnelMode) {
+        await waitForCount(host, "tunnel ready for", 2, 20_000, "tunnel ready for");
+        const expectedKeyMode = tunnelSecret ? "shared-secret" : "session-token";
+        const hostLog = normalizeLog(host.output);
+        if (!new RegExp(`tunnel ready for .*keyMode=\\s*=?${expectedKeyMode}`).test(hostLog)) {
+          throw new Error(`tunnel did not negotiate keyMode=${expectedKeyMode}`);
+        }
+        pass(
+          tunnelSecret
+            ? "tunnel used shared-secret keyMode (relay cannot derive the keys)"
+            : "tunnel used session-token keyMode (relay can derive; not relay-blind)",
+        );
+        if (tunnelFec === "xor") {
+          if (!/tunnel ready for .*fec=xor/.test(hostLog)) {
+            throw new Error("tunnel did not negotiate XOR FEC");
+          }
+          // The e2e does not inject packet loss, so this only proves the XOR
+          // sender policy was negotiated. Single-loss recovery has unit and
+          // TunnelTransport integration coverage; real-loss e2e is unverified.
+          pass("tunnel negotiated XOR FEC (no packet loss injected; recovery unverified)");
+        }
+      }
       await new Promise((r) => setTimeout(r, 300));
       attach2.child.write("p2p-live\r");
-      await waitFor(host, "p2p input received over data channel", 20_000);
+      await waitForLog(host, "p2p input received over data channel", 20_000);
       await waitFor(attach2, "ECHO:p2p-live", 20_000);
+      if (tunnelMode && /tunnel unavailable for/.test(normalizeLog(host.output))) {
+        throw new Error("the tunnel fell back to the relay during the tunnel run");
+      }
       p2pDataPath = true;
       const transports = [
         ...new Set(
@@ -331,9 +453,13 @@ async function main() {
       if (transports.length > 0) {
         console.log(`P2P transports: ${transports.join(", ")}`);
       }
-      pass("P2P data path carried host output and viewer input");
+      pass(
+        tunnelMode
+          ? "TUN data path carried host output and viewer input"
+          : "P2P data path carried host output and viewer input",
+      );
     } catch (error) {
-      if (requireP2p) throw error;
+      if (requireP2p || tunnelMode) throw error;
       console.log(`WARN ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -384,11 +510,16 @@ async function main() {
   // the persisted host-exit replay.
   await waitFor(attach2, "host exited (code=0)", Math.min(timeoutMs, 60_000));
   await waitFor(attach3, "host exited (code=0)", Math.min(timeoutMs, 60_000));
+  if (listener !== null) {
+    await waitFor(listener, "host exited (code=0)", Math.min(timeoutMs, 60_000));
+    pass("host exit reached the read-only listener");
+  }
   pass("Ctrl-C propagated through relay to PTY and host-exited reached viewers");
 
   await waitExit(host, 15_000);
   await waitExit(attach2, 5_000);
   await waitExit(attach3, 5_000);
+  if (listener !== null) await waitExit(listener, 5_000);
   pass("host and attached viewers exited cleanly");
 }
 

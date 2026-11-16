@@ -57,6 +57,18 @@
       }
     },
     {
+      "name": "fragment-single",
+      "hex": "080000000100000001000000050102030405",
+      "expect": {
+        "type": "fragment",
+        "messageId": 1,
+        "fragmentIndex": 0,
+        "fragmentCount": 1,
+        "totalBytes": 5,
+        "payloadHex": "0102030405"
+      }
+    },
+    {
       "name": "tunnel-reserved-empty",
       "hex": "06",
       "expect": { "type": "tunnel", "payloadHex": "" }
@@ -75,8 +87,29 @@
   "invalid": [
     { "name": "empty-buffer", "hex": "", "error": "frame_truncated" },
     { "name": "unknown-frame-0x00", "hex": "00", "error": "unknown_frame_type" },
-    { "name": "unknown-frame-0x08", "hex": "08", "error": "unknown_frame_type" },
+    { "name": "unknown-frame-0x09", "hex": "09", "error": "unknown_frame_type" },
     { "name": "unknown-frame-0x7f", "hex": "7f00", "error": "unknown_frame_type" },
+    { "name": "fragment-header-truncated", "hex": "0800000001", "error": "frame_truncated" },
+    {
+      "name": "fragment-message-id-zero",
+      "hex": "080000000000000001000000050102030405",
+      "error": "invalid_frame"
+    },
+    {
+      "name": "fragment-payload-length-mismatch",
+      "hex": "0800000001000000010000000501020304",
+      "error": "invalid_frame"
+    },
+    {
+      "name": "fragment-count-mismatch",
+      "hex": "08000000010000000200000005",
+      "error": "invalid_frame"
+    },
+    {
+      "name": "fragment-total-too-large",
+      "hex": "08000000010000004100100001",
+      "error": "frame_too_large"
+    },
     { "name": "truncated-output-seq", "hex": "0200000000", "error": "frame_truncated" },
     { "name": "truncated-snapshot-seq", "hex": "03", "error": "frame_truncated" },
     { "name": "truncated-snapshot-to-header", "hex": "05", "error": "frame_truncated" },

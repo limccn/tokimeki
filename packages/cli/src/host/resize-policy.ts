@@ -43,7 +43,6 @@ export function resolveResize(input: ResizePolicyInput): TerminalSize {
       if (!any) return input.local;
       return { cols, rows };
     }
-    case "latest":
     default:
       return input.latest;
   }

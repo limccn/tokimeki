@@ -1,5 +1,5 @@
 {
-  "description": "Language-neutral protocol constants and enums for tokimeki v1.",
+  "description": "Language-neutral protocol constants and enums for tokimeki v1/v1.1.",
   "protocolVersion": 1,
   "frameTypes": {
     "INPUT": 1,
@@ -8,10 +8,11 @@
     "RESYNC_REQ": 4,
     "SNAPSHOT_TO": 5,
     "TUNNEL": 6,
-    "TUNNEL_TO": 7
+    "TUNNEL_TO": 7,
+    "FRAGMENT": 8
   },
-  "roles": ["host", "viewer", "observer", "agent"],
-  "reservedRoles": ["listener"],
+  "roles": ["host", "viewer", "observer", "agent", "listener"],
+  "reservedRoles": [],
   "transportModes": ["p2p-direct", "p2p-turn", "relay"],
   "transportStates": ["selecting", "ready", "failed"],
   "iceProviders": ["coturn", "static", "cloudflare", "stun"],
@@ -61,15 +62,40 @@
   "limits": {
     "maxFrameBytes": 1048576,
     "maxDatachannelMessageBytes": 16384,
+    "fragmentHeaderBytes": 13,
+    "maxFragmentCount": 65,
     "maxTerminalDimension": 10000,
     "maxSessionIdLength": 64,
     "maxClientIdLength": 64,
     "minTargetIdBytes": 1,
-    "maxTargetIdBytes": 64
+    "maxTargetIdBytes": 64,
+    "tunnelRecordHeaderBytes": 28,
+    "tunnelNonceBytes": 12,
+    "tunnelTagBytes": 16,
+    "tunnelKeyBytes": 32,
+    "minTunnelSecretBytes": 16,
+    "tunnelMaxFrameBytes": 16339,
+    "tunnelOutputPayloadMaxBytes": 16330,
+    "tunnelInputPayloadMaxBytes": 16338,
+    "tunnelMaxRecordBytes": 16383
   },
   "patterns": {
     "sessionId": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
     "clientId": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
     "u64Decimal": "^(0|[1-9][0-9]*)$"
-  }
+  },
+  "tunnelRecordVersion": 1,
+  "tunnelRecordTypes": {
+    "data": 1,
+    "ack": 2,
+    "fec": 3,
+    "ping": 4
+  },
+  "tunnelDirections": {
+    "hostToViewer": 1,
+    "viewerToHost": 2
+  },
+  "tunnelKeyModes": ["session-token", "shared-secret"],
+  "tunnelArqMode": "selective-repeat",
+  "tunnelCryptoMode": "aes-256-gcm"
 }

@@ -1,0 +1,153 @@
+import {
+  type HelloMessage,
+  MAX_DATACHANNEL_MESSAGE_BYTES,
+  MAX_FRAME_BYTES,
+  PROTOCOL_VERSION,
+  parseControlMessage,
+  TUNNEL_MAX_FRAME_BYTES,
+} from "@limccn/tokimeki-protocol";
+import { describe, expect, it } from "vitest";
+
+import { buildCapabilities, supportsFragmentation } from "./capabilities.js";
+
+describe("buildCapabilities", () => {
+  it("advertises fragmentation when P2P is enabled", () => {
+    const capabilities = buildCapabilities({ p2p: true });
+    expect(capabilities.transports?.modes).toEqual(["relay", "p2p-direct", "p2p-turn"]);
+    expect(capabilities.transports?.fragmentation).toEqual({
+      version: 1,
+      maxFrameBytes: MAX_FRAME_BYTES,
+      maxMessageBytes: MAX_DATACHANNEL_MESSAGE_BYTES,
+    });
+  });
+
+  it("omits fragmentation when P2P is disabled", () => {
+    const capabilities = buildCapabilities({ p2p: false });
+    expect(capabilities.transports?.modes).toEqual(["relay"]);
+    expect(capabilities.transports?.fragmentation).toBeUndefined();
+  });
+
+  it("advertises listener mode as relay-only and snapshot-only", () => {
+    const capabilities = buildCapabilities({ p2p: true, listener: true });
+    expect(capabilities.transports?.modes).toEqual(["relay"]);
+    expect(capabilities.transports?.fragmentation).toBeUndefined();
+    expect(capabilities.listener?.modes).toEqual(["snapshot-only"]);
+
+    const parsed = parseControlMessage({
+      v: PROTOCOL_VERSION,
+      type: "hello",
+      role: "listener",
+      session: "demo-session",
+      clientId: "listener-1",
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities,
+    });
+    expect(parsed.type).toBe("hello");
+    const hello = parsed as HelloMessage;
+    expect(hello.capabilities.listener?.modes).toEqual(["snapshot-only"]);
+    expect(hello.capabilities.transports?.modes).toEqual(["relay"]);
+  });
+
+  it("accepts only the exact fragmentation dialect", () => {
+    const enabled = buildCapabilities({ p2p: true });
+    const fragmentation = enabled.transports?.fragmentation;
+    if (fragmentation === undefined) throw new Error("expected fragmentation capability");
+
+    expect(supportsFragmentation(enabled)).toBe(true);
+    expect(supportsFragmentation(undefined)).toBe(false);
+    expect(supportsFragmentation(buildCapabilities({ p2p: false }))).toBe(false);
+    expect(
+      supportsFragmentation({
+        ...enabled,
+        transports: {
+          ...enabled.transports,
+          fragmentation: { ...fragmentation, version: 2 },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      supportsFragmentation({
+        ...enabled,
+        transports: {
+          ...enabled.transports,
+          fragmentation: { ...fragmentation, maxMessageBytes: 8_192 },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      supportsFragmentation({
+        ...enabled,
+        transports: {
+          ...enabled.transports,
+          fragmentation: { ...fragmentation, maxFrameBytes: MAX_FRAME_BYTES - 1 },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("advertises display capabilities only when requested", () => {
+    expect(buildCapabilities({ p2p: true }).display).toBeUndefined();
+
+    const host = buildCapabilities({
+      p2p: true,
+      display: {
+        modes: ["fixed-grid", "viewport"],
+        fixed: { cols: 120, rows: 40 },
+        logPanel: true,
+        terminalQueries: "host",
+      },
+    });
+    expect(host.display).toEqual({
+      modes: ["fixed-grid", "viewport"],
+      fixed: { cols: 120, rows: 40 },
+      logPanel: true,
+      terminalQueries: "host",
+    });
+
+    const viewer = buildCapabilities({
+      p2p: true,
+      display: { modes: ["viewport"], logPanel: true },
+    });
+    expect(viewer.display).toEqual({ modes: ["viewport"], logPanel: true });
+  });
+
+  it("advertises the tunnel dialect only when requested and P2P is enabled", () => {
+    const enabled = buildCapabilities({ p2p: true, tunnelKeyMode: "shared-secret" });
+    expect(enabled.tunnel).toEqual({
+      version: 1,
+      arq: "selective-repeat",
+      fec: ["none", "xor"],
+      crypto: "aes-256-gcm",
+      keyMode: "shared-secret",
+      maxFrameSize: TUNNEL_MAX_FRAME_BYTES,
+    });
+
+    expect(buildCapabilities({ p2p: true }).tunnel).toBeUndefined();
+    expect(
+      buildCapabilities({ p2p: false, tunnelKeyMode: "session-token" }).tunnel,
+    ).toBeUndefined();
+    expect(
+      buildCapabilities({ p2p: true, listener: true, tunnelKeyMode: "session-token" }).tunnel,
+    ).toBeUndefined();
+  });
+
+  it("roundtrips through the hello schema", () => {
+    const capabilities = buildCapabilities({ p2p: true });
+    const parsed = parseControlMessage({
+      v: PROTOCOL_VERSION,
+      type: "hello",
+      role: "viewer",
+      session: "demo-session",
+      clientId: "viewer-1",
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities,
+    });
+    expect(parsed.type).toBe("hello");
+    const hello = parsed as HelloMessage;
+    expect(hello.capabilities.transports?.fragmentation).toEqual({
+      version: 1,
+      maxFrameBytes: MAX_FRAME_BYTES,
+      maxMessageBytes: MAX_DATACHANNEL_MESSAGE_BYTES,
+    });
+  });
+});

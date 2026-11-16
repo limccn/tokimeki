@@ -1,0 +1,92 @@
+{
+  "description": "v1.1 TUN profile inner-record layout vectors. Ciphertext bytes are fixed opaque test values; no real key or nonce material is implied.",
+  "records": [
+    {
+      "name": "data-seq42-ack7-sack3",
+      "hex": "010100000000002a0000000700000003000102030405060708090a0b68656c6c6f000102030405060708090a0b0c0d0e0f",
+      "header": {
+        "version": 1,
+        "type": "data",
+        "flags": 0,
+        "seq": 42,
+        "ackSeq": 7,
+        "ackBits": 3,
+        "nonceHex": "000102030405060708090a0b"
+      },
+      "ciphertextHex": "68656c6c6f000102030405060708090a0b0c0d0e0f"
+    },
+    {
+      "name": "ack-seq0-ack42-sack3",
+      "hex": "01020000000000000000002a00000003ffffffffffffffffffffffff00000000000000000000000000000000",
+      "header": {
+        "version": 1,
+        "type": "ack",
+        "flags": 0,
+        "seq": 0,
+        "ackSeq": 42,
+        "ackBits": 3,
+        "nonceHex": "ffffffffffffffffffffffff"
+      },
+      "ciphertextHex": "00000000000000000000000000000000"
+    }
+  ],
+  "aad": [
+    {
+      "name": "host-to-viewer",
+      "direction": 1,
+      "sessionId": "demo-session",
+      "header": {
+        "version": 1,
+        "type": "data",
+        "flags": 0,
+        "seq": 42,
+        "ackSeq": 7,
+        "ackBits": 3,
+        "nonceHex": "000102030405060708090a0b"
+      },
+      "aadHex": "010100010000002a000000070000000364656d6f2d73657373696f6e"
+    },
+    {
+      "name": "viewer-to-host",
+      "direction": 2,
+      "sessionId": "demo-session",
+      "header": {
+        "version": 1,
+        "type": "data",
+        "flags": 0,
+        "seq": 42,
+        "ackSeq": 7,
+        "ackBits": 3,
+        "nonceHex": "000102030405060708090a0b"
+      },
+      "aadHex": "010100020000002a000000070000000364656d6f2d73657373696f6e"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "truncated-header",
+      "hex": "010100000000002a0000000700000003000102030405060708090a",
+      "error": "invalid_frame"
+    },
+    {
+      "name": "unsupported-version",
+      "hex": "020100000000002a0000000700000003000102030405060708090a0b000102030405060708090a0b0c0d0e0f",
+      "error": "invalid_frame"
+    },
+    {
+      "name": "unknown-type",
+      "hex": "010900000000002a0000000700000003000102030405060708090a0b000102030405060708090a0b0c0d0e0f",
+      "error": "invalid_frame"
+    },
+    {
+      "name": "reserved-nonzero",
+      "hex": "010100010000002a0000000700000003000102030405060708090a0b000102030405060708090a0b0c0d0e0f",
+      "error": "invalid_frame"
+    },
+    {
+      "name": "ciphertext-shorter-than-tag",
+      "hex": "010100000000002a0000000700000003000102030405060708090a0b000102030405060708090a0b0c0d0e",
+      "error": "invalid_frame"
+    }
+  ]
+}

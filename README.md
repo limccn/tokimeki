@@ -30,8 +30,15 @@ keyboard control.
 - **Self-hostable.** Deploy the relay to your own Cloudflare account.
 - **Reconnect-friendly.** Snapshots and sequence numbers restore the screen
   after a viewer drops.
-- **Multi-viewer.** Several viewers can attach; input is shared and resize is
-  coordinated.
+- **Multi-viewer.** Several viewers can attach; input is shared, and the host
+  keeps a fixed TUI window so a new viewer never resizes the hosted program.
+  Viewers letterbox or cursor-follow the fixed grid in their own terminal.
+- **Any TUI command.** Add its executable name to `TOKIMEKI_WINDOW_TUI` and run
+  `tokimeki <command>` (for example `TOKIMEKI_WINDOW_TUI=claude,pi,omp` then
+  `tokimeki omp`). Unknown commands are rejected unless allow-listed.
+- **Share again.** In the host viewport, press F12 to reopen the viewer config
+  after the startup banner scrolls away; `c` copies the exact JSON. The config
+  can be passed to the viewer as `TOKIMEKI_CONFIG`.
 
 ## How it works
 
@@ -179,13 +186,13 @@ Common host/attach variables: `TOKIMEKI_RELAY_URL`, `TOKIMEKI_MASTER_TOKEN`
 
 ## Status
 
-`0.1.0` — the first public release. Install from
-[npm](https://www.npmjs.com/package/@limccn/tokimeki) or read the
-[v0.1.0 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.0).
+`0.1.2` — current release. Install from
+[npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to GitHub
+Packages; see [docs/release.md](docs/release.md)) or read the
+[v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
-limitations and the v1.1 roadmap (selective-repeat/ARQ, listener mode, LAN
-optimizations).
+limitations and the v1.1 feature history.
 
 ## Contributing
 

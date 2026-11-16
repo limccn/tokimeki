@@ -2,8 +2,9 @@
 
 > 状态：v1 已部署到生产 Cloudflare。生产 URL 为 `https://relay.tokiapi.app`
 > （Worker `tokimeki-relay`，当前 100% 流量版本
-> `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`，2026-11-13 发布；代码与
-> `293d1eba-6359-4166-b7f5-50a45f57bf5b` 相同，含 host relay 重连修复）。
+> `1104916c-f188-4cc5-8df6-e34ca557ffae`，2026-11-16 发布，含 v1.1 F2
+> 只读 listener 角色；上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
+> 可作为回滚参考，含 host relay 重连修复）。
 > `TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_COTURN_SECRET` 与 `TOKIMEKI_TURN_API_TOKEN`
 > 已通过 `wrangler secret put` 上传；`TOKIMEKI_TURN_KEY_ID` 为 vars（Cloudflare TURN
 > 验证用，当前 provider=coturn 时不生效）。当前 `TOKIMEKI_TURN_PROVIDER=coturn`，
@@ -14,8 +15,9 @@
 > 2026-11-13 完成 coturn secret 轮换；两台 coturn 均通过 relay-pair 门禁，
 > `stun.tokiapi.app` 的 `external-ip` 已修复（见 §4.1）。
 > Worker `/healthz`、`/ws/<session>`、SessionDO（SQLite + Hibernation）、TURN 凭据签发、
-> PTY/TUI 托管、共享控制、快照重连与 P2P 路径均已落地；本机 live e2e 四组场景通过，
-> 生产 TURN-only e2e（coturn UDP）与 Cloudflare TURN TURN-only e2e 通过。生产 P2P
+> PTY/TUI 托管、共享控制、快照重连与 P2P 路径均已落地；本机 live e2e 1–5 组通过
+> （第 5 组为独立的 host 1006 重连脚本），生产 TURN-only e2e（coturn UDP）与
+> Cloudflare TURN TURN-only e2e 通过。生产 P2P
 > live e2e 曾在 `d28ef19e` 完整通过；2026-11-13 在 `ee53cf15` 复跑两次均因跨境 relay
 > 心跳中断停在不同断言，P2P 直连路径本身已建立（见 §7.3）。2026-11-13 完成本机
 > NAT ↔ 日本/美国 VPS 的跨机器 relay、直连 P2P、
@@ -23,6 +25,8 @@
 > 缺陷已在源码修复，通过本机真实 TCP 断线复测，并已随 `293d1eba` 部署到生产；
 > 生产环境另以同 clientId 双 host 冒烟验证了鉴权后替换路径（旧 socket 4003，新 socket
 > welcome）。跨境链路仍有间歇性停顿；生产 hibernation/TTL alarm 仍需环境验证，见 §7。
+> 2026-11-16 维护者人工确认严格 NAT↔NAT 与真实 Claude/pi TUI 交互已通过 **e2e 层面**
+> 验收（§7.6）；该确认不等同于长期运行、生产边缘休眠或全路径验收。
 > 当前 CLI 的 libjuice 不支持 TURN over TCP/TLS，CLI 只能走 UDP；`turns:` 5349 供
 > 浏览器等客户端使用。
 
@@ -326,13 +330,20 @@ curl -sS https://relay.tokiapi.app/healthz
 #  "turnProvider":"coturn","turnConfigured":true}
 ```
 
-**当前部署状态（2026-11-13）**：
+**当前部署状态（2026-11-16）**：
 
 - Worker `tokimeki-relay` 已部署，URL `https://relay.tokiapi.app`。当前 100% 流量版本
-  `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`（2026-11-13 发布）；代码与
-  `293d1eba-6359-4166-b7f5-50a45f57bf5b` 相同。上一版本
+  `1104916c-f188-4cc5-8df6-e34ca557ffae`（2026-11-16 发布，含 v1.1 F2 只读
+  listener 角色）。上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
+  （2026-11-13，含 host relay 重连修复）可作为回滚参考；更早的
   `ee0e0f3c-9f99-4647-9604-91e2abddc20e`（Cloudflare 验证配置）与
-  `da0dde29-66e0-425e-85c0-49d053316186` 可作为回滚参考，但 secret 不回滚。
+  `da0dde29-66e0-425e-85c0-49d053316186` 也保留。secret 不回滚。
+- 2026-11-16 的发布为纯代码部署（`npm run deploy:prod`），**未轮换**
+  `TOKIMEKI_MASTER_TOKEN`；生产 token 继续保存在仓库外受控位置，不写入仓库、日志或
+  命令历史。
+- 2026-11-16 使用 npmjs `@limccn/tokimeki@0.1.1` 对该版本复跑生产 e2e：
+  relay-only、P2P、listener、TUN+XOR FEC、shared-secret 通过；流控 `pause` 在
+  30 秒内未观察到（见 §7.3 与已知跨境限制）。
 - `TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_COTURN_SECRET`、`TOKIMEKI_TURN_API_TOKEN` 为生产
   secret，均已上传；生产 token 保存在仓库外的受控位置，不写入仓库、日志或命令历史。
   2026-11-13 通过 `wrangler secret put`（stdin）轮换了 `TOKIMEKI_COTURN_SECRET`，两台
@@ -424,6 +435,7 @@ PTY 前给出可操作错误。TLS 代理场景请确认 `TOKIMEKI_RELAY_URL` �
 | 2026-11-13 六条 coturn URL 配置 `--dry-run`（provider=cloudflare，不生效） | 通过 |
 | 2026-11-13 切回 provider=coturn 后六条 URL `--dry-run` | 通过 |
 | 2026-11-13 切回 coturn + 六条 URL 生产发布 | 成功，版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6` |
+| 2026-11-16 v1.1 F2 listener relay 代码发布 | 成功，100% 版本 `1104916c-f188-4cc5-8df6-e34ca557ffae` |
 
 > 2026-11-13 host 重连修复后：`npm test` 13 files / 219 tests、`npm run test:relay`
 > 5 files / 60 tests（含 4 条 host 重连回归）、`npm run typecheck` 均通过；新增 host
@@ -636,6 +648,40 @@ pause → resume → 4 MiB burst 结束标记到达两个 viewer。生产流控�
 workers.dev；自定义域名 `relay.tokiapi.app` 可达，但跨境链路存在约 40% 的间歇性
 TLS/HTTP 停顿和 30 秒级中断，生产 e2e 可能需要重跑。
 
+2026-11-16 生产 live e2e（npmjs `@limccn/tokimeki@0.1.1`，relay 版本
+`1104916c`）：
+
+验证目标是用已发布的 npm 包（不是本地 `packages/cli/dist`）跑生产链路，并确认
+新部署的 listener 角色。安装到干净临时目录：
+
+```bash
+npm install --prefix <tmp> @limccn/tokimeki@0.1.1 \
+  --@limccn:registry=https://registry.npmjs.org
+export E2E_CLI_ENTRY=<tmp>/node_modules/@limccn/tokimeki/dist/index.js
+```
+
+结果：
+
+- relay-only（`E2E_P2P_MODE=off`）：`E2E PASS`。
+- P2P required（`REQUIRE_P2P=1 E2E_P2P_MODE=auto`）：`E2E PASS`，
+  `P2P transports: p2p-direct, host->prflx, lan=yes`。
+- listener（`E2E_LISTENER=1 E2E_P2P_MODE=off`）：`E2E PASS`；立即/周期快照、
+  listener 输入被忽略、host exit 到达 listener。
+- TUN + XOR FEC（`E2E_TUNNEL=1 E2E_TUNNEL_FEC=xor`）：`E2E PASS`；
+  `keyMode=session-token`、`fec=xor`，TUN 数据面承载 host 输出与 viewer 输入。
+- TUN shared-secret（`E2E_TUNNEL=1 E2E_TUNNEL_SECRET=<dummy>`）：`E2E PASS`；
+  `keyMode=shared-secret`（relay 不能推导密钥）。
+- 流控（`E2E_P2P_MODE=off E2E_FLOW_CONTROL=1 E2E_SECRET_CHECK=1`）：未通过。
+  错误 token、初始快照、输入/广播、resize、secret 隔离均通过；暂停 attach1
+  stdout 后 30 秒内未观察到 relay `pause`。与 2026-11-13 第二次生产尝试相同，
+  属于跨境时序/带宽导致的已知限制（本地 loopback 确定性通过）。
+- host 重连脚本只接受 `ws://`，生产 `wss://` 不适用；由 §7.2 第 5 组覆盖。
+
+本次同时修复了 harness 的 PTY 重排误判：生产 80 列重排会把
+`keyMode=session-token` / `p2p input received over data channel` 拆行并插入
+cursor-position 码。`live-e2e.mjs` 现对隧道日志做 ANSI/空白归一化后再断言；
+`E2E_CLI_ENTRY` 也支持 `scripts/e2e/host-relay-reconnect.mjs`。
+
 ### 7.4 跨机器生产验收（2026-11-13）
 
 拓扑：本机 Windows（大陆 NAT）↔ 日本/美国临时测试 VPS（公网 IP，验收后销毁）；
@@ -653,10 +699,13 @@ Worker `wss://relay.tokiapi.app`，coturn `turn:stun.tokiapi.app:3478`（REST �
 | host relay 1006 后重连 | 原始验收**失败**：`duplicate_client_id` → `HOST_EXIT=1`；源码已修复并通过本机确定性复测（§7.2 第 5 组），2026-11-13 已部署到生产（`293d1eba`），生产 host 替换冒烟通过（§7.3）；跨机器 1006 复测因测试 VPS 已销毁未重做 |
 
 限制：美国 VPS 到 coturn 的 3478/5349/443 均不可达（环境限制，正好验证回退）；
-严格 NAT↔NAT 拓扑和跨公网 3-viewer 未执行；Cloudflare TURN 已于同日单独验证
-（§7.3）。生产流控断言仍受跨境链路影响，见上文。
+跨公网 3-viewer 未执行；严格 NAT↔NAT 已于 2026-11-16 由维护者人工 e2e 确认
+（见 §7.6）；Cloudflare TURN 已于同日单独验证（§7.3）。生产流控断言仍受跨境
+链路影响，见上文。
 
 ### 7.5 未验证项
+
+> 已由维护者人工 e2e 确认的项见 §7.6；本节保留仍未验证或仅部分验证的项。
 
 - **Cloudflare 边缘 hibernation/TTL alarm**：本地 `wrangler dev` 不模拟真实休眠；
   生产部署已运行，但尚未做长时间休眠/驱逐观测。
@@ -671,14 +720,27 @@ Worker `wss://relay.tokiapi.app`，coturn `turn:stun.tokiapi.app:3478`（REST �
   验证后生产已切回 coturn，Cloudflare 配置保留但未启用。大陆流量按官方说明走境外
   节点，跨境时延/丢包仍是风险；CLI 仍只支持 UDP（`turns:` 仅供浏览器等客户端）。
 - **跨 NAT/跨机器**：2026-11-13 已完成本机 NAT ↔ 日本/美国公网 VPS 的 relay、
-  直连 P2P、coturn TURN 与 TURN 不可达回退验收（见 §7.4）。严格 NAT↔NAT 与第二台
-  真正位于 NAT/CGNAT 后的客户端仍未具备；host 瞬时断线重连已在源码修复、通过本机
-  真实 TCP 断线复测（§7.2 第 5 组）并部署到生产（`293d1eba`），生产 host 替换冒烟
-  通过（§7.3）；跨机器 1006 复测因测试 VPS 已销毁仍未重做。生产流控场景仍受跨境
-  链路影响未通过，需在稳定链路或双机环境补测。生产 viewer 断开重连场景中，重连
-  数据面与 Ctrl-C 传播通过，但 `host exited` 回放因跨境握手停顿未在断言窗口内到达
-  （§7.3）。
-- **真实 Claude/pi TUI 交互**：本机 live e2e 使用 fake TUI；真实 TUI 的打字、斜杠菜单、
-  alternate screen/鼠标模式恢复仍需手工验收（命令见 §6）。
+  直连 P2P、coturn TURN 与 TURN 不可达回退验收（见 §7.4）。严格 NAT↔NAT 已于
+  2026-11-16 由维护者人工 e2e 确认（见 §7.6）；跨公网 3-viewer 仍未执行。host
+  瞬时断线重连已在源码修复、通过本机真实 TCP 断线复测（§7.2 第 5 组）并部署到
+  生产（`293d1eba`），生产 host 替换冒烟通过（§7.3）；跨机器 1006 复测因测试
+  VPS 已销毁仍未重做。生产流控场景仍受跨境链路影响未通过，需在稳定链路或双机
+  环境补测。生产 viewer 断开重连场景中，重连数据面与 Ctrl-C 传播通过，但
+  `host exited` 回放因跨境握手停顿未在断言窗口内到达（§7.3）。
+- **P2P 直连成功率/长期稳定性**：2026-11-16 的人工 e2e 只确认严格 NAT↔NAT
+  场景可达（含 P2P 尝试与 relay 回退），未建立直连成功率或长时间稳定性基线。
 - **同 LAN host candidate 直连**：需要两台同 LAN 机器，未在本机验证。
 - **Linux/ConPTY 差异**：本机仅 Windows ConPTY；Linux 手动验证未执行。
+
+### 7.6 人工 e2e 确认（2026-11-16）
+
+维护者人工确认以下场景已通过 **e2e 层面** 验收；本仓库未保存对应的环境、命令或
+原始日志：
+
+- **严格 NAT↔NAT**：两端均位于 NAT/CGNAT 后的连接场景（含 P2P 尝试与 relay
+  回退）；未单独拆出 P2P 直连成功率和长期稳定性。
+- **真实 Claude/pi TUI**：真实 TUI 通过 tokimeki 托管与 attach 交互。
+
+范围说明：这是 e2e 层面的人工确认，不等同于长期运行、生产边缘 hibernation/TTL、
+P2P 直连成功率、所有 TUI 交互路径、跨平台或性能验收。自动化 live e2e 仍使用
+fake TUI；上述确认不改变 §7.5 中仍未验证的项。

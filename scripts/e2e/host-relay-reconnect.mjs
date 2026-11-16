@@ -18,10 +18,12 @@
  * viewer keeps working, and that Ctrl-C still tears the session down cleanly.
  * It never prints tokens.
  *
- * Optional: E2E_TIMEOUT_MS (default 60000).
+ * Optional: E2E_TIMEOUT_MS (default 60000), E2E_CLI_ENTRY (CLI entry to run;
+ * defaults to the local packages/cli/dist/index.js).
  */
 
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +31,13 @@ import { fileURLToPath } from "node:url";
 import pty from "@homebridge/node-pty-prebuilt-multiarch";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const cli = join(root, "packages/cli/dist/index.js");
+const cli = process.env.E2E_CLI_ENTRY
+  ? resolve(process.env.E2E_CLI_ENTRY)
+  : join(root, "packages/cli/dist/index.js");
+if (!existsSync(cli)) {
+  console.error(`CLI entry not found: ${cli}`);
+  process.exit(2);
+}
 const fakeTui = join(root, "scripts/e2e/fake-tui.mjs");
 const timeoutMs = Number(process.env.E2E_TIMEOUT_MS ?? 60_000);
 

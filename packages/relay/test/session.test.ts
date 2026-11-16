@@ -8,6 +8,7 @@ import {
   helloFor,
   MASTER_TOKEN,
   openHost,
+  openListener,
   openViewer,
   SESSION_TOKEN,
   sleep,
@@ -52,15 +53,6 @@ describe("SessionDurableObject", () => {
     expect(closed.code).toBe(4003);
   });
 
-  it("rejects the reserved listener role with not_implemented", async () => {
-    const socket = await connectDirect("listener-role", { role: "listener" });
-    socket.send(helloFor("listener-role", "listener", "listener-1"));
-    const error = await socket.waitForType("error");
-    expect(error.code).toBe("not_implemented");
-    const closed = await socket.waitForClose();
-    expect(closed.code).toBe(4005);
-  });
-
   it("accepts unknown capabilities from newer clients", async () => {
     const socket = await connectWorker("unknown-capabilities", {
       master: MASTER_TOKEN,
@@ -83,6 +75,62 @@ describe("SessionDurableObject", () => {
     expect(serialized).not.toContain("test-coturn-secret");
     expect(serialized).not.toContain("test-turn-api-token");
     socket.close();
+  });
+
+  it("echoes client identity and display capabilities in welcome and presence", async () => {
+    const sessionId = "client-display-echo";
+    const host = await connectWorker(sessionId, {
+      master: MASTER_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    host.send(
+      helloFor(sessionId, "host", "host-1", {
+        client: { name: "tokimeki-cli", version: "0.1.2", kind: "cli", platform: "win32" },
+        capabilities: {
+          display: {
+            modes: ["fixed-grid", "viewport"],
+            fixed: { cols: 120, rows: 40 },
+            logPanel: true,
+            terminalQueries: "host",
+          },
+        },
+      }),
+    );
+    await host.waitForType("welcome");
+
+    const viewer = await connectWorker(sessionId, { token: SESSION_TOKEN });
+    viewer.send(
+      helloFor(sessionId, "viewer", "viewer-1", {
+        client: { name: "tokimeki-cli", version: "0.1.2", kind: "cli", platform: "darwin" },
+        capabilities: { display: { modes: ["viewport"], logPanel: true } },
+      }),
+    );
+    const viewerWelcome = await viewer.waitForType("welcome");
+    const hostInfo = (viewerWelcome.clients as Array<Record<string, unknown>>).find(
+      (client) => client.clientId === "host-1",
+    );
+    expect(hostInfo?.client).toMatchObject({ name: "tokimeki-cli", kind: "cli" });
+    expect(hostInfo?.capabilities).toMatchObject({
+      display: { modes: ["fixed-grid", "viewport"], fixed: { cols: 120, rows: 40 } },
+    });
+
+    const joined = await host.waitFor((message) => message.type === "peer-joined");
+    expect(joined.capabilities).toMatchObject({
+      display: { modes: ["viewport"], logPanel: true },
+    });
+
+    const secondViewer = await connectWorker(sessionId, { token: SESSION_TOKEN });
+    secondViewer.send(helloFor(sessionId, "viewer", "viewer-2"));
+    const secondWelcome = await secondViewer.waitForType("welcome");
+    const viewerInfo = (secondWelcome.clients as Array<Record<string, unknown>>).find(
+      (client) => client.clientId === "viewer-1",
+    );
+    expect(viewerInfo?.client).toMatchObject({ name: "tokimeki-cli", kind: "cli" });
+    expect(viewerInfo?.capabilities).toMatchObject({ display: { modes: ["viewport"] } });
+
+    host.close();
+    viewer.close();
+    secondViewer.close();
   });
 
   it("rejects duplicate client ids", async () => {
@@ -125,6 +173,233 @@ describe("SessionDurableObject", () => {
     host.close();
     viewer1.close();
     viewer2.close();
+  });
+
+  it("accepts a listener, advertises snapshot-only, and announces its role", async () => {
+    const sessionId = "listener-join";
+    const host = await openHost(sessionId);
+    const listener = await openListener(sessionId, "listener-1");
+
+    const welcome = listener.controls.find((message) => message.type === "welcome");
+    expect(welcome).toBeDefined();
+    const capabilities = welcome?.capabilities as { listener?: { modes?: string[] } } | undefined;
+    expect(capabilities?.listener?.modes).toEqual(["snapshot-only"]);
+
+    const joined = await host.waitFor(
+      (message) => message.type === "peer-joined" && message.clientId === "listener-1",
+    );
+    expect(joined.role).toBe("listener");
+
+    // A listener hello must never synthesize a host-facing resize.
+    const sized = await connectWorker(sessionId, { token: SESSION_TOKEN, listener: true });
+    sized.send(helloFor(sessionId, "listener", "listener-sized", { cols: 120, rows: 40 }));
+    await sized.waitForType("welcome");
+    await sleep(100);
+    expect(
+      host.controls.some(
+        (message) => message.type === "resize" && message.clientId === "listener-sized",
+      ),
+    ).toBe(false);
+
+    host.close();
+    listener.close();
+    sized.close();
+  });
+
+  it("rejects a listener without a host session and does not create the schema", async () => {
+    const sessionId = "listener-no-session";
+    const listener = await connectWorker(sessionId, { token: SESSION_TOKEN, listener: true });
+    listener.send(helloFor(sessionId, "listener", "listener-1"));
+    const error = await listener.waitForType("error");
+    expect(error.code).toBe("invalid_session");
+    const closed = await listener.waitForClose();
+    expect(closed.code).toBe(4001);
+
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    const tables = await runInDurableObject(stub, async (_instance: unknown, state) => {
+      return state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .toArray()
+        .map((row) => row.name);
+    });
+    expect(tables).not.toContain("session_meta");
+  });
+
+  it("enforces the independent listener limit", async () => {
+    // The test config caps listeners at 2. Raise max clients first so the
+    // listener cap, not the total client cap, is the failing check.
+    const sessionId = "listener-limit";
+    const host = await openHost(sessionId);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    await runInDurableObject(stub, (_instance: unknown, state) => {
+      state.storage.sql.exec("UPDATE session_meta SET max_clients = 10");
+    });
+
+    const listener1 = await openListener(sessionId, "listener-1");
+    const listener2 = await openListener(sessionId, "listener-2");
+    const third = await connectWorker(sessionId, { token: SESSION_TOKEN, listener: true });
+    third.send(helloFor(sessionId, "listener", "listener-3"));
+    const error = await third.waitForType("error");
+    expect(error.code).toBe("session_full");
+    expect(String(error.message)).toContain("listener limit");
+    const closed = await third.waitForClose();
+    expect(closed.code).toBe(4002);
+
+    host.close();
+    listener1.close();
+    listener2.close();
+  });
+
+  it("still counts listeners toward the total client limit", async () => {
+    // Test config: maxClients=3, maxListeners=2. host+viewer+listener fills the
+    // session, so a second listener fails the total cap even though only one
+    // listener is active.
+    const sessionId = "listener-total-limit";
+    const host = await openHost(sessionId);
+    const viewer = await openViewer(sessionId, "viewer-1");
+    const listener = await openListener(sessionId, "listener-1");
+
+    const extra = await connectWorker(sessionId, { token: SESSION_TOKEN, listener: true });
+    extra.send(helloFor(sessionId, "listener", "listener-2"));
+    const error = await extra.waitForType("error");
+    expect(error.code).toBe("session_full");
+    expect(String(error.message)).toContain("client limit");
+    const closed = await extra.waitForClose();
+    expect(closed.code).toBe(4002);
+
+    host.close();
+    viewer.close();
+    listener.close();
+  });
+
+  it("keeps a listener read-only and off the terminal data path", async () => {
+    const sessionId = "listener-readonly";
+    const host = await openHost(sessionId);
+    const viewer = await openViewer(sessionId, "viewer-1");
+    const listener = await openListener(sessionId, "listener-1");
+
+    host.sendBinary(outputFrame(1, "viewer-only"));
+    const delivered = decodeFrame(await viewer.waitForBinary());
+    expect(delivered.type).toBe("output");
+    await sleep(100);
+    expect(listener.binary).toHaveLength(0);
+
+    listener.sendBinary(encodeFrame({ type: "input", payload: new TextEncoder().encode("x") }));
+    listener.send({ v: 1, type: "resize", clientId: "listener-1", cols: 100, rows: 30 });
+    listener.send({ v: 1, type: "resync" });
+    listener.send({ v: 1, type: "ack", seq: "1" });
+    listener.send({
+      v: 1,
+      type: "signal",
+      to: "host-1",
+      from: "listener-1",
+      kind: "offer",
+      payload: { sdp: "x" },
+    });
+    listener.send({
+      v: 1,
+      type: "transport",
+      clientId: "listener-1",
+      mode: "p2p-direct",
+      state: "ready",
+    });
+    await sleep(200);
+
+    const errors = listener.controls.filter((message) => message.type === "error");
+    expect(errors.every((message) => message.code === "invalid_role")).toBe(true);
+    const errorText = errors.map((message) => String(message.message)).join("\n");
+    expect(errorText).toContain("terminal frames");
+    expect(errorText).toContain("resize");
+    expect(errorText).toContain("resync");
+    expect(errorText).toContain("acknowledge");
+    expect(errorText).toContain("signals");
+    expect(errorText).toContain("transport");
+
+    // Nothing was forwarded to the host as data, resize, signal, or transport.
+    expect(host.binary).toHaveLength(0);
+    expect(
+      host.controls.some(
+        (message) =>
+          message.type === "resize" || message.type === "signal" || message.type === "transport",
+      ),
+    ).toBe(false);
+
+    // Lifecycle events still reach the listener.
+    host.send({ v: 1, type: "host-exited", exitCode: 0 });
+    const exited = await listener.waitForType("host-exited");
+    expect(exited.exitCode).toBe(0);
+
+    host.close();
+    viewer.close();
+    listener.close();
+  });
+
+  it("delivers repeated listener snapshots without ACK or backpressure", async () => {
+    const sessionId = "listener-snapshot";
+    const host = await openHost(sessionId);
+    const listener = await openListener(sessionId, "listener-1");
+
+    // 2 x 600 KiB crosses the viewer high-water mark; listeners must not be
+    // paused, ACK-tracked, or closed for this.
+    const payload = new Uint8Array(600_000);
+    host.sendBinary(encodeFrame({ type: "snapshot_to", targetId: "listener-1", seq: 1, payload }));
+    host.sendBinary(encodeFrame({ type: "snapshot_to", targetId: "listener-1", seq: 2, payload }));
+    await listener.waitForBinary();
+    await sleep(300);
+    const snapshots = listener.binary.filter((bytes) => decodeFrame(bytes).type === "snapshot_to");
+    expect(snapshots.length).toBe(2);
+
+    await sleep(150);
+    expect(host.controls.some((message) => message.type === "pause")).toBe(false);
+    expect(listener.closeInfo).toBeNull();
+
+    host.close();
+    listener.close();
+  });
+
+  it("does not let a listener ACK clear viewer backpressure", async () => {
+    const sessionId = "listener-ack-isolation";
+    const host = await openHost(sessionId);
+    const viewer = await openViewer(sessionId, "viewer-1");
+    const listener = await openListener(sessionId, "listener-1");
+
+    const halfMiB = new Uint8Array(524_288);
+    host.sendBinary(outputFrameBytes(1, halfMiB));
+    host.sendBinary(outputFrameBytes(2, halfMiB));
+    await host.waitFor((message) => message.type === "pause" && message.clientId === "viewer-1");
+
+    // A recovery snapshot for the paused viewer must not be confused with the
+    // listener delivery path, and a listener snapshot still arrives while the
+    // viewer is paused.
+    host.sendBinary(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId: "listener-1",
+        seq: 3,
+        payload: new TextEncoder().encode("listener screen"),
+      }),
+    );
+    const received = decodeFrame(await listener.waitForBinary());
+    expect(received.type).toBe("snapshot_to");
+
+    listener.send({ v: 1, type: "ack", seq: "3" });
+    await listener.waitFor(
+      (message) => message.type === "error" && message.code === "invalid_role",
+    );
+    await sleep(150);
+    expect(
+      host.controls.some((message) => message.type === "resume" && message.clientId === "viewer-1"),
+    ).toBe(false);
+
+    viewer.send({ v: 1, type: "ack", seq: "3" });
+    const resumed = await host.waitFor(
+      (message) => message.type === "resume" && message.clientId === "viewer-1",
+    );
+    expect(resumed.type).toBe("resume");
+
+    host.close();
+    viewer.close();
+    listener.close();
   });
 
   it("broadcasts host output to every relayed viewer", async () => {
@@ -245,6 +520,32 @@ describe("SessionDurableObject", () => {
     const error = await host.waitForType("error");
     expect(error.code).toBe("invalid_frame");
     expect(viewer.binary).toHaveLength(0);
+    host.close();
+    viewer.close();
+  });
+
+  it("rejects FRAGMENT frames instead of forwarding them", async () => {
+    const host = await openHost("fragment-frame");
+    const viewer = await openViewer("fragment-frame", "viewer-1");
+    const fragment = encodeFrame({
+      type: "fragment",
+      messageId: 1,
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      totalBytes: 5,
+      payload: new TextEncoder().encode("hello"),
+    });
+
+    host.sendBinary(fragment);
+    const hostError = await host.waitForType("error");
+    expect(hostError.code).toBe("invalid_frame");
+    expect(viewer.binary).toHaveLength(0);
+
+    viewer.sendBinary(fragment);
+    const viewerError = await viewer.waitForType("error");
+    expect(viewerError.code).toBe("invalid_frame");
+    expect(host.binary).toHaveLength(0);
+
     host.close();
     viewer.close();
   });

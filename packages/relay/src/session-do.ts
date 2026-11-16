@@ -2,7 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import {
   type AgentMessage,
   type AnyRole,
+  type Capabilities,
   CLOSE_CODES,
+  type ClientDescriptor,
   type ClientInfo,
   type ControlMessage,
   createNotImplementedErrorMessage,
@@ -13,7 +15,6 @@ import {
   type IceProvider,
   isActiveRole,
   isAgentMessage,
-  isReservedRole,
   isTerminalSizeWithinLimits,
   isValidSessionId,
   type KnownControlMessage,
@@ -31,6 +32,7 @@ import { constantTimeEqualHex, sha256Hex } from "./crypto-utils.js";
 import {
   iceTransportPolicy,
   maxClientsPerSession,
+  maxListenersPerSession,
   type RelayEnv,
   sessionTtlSeconds,
 } from "./env.js";
@@ -57,11 +59,18 @@ const RUNTIME_PAUSE_BUFFERED_BYTES = 4 * 1024 * 1024;
 const ACK_RING_LIMIT = 256;
 const RESIZE_THROTTLE_MS = 250;
 const RESYNC_THROTTLE_MS = 500;
+/**
+ * A listener snapshot is dropped instead of queued when its socket already has
+ * this much unflushed data. The next periodic snapshot supersedes it, so a slow
+ * listener never grows relay memory or blocks the host/viewers.
+ */
+const LISTENER_SNAPSHOT_BUFFER_LIMIT = 1 * 1024 * 1024;
 
 const RELAY_CAPABILITIES = {
   protocolVersion: PROTOCOL_VERSION,
   transports: { modes: ["relay", "p2p-direct", "p2p-turn"] },
   snapshot: { formats: ["xterm-serialize"], maxBytes: 262_144 },
+  listener: { modes: ["snapshot-only"] },
 } as const;
 
 const SERVER_OWNED_CONTROL_TYPES = new Set<string>([
@@ -119,6 +128,10 @@ interface ActiveAttachment {
   lastResyncAt?: number;
   cols?: number;
   rows?: number;
+  /** User-Agent-like identity echoed in welcome/presence (v0.1.2). */
+  client?: ClientDescriptor;
+  /** Rendering capabilities echoed in welcome/presence (v0.1.2). */
+  capabilities?: Capabilities;
 }
 
 type SocketAttachment = PendingAttachment | ActiveAttachment;
@@ -130,6 +143,46 @@ interface ActiveSocket {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Keep socket attachments small and bounded.
+ *
+ * `hello.capabilities` is a loose object and may contain arbitrary large
+ * unknown fields. The relay only needs the User-Agent-like client descriptor
+ * and the display capability for welcome/presence echo; storing anything else
+ * risks the 2 KiB attachment limit and amplifies client data to every peer.
+ */
+function boundedClientDescriptor(
+  client: ClientDescriptor | undefined,
+): ClientDescriptor | undefined {
+  if (client === undefined) return undefined;
+  return {
+    name: client.name.slice(0, 64),
+    version: client.version.slice(0, 64),
+    ...(client.kind === undefined ? {} : { kind: client.kind.slice(0, 32) }),
+    ...(client.platform === undefined ? {} : { platform: client.platform.slice(0, 32) }),
+    ...(client.runtime === undefined ? {} : { runtime: client.runtime.slice(0, 64) }),
+  };
+}
+
+function boundedCapabilities(capabilities: Capabilities | undefined): Capabilities | undefined {
+  const display = capabilities?.display;
+  if (display === undefined) return undefined;
+  return {
+    display: {
+      ...(display.modes === undefined
+        ? {}
+        : { modes: display.modes.slice(0, 16).map((mode) => mode.slice(0, 32)) }),
+      ...(display.fixed === undefined
+        ? {}
+        : { fixed: { cols: display.fixed.cols, rows: display.fixed.rows } }),
+      ...(display.logPanel === undefined ? {} : { logPanel: display.logPanel }),
+      ...(display.terminalQueries === undefined
+        ? {}
+        : { terminalQueries: display.terminalQueries.slice(0, 32) }),
+    },
+  };
 }
 
 function readAttachment(ws: WebSocket): SocketAttachment | null {
@@ -200,6 +253,10 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         ...(typeof raw.lastResyncAt === "number" ? { lastResyncAt: raw.lastResyncAt } : {}),
         ...(typeof raw.cols === "number" ? { cols: raw.cols } : {}),
         ...(typeof raw.rows === "number" ? { rows: raw.rows } : {}),
+        // Persisted only after a schema-validated hello; retain as loose objects
+        // so new display/client fields survive hibernation without a migration.
+        ...(isRecord(raw.client) ? { client: raw.client as ClientDescriptor } : {}),
+        ...(isRecord(raw.capabilities) ? { capabilities: raw.capabilities as Capabilities } : {}),
       };
     }
     return null;
@@ -296,7 +353,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     if (roleHeader === null) {
       return new Response("missing relay role\n", { status: 400 });
     }
-    if (!isActiveRole(roleHeader) && !isReservedRole(roleHeader)) {
+    if (!isActiveRole(roleHeader)) {
       return new Response("invalid relay role\n", { status: 400 });
     }
     const upgrade = request.headers.get("upgrade");
@@ -410,16 +467,6 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       return;
     }
     const hello = message as HelloMessage;
-    if (hello.role === "listener") {
-      this.sendControl(ws, createNotImplementedErrorMessage({ detail: "listener role" }));
-      ws.close(CLOSE_CODES.notImplemented, "not_implemented");
-      this.logger.info("hello_rejected", {
-        sessionId: this.sessionId,
-        role: hello.role,
-        code: "not_implemented",
-      });
-      return;
-    }
     if (!isActiveRole(hello.role)) {
       this.closeWithError(ws, "invalid_role", "unsupported role", CLOSE_CODES.invalidMessage);
       return;
@@ -607,6 +654,22 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       );
       return;
     }
+    // Listeners have an independent cap on top of the total client limit so a
+    // snapshot fan-out cannot crowd out viewers.
+    if (role === "listener") {
+      const listenerCount = this.activeSockets().filter(
+        (socket) => socket.att.role === "listener",
+      ).length;
+      if (listenerCount >= maxListenersPerSession(this.env)) {
+        this.closeWithError(
+          ws,
+          "session_full",
+          "session has reached its listener limit",
+          CLOSE_CODES.sessionFull,
+        );
+        return;
+      }
+    }
 
     if (role === "host") {
       if (latestMeta === null) {
@@ -632,6 +695,8 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       clearHostExit(this.ctx.storage.sql);
     }
 
+    const client = boundedClientDescriptor(hello.client);
+    const displayCapabilities = boundedCapabilities(hello.capabilities);
     const active: ActiveAttachment = {
       kind: "active",
       clientId: hello.clientId,
@@ -648,6 +713,8 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       pendingAcks: [],
       ...(hello.cols === undefined ? {} : { cols: hello.cols }),
       ...(hello.rows === undefined ? {} : { rows: hello.rows }),
+      ...(client === undefined ? {} : { client }),
+      ...(displayCapabilities === undefined ? {} : { capabilities: displayCapabilities }),
     };
     this.saveAttachment(ws, active);
     updateLastActivity(this.ctx.storage.sql, now);
@@ -732,6 +799,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           v: PROTOCOL_VERSION,
           type: "peer-joined",
           clientId: active.clientId,
+          role: active.role,
           capabilities: hello.capabilities,
         });
       }
@@ -789,23 +857,30 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         });
         break;
       case "ack":
+        if (att.role === "listener") {
+          this.sendControl(
+            ws,
+            errorMessage("invalid_role", "listeners do not acknowledge terminal output"),
+          );
+          break;
+        }
         this.handleAck(ws, att, known.seq);
         break;
       case "signal":
-        if (att.role === "observer") {
+        if (att.role === "observer" || att.role === "listener") {
           this.sendControl(
             ws,
-            errorMessage("invalid_role", "observer role cannot exchange signals"),
+            errorMessage("invalid_role", `${att.role} role cannot exchange signals`),
           );
           break;
         }
         this.routeSignal(ws, att, known);
         break;
       case "transport":
-        if (att.role === "observer") {
+        if (att.role === "observer" || att.role === "listener") {
           this.sendControl(
             ws,
-            errorMessage("invalid_role", "observer role cannot select a transport"),
+            errorMessage("invalid_role", `${att.role} role cannot select a transport`),
           );
           break;
         }
@@ -857,6 +932,15 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
   }
 
   private handleAck(ws: WebSocket, att: ActiveAttachment, seq: string): void {
+    if (att.role === "listener") {
+      // Listeners receive snapshots only and are outside ACK/backpressure
+      // accounting; never let one mutate a viewer's pending ACK state.
+      this.sendControl(
+        ws,
+        errorMessage("invalid_role", "listeners do not acknowledge terminal output"),
+      );
+      return;
+    }
     let ackSeq: number;
     try {
       ackSeq = u64StringToNumber(seq);
@@ -925,6 +1009,13 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     att: ActiveAttachment,
     message: Extract<KnownControlMessage, { type: "transport" }>,
   ): void {
+    if (att.role === "listener") {
+      this.sendControl(
+        ws,
+        errorMessage("invalid_role", "listeners always use the relay transport"),
+      );
+      return;
+    }
     let targetWs = ws;
     let targetAtt = att;
     if (message.clientId !== att.clientId) {
@@ -940,6 +1031,15 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       const target = this.findActive(message.clientId);
       if (target === null) {
         this.sendControl(ws, errorMessage("invalid_target", "transport target is not connected"));
+        return;
+      }
+      if (target.att.role === "listener") {
+        // Listeners never participate in P2P; keep their transport pinned to
+        // the relay so host/viewer transport bookkeeping stays consistent.
+        this.sendControl(
+          ws,
+          errorMessage("invalid_role", "listener transport is fixed to the relay"),
+        );
         return;
       }
       targetWs = target.ws;
@@ -1200,7 +1300,21 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         break;
       case "snapshot_to": {
         const target = this.findActive(frame.targetId);
-        if (target === null || target.att.role !== "viewer") {
+        if (target === null) {
+          this.sendControl(
+            ws,
+            errorMessage("invalid_target", "SNAPSHOT_TO target is not connected"),
+          );
+          return;
+        }
+        if (target.att.role === "listener") {
+          // Snapshot-only delivery: no ACK ring, no unacked/hard-limit
+          // accounting, and no host pause. A dropped snapshot is replaced by
+          // the next periodic one instead of closing the listener.
+          this.deliverListenerSnapshot(target.ws, target.att, bytes);
+          break;
+        }
+        if (target.att.role !== "viewer") {
           this.sendControl(
             ws,
             errorMessage("invalid_target", "SNAPSHOT_TO target is not a connected viewer"),
@@ -1330,6 +1444,44 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       this.notifyHostFlow(att.clientId, "pause");
     }
     this.saveAttachment(viewerWs, att);
+  }
+
+  /**
+   * Deliver a host-directed snapshot to a read-only listener.
+   *
+   * Listeners never ACK, so this path must not touch `pendingAcks`,
+   * `unackedBytes`, `droppedBytes`, or the pause state. When the listener's
+   * socket buffer is already high the snapshot is dropped and the next
+   * periodic snapshot replaces it; the viewer and host paths are unaffected.
+   */
+  private deliverListenerSnapshot(
+    listenerWs: WebSocket,
+    att: ActiveAttachment,
+    bytes: Uint8Array,
+  ): void {
+    if (bufferedAmountOf(listenerWs) >= LISTENER_SNAPSHOT_BUFFER_LIMIT) {
+      this.logger.debug("listener_snapshot_dropped", {
+        sessionId: this.sessionId,
+        clientId: att.clientId,
+        bytes: bytes.byteLength,
+        reason: "buffer_high",
+      });
+      return;
+    }
+    if (!this.sendBinary(listenerWs, bytes)) {
+      this.logger.debug("listener_snapshot_dropped", {
+        sessionId: this.sessionId,
+        clientId: att.clientId,
+        bytes: bytes.byteLength,
+        reason: "send_failed",
+      });
+      return;
+    }
+    this.logger.debug("listener_snapshot_sent", {
+      sessionId: this.sessionId,
+      clientId: att.clientId,
+      bytes: bytes.byteLength,
+    });
   }
 
   private closeSlowConsumer(viewerWs: WebSocket, att: ActiveAttachment): void {
@@ -1595,6 +1747,8 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         connectedAt: att.connectedAt,
         lastSeenAt: att.lastSeenAt,
         transport: { mode: att.transportMode, state: att.transportState },
+        ...(att.client === undefined ? {} : { client: att.client }),
+        ...(att.capabilities === undefined ? {} : { capabilities: att.capabilities }),
       }));
   }
 

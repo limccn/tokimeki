@@ -14,6 +14,7 @@
 import {
   type Capabilities,
   CLOSE_CODES,
+  type ClientDescriptor,
   decodeFrame,
   type ErrorMessage,
   encodeControlMessage,
@@ -36,14 +37,29 @@ const RECONNECT_MAX_MS = 30_000;
 export interface RelayClientOptions {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
-  readonly role: "host" | "viewer";
+  readonly role: "host" | "viewer" | "listener";
   readonly session: string;
   readonly clientId: string;
   readonly cols?: number;
   readonly rows?: number;
   readonly heartbeatSeconds: number;
+  /** User-Agent-like identity sent in `hello.client`. */
+  readonly client?: ClientDescriptor;
   readonly capabilities: Capabilities;
   readonly logger: Logger;
+}
+
+/**
+ * Headers for the relay upgrade request.
+ *
+ * A listener is identified by an internal header rather than the URL or
+ * `hello`; the Worker fixes the role before the DO sees the connection.
+ */
+export function relayHandshakeHeaders(
+  role: RelayClientOptions["role"],
+  headers: Readonly<Record<string, string>>,
+): Record<string, string> {
+  return role === "listener" ? { ...headers, "X-Tokimeki-Listener": "1" } : { ...headers };
 }
 
 type WelcomeHandler = (welcome: WelcomeMessage) => void;
@@ -225,7 +241,7 @@ export class RelayClient {
     let socket: WebSocket;
     try {
       socket = new WebSocket(this.#options.url, {
-        headers: this.#options.headers,
+        headers: relayHandshakeHeaders(this.#options.role, this.#options.headers),
         handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
         perMessageDeflate: false,
         followRedirects: false,
@@ -309,6 +325,7 @@ export class RelayClient {
       session: options.session,
       clientId: options.clientId,
       protocolVersion: PROTOCOL_VERSION,
+      ...(options.client === undefined ? {} : { client: options.client }),
       capabilities: options.capabilities,
       ...(options.cols === undefined ? {} : { cols: options.cols }),
       ...(options.rows === undefined ? {} : { rows: options.rows }),
@@ -391,13 +408,22 @@ export class RelayClient {
         return;
       case "host_offline":
       case "host_exited":
-        if (this.#options.role === "viewer") {
+        if (this.#options.role !== "host") {
           this.#handleFatal(message.code, message.message);
           return;
         }
         this.#logger.warn(`relay error: ${message.code}: ${message.message}`);
         return;
       case "not_implemented":
+        if (this.#options.role === "listener") {
+          // A pre-v1.1 relay returns not_implemented for listener hello. Never
+          // silently downgrade to a full viewer; fail with an actionable error.
+          this.#handleFatal(
+            "not_implemented",
+            "relay does not support listener mode; upgrade the relay or run attach without --listen",
+          );
+          return;
+        }
         this.#logger.warn(`relay does not implement this feature: ${message.message}`);
         return;
       default:

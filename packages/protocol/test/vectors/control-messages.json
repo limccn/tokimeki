@@ -20,6 +20,136 @@
       }
     },
     {
+      "name": "hello-viewer-fragmentation",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "viewer",
+        "session": "demo-session",
+        "clientId": "viewer-2",
+        "protocolVersion": 1,
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": {
+            "modes": ["p2p-direct", "p2p-turn", "relay"],
+            "fragmentation": {
+              "version": 1,
+              "maxFrameBytes": 1048576,
+              "maxMessageBytes": 16384
+            }
+          },
+          "snapshot": { "formats": ["xterm-serialize", "raw-ring"], "maxBytes": 262144 }
+        },
+        "cols": 120,
+        "rows": 40
+      }
+    },
+    {
+      "name": "hello-viewer-tunnel",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "viewer",
+        "session": "demo-session",
+        "clientId": "viewer-tunnel-1",
+        "protocolVersion": 1,
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": {
+            "modes": ["p2p-direct", "p2p-turn", "relay"],
+            "fragmentation": {
+              "version": 1,
+              "maxFrameBytes": 1048576,
+              "maxMessageBytes": 16384
+            }
+          },
+          "snapshot": { "formats": ["xterm-serialize", "raw-ring"], "maxBytes": 262144 },
+          "tunnel": {
+            "version": 1,
+            "arq": "selective-repeat",
+            "fec": ["none"],
+            "crypto": "aes-256-gcm",
+            "keyMode": "shared-secret",
+            "maxFrameSize": 16339
+          }
+        },
+        "cols": 120,
+        "rows": 40
+      }
+    },
+    {
+      "name": "hello-listener",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "listener",
+        "session": "demo-session",
+        "clientId": "listener-1",
+        "protocolVersion": 1,
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": { "modes": ["relay"] },
+          "snapshot": { "formats": ["xterm-serialize"], "maxBytes": 262144 },
+          "listener": { "modes": ["snapshot-only"] }
+        }
+      }
+    },
+    {
+      "name": "hello-host-fixed-window",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "host",
+        "session": "demo-session",
+        "clientId": "host-1",
+        "protocolVersion": 1,
+        "client": {
+          "name": "tokimeki-cli",
+          "version": "0.1.2",
+          "kind": "cli",
+          "platform": "win32",
+          "runtime": "node/22.12.0"
+        },
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": { "modes": ["relay", "p2p-direct", "p2p-turn"] },
+          "snapshot": { "formats": ["xterm-serialize", "raw-ring"], "maxBytes": 262144 },
+          "display": {
+            "modes": ["fixed-grid", "viewport"],
+            "fixed": { "cols": 120, "rows": 40 },
+            "logPanel": true,
+            "terminalQueries": "host"
+          }
+        }
+      }
+    },
+    {
+      "name": "hello-viewer-viewport",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "viewer",
+        "session": "demo-session",
+        "clientId": "viewer-3",
+        "protocolVersion": 1,
+        "client": {
+          "name": "tokimeki-cli",
+          "version": "0.1.2",
+          "kind": "cli",
+          "platform": "darwin",
+          "runtime": "node/22.12.0"
+        },
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": { "modes": ["relay", "p2p-direct", "p2p-turn"] },
+          "snapshot": { "formats": ["xterm-serialize", "raw-ring"], "maxBytes": 262144 },
+          "display": { "modes": ["viewport"], "logPanel": true }
+        },
+        "cols": 100,
+        "rows": 30
+      }
+    },
+    {
       "name": "welcome-basic",
       "message": {
         "v": 1,
@@ -33,6 +163,53 @@
             "role": "viewer",
             "connectedAt": 1760000000000,
             "transport": { "mode": "relay", "state": "ready" }
+          }
+        ],
+        "iceServers": [{ "urls": ["stun:stun.example.com:3478"] }],
+        "iceProvider": "stun",
+        "iceExpiresAt": null,
+        "transportPolicy": "all",
+        "sessionTtlSeconds": 3600
+      }
+    },
+    {
+      "name": "welcome-fixed-window",
+      "message": {
+        "v": 1,
+        "type": "welcome",
+        "session": "demo-session",
+        "protocolVersion": 1,
+        "hostOnline": true,
+        "clients": [
+          {
+            "clientId": "host-1",
+            "role": "host",
+            "connectedAt": 1760000000000,
+            "transport": { "mode": "relay", "state": "ready" },
+            "client": {
+              "name": "tokimeki-cli",
+              "version": "0.1.2",
+              "kind": "cli",
+              "platform": "win32",
+              "runtime": "node/22.12.0"
+            },
+            "capabilities": {
+              "protocolVersion": 1,
+              "display": {
+                "modes": ["fixed-grid", "viewport"],
+                "fixed": { "cols": 120, "rows": 40 },
+                "logPanel": true,
+                "terminalQueries": "host"
+              }
+            }
+          },
+          {
+            "clientId": "viewer-3",
+            "role": "viewer",
+            "connectedAt": 1760000000001,
+            "capabilities": {
+              "display": { "modes": ["viewport"], "logPanel": true }
+            }
           }
         ],
         "iceServers": [{ "urls": ["stun:stun.example.com:3478"] }],
@@ -68,7 +245,18 @@
         "v": 1,
         "type": "peer-joined",
         "clientId": "viewer-1",
+        "role": "viewer",
         "capabilities": { "transports": { "modes": ["p2p-direct", "relay"] } }
+      }
+    },
+    {
+      "name": "peer-joined-listener",
+      "message": {
+        "v": 1,
+        "type": "peer-joined",
+        "clientId": "listener-1",
+        "role": "listener",
+        "capabilities": { "listener": { "modes": ["snapshot-only"] } }
       }
     },
     {

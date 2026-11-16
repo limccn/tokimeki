@@ -26,7 +26,13 @@ tokimeki 让一台机器**托管**终端程序，另一台机器**接入**同一
   Cloudflare TURN → Cloudflare Worker WebSocket 中继。
 - **可自托管**：relay 部署到你自己的 Cloudflare 账号。
 - **断线恢复**：快照 + 序号，viewer 掉线重连后恢复屏幕。
-- **多 viewer**：多人接入，输入共享，resize 协调。
+- **多 viewer**：多人接入，输入共享；host 保持固定 TUI 窗口，新 viewer 接入不会改变
+  被托管程序的窗口尺寸。viewer 在自己的终端里留边显示或光标跟随裁剪。
+- **任意 TUI 命令**：把可执行文件名加入 `TOKIMEKI_WINDOW_TUI`，即可
+  `tokimeki <命令>`（例如 `TOKIMEKI_WINDOW_TUI=claude,pi,omp` 后运行
+  `tokimeki omp`）。不在列表内的未知命令会被拒绝，避免误启动。
+- **随时重新分享**：在 host 视口内按 F12 可重新打开 viewer config（banner
+  滚走后仍可取回），按 `c` 复制完整 JSON；viewer 用 `TOKIMEKI_CONFIG` 接收。
 
 ## 工作方式
 
@@ -171,12 +177,12 @@ TURN 变量、secret、按钮/手动部署步骤：
 
 ## 状态
 
-`0.1.0` — 首个公开版本。从
-[npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装，或查看
-[v0.1.0 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.0)。
-P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1 路线
-（selective-repeat/ARQ、listener、LAN 优化）见 [CHANGELOG.md](CHANGELOG.md)
-与 [`CLAUDE.md`](CLAUDE.md)。
+`0.1.2` — 当前版本。从
+[npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装（同时镜像到 GitHub
+Packages，见 [docs/release.md](docs/release.md)），或查看
+[v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2)。
+P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1
+功能演进见 [CHANGELOG.md](CHANGELOG.md) 与 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 贡献
 

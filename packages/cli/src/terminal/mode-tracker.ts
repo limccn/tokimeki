@@ -63,6 +63,13 @@ export class ModeTracker {
     return this.#modes.cursorVisible;
   }
 
+  /** Reset all tracked modes (snapshot boundary / reconnect). */
+  reset(): void {
+    this.#modes = initialState();
+    this.#state = GROUND;
+    this.#params = "";
+  }
+
   /** Feed raw PTY output. Incomplete escape sequences are buffered. */
   apply(chunk: Uint8Array): void {
     for (const byte of chunk) {

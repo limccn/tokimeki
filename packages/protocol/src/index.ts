@@ -9,4 +9,5 @@ export * from "./constants.js";
 export * from "./frames.js";
 export * from "./ids.js";
 export * from "./messages.js";
+export * from "./tunnel.js";
 export * from "./u64.js";

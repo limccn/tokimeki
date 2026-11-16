@@ -9,12 +9,18 @@
 import { randomBytes } from "node:crypto";
 import { hostname as defaultHostname } from "node:os";
 import {
+  isTerminalSizeWithinLimits,
   isValidSessionId,
   MAX_TERMINAL_DIMENSION,
+  MIN_TUNNEL_SECRET_BYTES,
   RESIZE_POLICIES,
   type ResizePolicy,
+  type TunnelKeyMode,
 } from "@limccn/tokimeki-protocol";
+import { ConfigEnvelopeError, parseConfigEnvelope } from "./config-envelope.js";
+import { INVITE_KEYS, type InviteKey } from "./invite.js";
 import { isLogLevel, LOG_LEVELS, type LogLevel } from "./logger.js";
+import { parseTuiCommandList, WINDOW_MODES, type WindowMode } from "./window-policy.js";
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -23,6 +29,10 @@ export class ConfigError extends Error {
 export type P2PMode = "auto" | "off";
 export type IceTransportPolicy = "all" | "relay";
 export type PiTuiMode = "fullscreen" | "regular";
+/** TUN profile switch (`TOKIMEKI_TUNNEL`). F1 is opt-in. */
+export type TunnelMode = "off" | "auto";
+/** Local parity sender policy (`TOKIMEKI_TUNNEL_FEC`). */
+export type TunnelFecMode = "off" | "xor";
 
 export interface TerminalSize {
   readonly cols: number;
@@ -38,7 +48,16 @@ export interface CommonConfig {
   readonly heartbeatSeconds: number;
   readonly p2p: P2PMode;
   readonly iceTransportPolicy: IceTransportPolicy;
+  /** Opt-in v1.1 TUN profile; default off. P2P-only. */
+  readonly tunnel: TunnelMode;
+  /** Local parity sender policy; `off` never sends FEC records. */
+  readonly tunnelFec: TunnelFecMode;
+  readonly tunnelKeyMode: TunnelKeyMode;
+  /** Shared secret for relay-blind mode; null derives from the session token. */
+  readonly tunnelSecret: string | null;
   readonly logLevel: LogLevel;
+  /** Global TUI window switch (`TOKIMEKI_WINDOW`). */
+  readonly windowMode: WindowMode;
   /** One-line warnings (for example, recognized-but-unimplemented v1.1 vars). */
   readonly warnings: readonly string[];
   /** Known secret values; the logger redacts every occurrence of these. */
@@ -54,15 +73,27 @@ export interface HostConfig extends CommonConfig {
   readonly colorterm: string;
   readonly resizePolicy: ResizePolicy;
   readonly ptySize: TerminalSize | null;
+  /** Fixed logical window when `TOKIMEKI_PTY_SIZE` is not set. */
+  readonly windowSize: TerminalSize;
+  /** Commands that opt into the fixed TUI window when `windowMode=tui`. */
+  readonly windowTuiCommands: ReadonlySet<string>;
+  /** Debug log panel rows; 0 disables the panel. */
+  readonly logPanelRows: number;
+  /** Local key that reopens the viewer-config overlay. */
+  readonly inviteKey: InviteKey;
   readonly scrollbackLines: number;
   readonly snapshotMaxBytes: number;
+  readonly listenerSnapshotMs: number;
   readonly piTuiMode: PiTuiMode;
   readonly claudeBg: boolean;
 }
 
 export interface AttachConfig extends CommonConfig {
-  readonly role: "viewer";
+  /** `listener` is the v1.1 read-only snapshot-only mode (`attach --listen`). */
+  readonly role: "viewer" | "listener";
   readonly sessionToken: string;
+  /** Debug log panel rows; 0 disables the panel. */
+  readonly logPanelRows: number;
 }
 
 export interface DoctorConfig {
@@ -81,17 +112,12 @@ export interface HostConfigInputs {
 }
 
 const V11_ENV_VARS = [
-  "TOKIMEKI_TUNNEL",
-  "TOKIMEKI_TUNNEL_FEC",
   "TOKIMEKI_TUNNEL_WINDOW",
   "TOKIMEKI_TUNNEL_MTU",
-  "TOKIMEKI_TUNNEL_SECRET",
   "TOKIMEKI_VIEW_MODE",
   "TOKIMEKI_ROUTE_POLICY",
   "TOKIMEKI_LAN_DISCOVERY",
   "TOKIMEKI_LAN_FANOUT",
-  "TOKIMEKI_LISTENER_SNAPSHOT_MS",
-  "TOKIMEKI_MAX_LISTENERS_PER_SESSION",
 ] as const;
 
 export const DEFAULT_HEARTBEAT_SECONDS = 25;
@@ -99,8 +125,14 @@ export const DEFAULT_SCROLLBACK_LINES = 1000;
 export const MIN_SCROLLBACK_LINES = 500;
 export const MAX_SCROLLBACK_LINES = 2000;
 export const DEFAULT_SNAPSHOT_MAX_BYTES = 262_144;
+export const DEFAULT_LISTENER_SNAPSHOT_MS = 1000;
+export const MIN_LISTENER_SNAPSHOT_MS = 250;
+export const MAX_LISTENER_SNAPSHOT_MS = 60_000;
 export const DEFAULT_TERM = "xterm-256color";
 export const DEFAULT_COLORTERM = "truecolor";
+export const DEFAULT_WINDOW_SIZE: TerminalSize = { cols: 120, rows: 40 };
+export const DEFAULT_LOG_PANEL_ROWS = 8;
+export const MAX_LOG_PANEL_ROWS = 200;
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
@@ -108,6 +140,32 @@ function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
     throw new ConfigError(`${name} is required`);
   }
   return value;
+}
+
+/**
+ * Merge a JSON config envelope underneath the explicit process environment.
+ *
+ * Empty environment strings are treated as unset so a `.env` placeholder such
+ * as `TOKIMEKI_SESSION_TOKEN=` does not erase a config-provided value.
+ */
+function applyConfigEnvelope(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const raw = env.TOKIMEKI_CONFIG;
+  if (raw === undefined || raw.trim() === "") return env;
+  let mapped: Record<string, string>;
+  try {
+    mapped = parseConfigEnvelope(raw);
+  } catch (error) {
+    const message =
+      error instanceof ConfigEnvelopeError ? error.message : "TOKIMEKI_CONFIG is invalid";
+    throw new ConfigError(message);
+  }
+  const merged: NodeJS.ProcessEnv = { ...mapped };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (value === "" && key !== "TOKIMEKI_CONFIG") continue;
+    merged[key] = value;
+  }
+  return merged;
 }
 
 function optionalEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -252,21 +310,74 @@ function parseSnapshotMax(env: NodeJS.ProcessEnv): number {
   return parseInteger("TOKIMEKI_SNAPSHOT_MAX_BYTES", raw, { min: 1024, max: 900_000 });
 }
 
-function parsePtySize(env: NodeJS.ProcessEnv): TerminalSize | null {
-  const raw = optionalEnv(env, "TOKIMEKI_PTY_SIZE");
-  if (raw === undefined) return null;
+/**
+ * Listener snapshot interval (`TOKIMEKI_LISTENER_SNAPSHOT_MS`).
+ *
+ * Out-of-range values are clamped and non-integer values fall back to the
+ * default with a warning instead of aborting the host: this timer only affects
+ * the optional read-only fan-out and must not block the shared PTY session.
+ */
+function parseListenerSnapshotMs(env: NodeJS.ProcessEnv, warnings: string[]): number {
+  const raw = optionalEnv(env, "TOKIMEKI_LISTENER_SNAPSHOT_MS");
+  if (raw === undefined) return DEFAULT_LISTENER_SNAPSHOT_MS;
+  if (!/^\d+$/.test(raw.trim())) {
+    warnings.push(
+      `TOKIMEKI_LISTENER_SNAPSHOT_MS must be an integer; using ${DEFAULT_LISTENER_SNAPSHOT_MS}`,
+    );
+    return DEFAULT_LISTENER_SNAPSHOT_MS;
+  }
+  const value = Number.parseInt(raw.trim(), 10);
+  if (value < MIN_LISTENER_SNAPSHOT_MS) {
+    warnings.push(`TOKIMEKI_LISTENER_SNAPSHOT_MS is below ${MIN_LISTENER_SNAPSHOT_MS}; clamping`);
+    return MIN_LISTENER_SNAPSHOT_MS;
+  }
+  if (value > MAX_LISTENER_SNAPSHOT_MS) {
+    warnings.push(`TOKIMEKI_LISTENER_SNAPSHOT_MS is above ${MAX_LISTENER_SNAPSHOT_MS}; clamping`);
+    return MAX_LISTENER_SNAPSHOT_MS;
+  }
+  return value;
+}
+
+function parseTerminalSize(name: string, raw: string): TerminalSize {
   const match = /^(\d+)\s*[xX]\s*(\d+)$/.exec(raw.trim());
   if (match === null) {
-    throw new ConfigError("TOKIMEKI_PTY_SIZE must use the <cols>x<rows> form");
+    throw new ConfigError(`${name} must use the <cols>x<rows> form`);
   }
   const cols = Number.parseInt(match[1] ?? "", 10);
   const rows = Number.parseInt(match[2] ?? "", 10);
   if (cols < 1 || rows < 1 || cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION) {
     throw new ConfigError(
-      `TOKIMEKI_PTY_SIZE must be between 1x1 and ${MAX_TERMINAL_DIMENSION}x${MAX_TERMINAL_DIMENSION}`,
+      `${name} must be between 1x1 and ${MAX_TERMINAL_DIMENSION}x${MAX_TERMINAL_DIMENSION}`,
     );
   }
+  if (!isTerminalSizeWithinLimits(cols, rows)) {
+    throw new ConfigError(`${name} exceeds the terminal cell limit`);
+  }
   return { cols, rows };
+}
+
+function parsePtySize(env: NodeJS.ProcessEnv): TerminalSize | null {
+  const raw = optionalEnv(env, "TOKIMEKI_PTY_SIZE");
+  if (raw === undefined) return null;
+  return parseTerminalSize("TOKIMEKI_PTY_SIZE", raw);
+}
+
+function parseWindowSize(env: NodeJS.ProcessEnv): TerminalSize {
+  const raw = optionalEnv(env, "TOKIMEKI_WINDOW_SIZE");
+  if (raw === undefined) {
+    return { cols: DEFAULT_WINDOW_SIZE.cols, rows: DEFAULT_WINDOW_SIZE.rows };
+  }
+  return parseTerminalSize("TOKIMEKI_WINDOW_SIZE", raw);
+}
+
+function parseWindowMode(env: NodeJS.ProcessEnv): WindowMode {
+  return parseEnum("TOKIMEKI_WINDOW", optionalEnv(env, "TOKIMEKI_WINDOW"), WINDOW_MODES, "tui");
+}
+
+function parseLogPanelRows(env: NodeJS.ProcessEnv): number {
+  const raw = optionalEnv(env, "TOKIMEKI_LOG_PANEL_ROWS");
+  if (raw === undefined) return DEFAULT_LOG_PANEL_ROWS;
+  return parseInteger("TOKIMEKI_LOG_PANEL_ROWS", raw, { min: 0, max: MAX_LOG_PANEL_ROWS });
 }
 
 function parseLogLevel(env: NodeJS.ProcessEnv, warnings: string[]): LogLevel {
@@ -302,9 +413,45 @@ interface CommonConfigParts {
   readonly heartbeatSeconds: number;
   readonly p2p: P2PMode;
   readonly iceTransportPolicy: IceTransportPolicy;
+  readonly tunnel: TunnelMode;
+  readonly tunnelFec: TunnelFecMode;
+  readonly tunnelKeyMode: TunnelKeyMode;
+  readonly tunnelSecret: string | null;
   readonly logLevel: LogLevel;
+  readonly windowMode: WindowMode;
   readonly warnings: string[];
   readonly secrets: string[];
+}
+
+function parseTunnelMode(env: NodeJS.ProcessEnv): TunnelMode {
+  return parseEnum(
+    "TOKIMEKI_TUNNEL",
+    optionalEnv(env, "TOKIMEKI_TUNNEL"),
+    ["off", "auto"] as const,
+    "off",
+  );
+}
+
+function parseTunnelFec(env: NodeJS.ProcessEnv): TunnelFecMode {
+  const raw = optionalEnv(env, "TOKIMEKI_TUNNEL_FEC");
+  if (raw === undefined) return "off";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "off" || normalized === "none" || normalized === "0") return "off";
+  if (normalized === "xor") return "xor";
+  throw new ConfigError(
+    `TOKIMEKI_TUNNEL_FEC must be one of off, xor (received ${JSON.stringify(raw)})`,
+  );
+}
+
+function parseTunnelSecret(env: NodeJS.ProcessEnv, tunnel: TunnelMode): string | null {
+  const raw = optionalEnv(env, "TOKIMEKI_TUNNEL_SECRET");
+  if (raw === undefined) return null;
+  if (tunnel === "auto" && Buffer.byteLength(raw, "utf8") < MIN_TUNNEL_SECRET_BYTES) {
+    throw new ConfigError(
+      `TOKIMEKI_TUNNEL_SECRET must be at least ${MIN_TUNNEL_SECRET_BYTES} bytes when TOKIMEKI_TUNNEL=auto`,
+    );
+  }
+  return raw;
 }
 
 function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts {
@@ -315,6 +462,13 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
   const warnings: string[] = [];
   warnings.push(...collectV11Warnings(env));
   const logLevel = parseLogLevel(env, warnings);
+  const p2p = parseP2P(env);
+  const tunnel = parseTunnelMode(env);
+  const tunnelFec = parseTunnelFec(env);
+  const tunnelSecret = parseTunnelSecret(env, tunnel);
+  if (tunnel === "auto" && p2p === "off") {
+    warnings.push("TOKIMEKI_TUNNEL=auto requires P2P; the tunnel will not be used");
+  }
   const secrets = [
     optionalEnv(env, "TOKIMEKI_MASTER_TOKEN"),
     optionalEnv(env, "TOKIMEKI_SESSION_TOKEN"),
@@ -325,16 +479,21 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
     websocketUrl: buildRelayWebSocketUrl(relayUrl, session),
     session,
     heartbeatSeconds: parseHeartbeat(env),
-    p2p: parseP2P(env),
+    p2p,
     iceTransportPolicy: parseIcePolicy(env),
+    tunnel,
+    tunnelFec,
+    tunnelKeyMode: tunnelSecret === null ? "session-token" : "shared-secret",
+    tunnelSecret,
     logLevel,
+    windowMode: parseWindowMode(env),
     warnings,
     secrets,
   };
 }
 
 export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
-  const env = inputs.env ?? process.env;
+  const env = applyConfigEnvelope(inputs.env ?? process.env);
   const cwd = inputs.cwd ?? process.cwd();
   const hostname = inputs.hostname ?? defaultHostname();
   const masterToken = requireEnv(env, "TOKIMEKI_MASTER_TOKEN");
@@ -362,8 +521,18 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
       "latest",
     ),
     ptySize: parsePtySize(env),
+    windowSize: parseWindowSize(env),
+    windowTuiCommands: parseTuiCommandList(env.TOKIMEKI_WINDOW_TUI),
+    logPanelRows: parseLogPanelRows(env),
+    inviteKey: parseEnum(
+      "TOKIMEKI_INVITE_KEY",
+      optionalEnv(env, "TOKIMEKI_INVITE_KEY"),
+      INVITE_KEYS,
+      "f12",
+    ),
     scrollbackLines: parseScrollback(env),
     snapshotMaxBytes: parseSnapshotMax(env),
+    listenerSnapshotMs: parseListenerSnapshotMs(env, common.warnings),
     piTuiMode: parseEnum(
       "TOKIMEKI_PI_TUI_MODE",
       optionalEnv(env, "TOKIMEKI_PI_TUI_MODE"),
@@ -375,14 +544,28 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
   };
 }
 
-export function loadAttachConfig(env: NodeJS.ProcessEnv = process.env): AttachConfig {
+export interface AttachConfigOptions {
+  /** Connect as a read-only snapshot-only listener (`attach --listen`). */
+  readonly listener?: boolean;
+}
+
+export function loadAttachConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  options: AttachConfigOptions = {},
+): AttachConfig {
+  env = applyConfigEnvelope(env);
   const session = requireEnv(env, "TOKIMEKI_SESSION");
   const sessionToken = requireEnv(env, "TOKIMEKI_SESSION_TOKEN");
   const common = loadCommon(env, session);
+  const role = options.listener === true ? "listener" : "viewer";
+  if (role === "listener" && common.tunnel === "auto") {
+    common.warnings.push("TOKIMEKI_TUNNEL=auto is ignored for read-only listeners");
+  }
   return {
     ...common,
-    role: "viewer",
+    role,
     sessionToken,
+    logPanelRows: parseLogPanelRows(env),
     secrets: [...common.secrets, sessionToken],
   };
 }
@@ -396,6 +579,11 @@ export function loadAttachConfig(env: NodeJS.ProcessEnv = process.env): AttachCo
  */
 export function loadDoctorConfig(env: NodeJS.ProcessEnv = process.env): DoctorConfig {
   const warnings: string[] = [...collectV11Warnings(env)];
+  try {
+    env = applyConfigEnvelope(env);
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : "TOKIMEKI_CONFIG is invalid");
+  }
   const relayRaw = optionalEnv(env, "TOKIMEKI_RELAY_URL");
   let relayUrl: string | null = null;
   if (relayRaw !== undefined) {

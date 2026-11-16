@@ -81,7 +81,8 @@ set with `wrangler secret put` (or the Deploy Button prompt).
 | Name | Kind | Default | Meaning |
 |---|---|---|---|
 | `TOKIMEKI_SESSION_TTL_SECONDS` | var | `86400` | Host-offline grace before the session is deleted |
-| `TOKIMEKI_MAX_CLIENTS_PER_SESSION` | var | `8` | Active clients per session (host + viewers) |
+| `TOKIMEKI_MAX_CLIENTS_PER_SESSION` | var | `8` | Active clients per session (host + viewers + listeners) |
+| `TOKIMEKI_MAX_LISTENERS` | var | `8` | Additional cap for read-only snapshot-only listeners |
 | `TOKIMEKI_LOG_LEVEL` | var | `info` | `debug`, `info`, `warn`, `error`, `silent` |
 
 ### ICE / STUN / TURN

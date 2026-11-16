@@ -5,12 +5,17 @@ import {
   ConfigError,
   collectV11Warnings,
   DEFAULT_HEARTBEAT_SECONDS,
+  DEFAULT_LISTENER_SNAPSHOT_MS,
+  DEFAULT_LOG_PANEL_ROWS,
   DEFAULT_SCROLLBACK_LINES,
   DEFAULT_SNAPSHOT_MAX_BYTES,
+  DEFAULT_WINDOW_SIZE,
   loadAttachConfig,
   loadDoctorConfig,
   loadHostConfig,
+  MAX_LISTENER_SNAPSHOT_MS,
   MAX_SCROLLBACK_LINES,
+  MIN_LISTENER_SNAPSHOT_MS,
   MIN_SCROLLBACK_LINES,
   normalizeRelayBaseUrl,
   relayHealthUrl,
@@ -102,13 +107,23 @@ describe("loadHostConfig", () => {
     expect(config.heartbeatSeconds).toBe(DEFAULT_HEARTBEAT_SECONDS);
     expect(config.scrollbackLines).toBe(DEFAULT_SCROLLBACK_LINES);
     expect(config.snapshotMaxBytes).toBe(DEFAULT_SNAPSHOT_MAX_BYTES);
+    expect(config.listenerSnapshotMs).toBe(DEFAULT_LISTENER_SNAPSHOT_MS);
     expect(config.term).toBe("xterm-256color");
     expect(config.colorterm).toBe("truecolor");
     expect(config.resizePolicy).toBe("latest");
     expect(config.p2p).toBe("auto");
     expect(config.iceTransportPolicy).toBe("all");
+    expect(config.tunnel).toBe("off");
+    expect(config.tunnelFec).toBe("off");
+    expect(config.tunnelKeyMode).toBe("session-token");
+    expect(config.tunnelSecret).toBeNull();
     expect(config.piTuiMode).toBe("fullscreen");
     expect(config.ptySize).toBeNull();
+    expect(config.windowMode).toBe("tui");
+    expect(config.windowSize).toEqual(DEFAULT_WINDOW_SIZE);
+    expect([...config.windowTuiCommands]).toEqual(["claude", "pi"]);
+    expect(config.logPanelRows).toBe(DEFAULT_LOG_PANEL_ROWS);
+    expect(config.inviteKey).toBe("f12");
     expect(config.claudeBg).toBe(false);
   });
 
@@ -190,10 +205,84 @@ describe("loadHostConfig", () => {
     ).toThrow(ConfigError);
   });
 
+  it("parses TUI window mode, command list, size, and log panel rows", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_WINDOW: "on",
+        TOKIMEKI_WINDOW_TUI: " omp, OMP ,, pi.exe ",
+        TOKIMEKI_WINDOW_SIZE: "200x50",
+        TOKIMEKI_LOG_PANEL_ROWS: "4",
+        TOKIMEKI_INVITE_KEY: "ctrl-]",
+      }),
+    });
+    expect(config.windowMode).toBe("on");
+    expect([...config.windowTuiCommands]).toEqual(["omp", "pi"]);
+    expect(config.windowSize).toEqual({ cols: 200, rows: 50 });
+    expect(config.logPanelRows).toBe(4);
+    expect(config.inviteKey).toBe("ctrl-]");
+
+    const empty = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_WINDOW: "off", TOKIMEKI_WINDOW_TUI: "" }),
+    });
+    expect(empty.windowMode).toBe("off");
+    expect([...empty.windowTuiCommands]).toEqual([]);
+
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW: "auto" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW_SIZE: "100 30" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW_SIZE: "5000x5000" }) }),
+    ).toThrow(ConfigError);
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_LOG_PANEL_ROWS: "-1" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_INVITE_KEY: "esc" }) })).toThrow(
+      ConfigError,
+    );
+  });
+
+  it("keeps PTY_SIZE and WINDOW_SIZE independent for host precedence", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_PTY_SIZE: "100x30",
+        TOKIMEKI_WINDOW_SIZE: "120x40",
+      }),
+    });
+    expect(config.ptySize).toEqual({ cols: 100, rows: 30 });
+    expect(config.windowSize).toEqual({ cols: 120, rows: 40 });
+  });
+
   it("rejects an out-of-range snapshot budget", () => {
     expect(() =>
       loadHostConfig({ env: baseHostEnv({ TOKIMEKI_SNAPSHOT_MAX_BYTES: "10" }) }),
     ).toThrow(ConfigError);
+  });
+
+  it("parses and clamps the listener snapshot interval", () => {
+    const read = (value: string) =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_LISTENER_SNAPSHOT_MS: value }) });
+
+    expect(read("250").listenerSnapshotMs).toBe(MIN_LISTENER_SNAPSHOT_MS);
+    expect(read("60000").listenerSnapshotMs).toBe(MAX_LISTENER_SNAPSHOT_MS);
+    expect(read("500").listenerSnapshotMs).toBe(500);
+
+    const below = read("10");
+    expect(below.listenerSnapshotMs).toBe(MIN_LISTENER_SNAPSHOT_MS);
+    expect(
+      below.warnings.some((warning) => warning.includes("TOKIMEKI_LISTENER_SNAPSHOT_MS")),
+    ).toBe(true);
+
+    const above = read("99999");
+    expect(above.listenerSnapshotMs).toBe(MAX_LISTENER_SNAPSHOT_MS);
+
+    const invalid = read("fast");
+    expect(invalid.listenerSnapshotMs).toBe(DEFAULT_LISTENER_SNAPSHOT_MS);
+    expect(
+      invalid.warnings.some((warning) => warning.includes("TOKIMEKI_LISTENER_SNAPSHOT_MS")),
+    ).toBe(true);
   });
 });
 
@@ -221,24 +310,28 @@ describe("loadAttachConfig", () => {
       /TOKIMEKI_SESSION_TOKEN is required/,
     );
   });
+
+  it("selects the listener role only when explicitly requested", () => {
+    expect(loadAttachConfig(attachEnv()).role).toBe("viewer");
+    expect(loadAttachConfig(attachEnv(), { listener: true }).role).toBe("listener");
+  });
 });
 
 describe("v1.1 environment variables", () => {
   it("emits a single warning with names but never values", () => {
     const warnings = collectV11Warnings({
-      TOKIMEKI_TUNNEL_SECRET: "supersecret",
+      TOKIMEKI_ROUTE_POLICY: "lan",
       TOKIMEKI_LAN_DISCOVERY: "1",
     });
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("TOKIMEKI_TUNNEL_SECRET");
+    expect(warnings[0]).toContain("TOKIMEKI_ROUTE_POLICY");
     expect(warnings[0]).toContain("TOKIMEKI_LAN_DISCOVERY");
-    expect(warnings[0]).not.toContain("supersecret");
     expect(warnings[0]).toContain("not implemented");
   });
 
   it("adds the warning through host and attach configs", () => {
     const host = loadHostConfig({
-      env: baseHostEnv({ TOKIMEKI_TUNNEL: "1" }),
+      env: baseHostEnv({ TOKIMEKI_ROUTE_POLICY: "lan" }),
     });
     expect(host.warnings).toHaveLength(1);
 
@@ -249,6 +342,101 @@ describe("v1.1 environment variables", () => {
       TOKIMEKI_VIEW_MODE: "auto",
     });
     expect(attach.warnings).toHaveLength(1);
+  });
+});
+
+describe("tunnel configuration", () => {
+  it("defaults to off and session-token mode", () => {
+    const config = loadHostConfig({ env: baseHostEnv() });
+    expect(config.tunnel).toBe("off");
+    expect(config.tunnelKeyMode).toBe("session-token");
+    expect(config.tunnelSecret).toBeNull();
+    expect(config.tunnelFec).toBe("off");
+  });
+
+  it("enables auto and switches to shared-secret when a secret is configured", () => {
+    const secret = "1234567890abcdef";
+    const config = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_TUNNEL: "auto",
+        TOKIMEKI_TUNNEL_SECRET: secret,
+      }),
+    });
+    expect(config.tunnel).toBe("auto");
+    expect(config.tunnelKeyMode).toBe("shared-secret");
+    expect(config.tunnelSecret).toBe(secret);
+    expect(config.secrets).toContain(secret);
+  });
+
+  it("rejects a short tunnel secret only when the tunnel is enabled", () => {
+    expect(() =>
+      loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_SECRET: "short" }),
+      }),
+    ).toThrow(/at least 16 bytes/);
+    expect(() =>
+      loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL_SECRET: "short" }),
+      }),
+    ).not.toThrow();
+  });
+
+  it("never echoes a bad secret value in the error message", () => {
+    try {
+      loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_SECRET: "leaky-secret" }),
+      });
+    } catch (error) {
+      expect((error as Error).message).not.toContain("leaky-secret");
+      return;
+    }
+    throw new Error("expected ConfigError");
+  });
+
+  it("accepts XOR FEC and keeps it for the sender policy", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_FEC: "xor" }),
+    });
+    expect(config.tunnelFec).toBe("xor");
+    expect(config.warnings.some((warning) => warning.includes("FEC"))).toBe(false);
+  });
+
+  it("normalizes off/none aliases without a warning", () => {
+    for (const value of ["off", "none", "0"]) {
+      const config = loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_FEC: value }),
+      });
+      expect(config.tunnelFec).toBe("off");
+      expect(config.warnings.some((warning) => warning.includes("FEC"))).toBe(false);
+    }
+  });
+
+  it("rejects unknown tunnel modes and FEC values", () => {
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_TUNNEL: "on" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_TUNNEL_FEC: "rs" }) })).toThrow(
+      ConfigError,
+    );
+  });
+
+  it("warns when auto is requested without P2P or with a listener", () => {
+    const noP2p = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_P2P: "off" }),
+    });
+    expect(noP2p.warnings.some((warning) => warning.includes("requires P2P"))).toBe(true);
+
+    const listener = loadAttachConfig(
+      {
+        TOKIMEKI_RELAY_URL: "https://relay.example",
+        TOKIMEKI_SESSION: "sess-1",
+        TOKIMEKI_SESSION_TOKEN: "token-1234",
+        TOKIMEKI_TUNNEL: "auto",
+      },
+      { listener: true },
+    );
+    expect(listener.warnings.some((warning) => warning.includes("read-only listeners"))).toBe(true);
+    expect(listener.tunnel).toBe("auto");
   });
 });
 

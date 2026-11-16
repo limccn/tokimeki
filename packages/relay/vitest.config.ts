@@ -20,6 +20,7 @@ export default defineWorkersConfig({
             TOKIMEKI_MASTER_TOKEN: "test-master-token-abc",
             TOKIMEKI_SESSION_TTL_SECONDS: "30",
             TOKIMEKI_MAX_CLIENTS_PER_SESSION: "3",
+            TOKIMEKI_MAX_LISTENERS: "2",
             TOKIMEKI_TURN_PROVIDER: "auto",
             TOKIMEKI_STUN_URLS: "stun:stun.test.invalid:3478",
             TOKIMEKI_COTURN_URLS: ["turn:coturn.test.invalid:3478?transport=udp"],

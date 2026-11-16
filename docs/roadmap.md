@@ -3,7 +3,7 @@
 > 本文件区分 v1 交付、v1.1 增强与 v2 兼容性工作。
 > **v1.1 与 v2 不属于当前 v1 验收（AC1–AC10）**，未完成不会阻塞 v1 归档。
 
-## v1（当前任务）
+## v1（已交付基线）
 
 TypeScript/Node + npm workspaces：
 
@@ -18,32 +18,73 @@ TypeScript/Node + npm workspaces：
   预留项在 v1 只返回 `not_implemented`，不实现行为。
 - Agent 协调只建 SQLite schema 与 `agent.*` 协议扩展点，不实现 runner。
 
-当前状态：**v1 实现完成（Phase 6）**。relay、PTY/TUI、共享控制、快照重连与
-P2P/TURN/relay 回退已落地，本机 live e2e 三组场景通过。生产 Worker 部署、跨 NAT、
-真实 coturn/Cloudflare TURN 与同 LAN host candidate 验证仍待环境/授权，详见
-`docs/deployment.md` §7。
+当前状态：**v1 实现完成（Phase 6）；v1.1 已立项并进入规划（2026-11-16）**。
+relay、PTY/TUI、共享控制、快照重连与 P2P/TURN/relay 回退已落地；本机 live e2e
+1–5 组场景通过（第 5 组为 host 1006 重连，见 `docs/deployment.md` §7.2）。生产
+Worker 已部署，2026-11-13 已完成本机 NAT ↔ 日本/美国 VPS 的跨机器 relay、直连
+P2P、coturn TURN、Cloudflare TURN 与 TURN 不可达回退验收（§7.3/§7.4）。
 
-已知 v1 限制（不阻塞 AC，但进入 v1.1 待办）：P2P 切换不实现 DataChannel 分片，
-快照统一走 relay `SNAPSHOT_TO`；P2P 失败后直接回退 relay，不做 ICE provider
-轮换重试；客户端没有 ICE 到期自动刷新定时器。
+2026-11-16 维护者人工确认**严格 NAT↔NAT**（含 P2P 尝试与 relay 回退）与
+**真实 Claude/pi TUI 交互**已通过 e2e 层面验收（`docs/deployment.md` §7.6）；
+该确认不等同于长期运行、直连成功率、生产边缘休眠或全路径验收。
+
+仍待环境/授权验证：Cloudflare 边缘 hibernation/TTL alarm 长跑、同 LAN host
+candidate、跨公网 3-viewer、跨机器 1006 复测、P2P 直连成功率/长期稳定性，以及
+稳定链路上的生产流控；详见 `docs/deployment.md` §7.5。
+
+v1 基线历史限制（F0 已在 `b8c9ec4` 解决）：v1 本身不做 DataChannel 分片，切换
+快照统一走 relay `SNAPSHOT_TO`；P2P 失败直接回退 relay；客户端没有 ICE 到期自动
+刷新定时器。v1.1 F0 已实现 capability-gated `FRAGMENT`、P2P 直发快照、ICE 自动
+刷新与一次 provider 重试。
 
 ## v1.1（独立任务，不阻塞 v1）
 
-- **F0 P2P 传输增强**：DataChannel 分片/重组与 P2P 直发快照（含 golden vectors 或
-  传输层兼容说明）；ICE 到期自动 `ice-refresh`；P2P 失败后按 provider 顺序重试一次。
-- **F1 应用层可靠隧道（TUN profile）**：只封装 tokimeki 终端字节流，不做 OS TUN/VPN。
-  在 WebRTC unreliable/unordered DataChannel 上做 selective-repeat ARQ（KCP 风格）+
-  可选 XOR/RS FEC + AES-256-GCM；WS relay 上只保留加密封装，不叠加 ARQ/FEC
-  （TCP 队头阻塞无法消除）。默认由 session token 派生密钥时 relay 可推导，
-  只作传输加固；relay-blind E2E 需独立 `TOKIMEKI_TUNNEL_SECRET` 带外共享。
-- **F2 听众模式（listener）**：只读、无 ack/背压，第一版 snapshot-only
-  （周期全量快照），独立上限；任意丢增量帧会破坏 ANSI 状态，不作为默认。
-- **F3 同内网/相邻网络优化**：v1 已利用 ICE host candidate；v1.1 再评估
-  `RouteSelector`、同 LAN 分组提示、mDNS（仅提示，不作发现权威）与 peer fan-out
-  （默认 off，需 leader 选举、保序、信任与故障切换设计）。
+状态（2026-11-16）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建。F0 已实现、
+本地验证并归档（提交 `b8c9ec4`：typecheck/lint/276 tests/75 relay tests/build、
+P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公网 NAT/TURN 复测与
+生产部署尚未执行。F2 listener snapshot-only 已实现、提交（`147974f`）并归档；
+本地 live e2e（`E2E_LISTENER=1` + P2P viewer，2026-11-16）已通过。F1 TUN profile
+已实现、提交（`1cbebc8`）并通过 tunnel live e2e（session-token 与 shared-secret
+两种 keyMode；P2P-only AEAD + selective-repeat ARQ）；F1.1 XOR FEC 已实现、
+提交（`24a5dfb`；`TOKIMEKI_TUNNEL_FEC=xor`，capability `fec:["none","xor"]`，
+单丢包 parity 恢复，多丢包/丢 parity 仍走 ARQ）。F3 已实现、提交（`53f6861`）：LAN 提示 +
+mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0/F1/F1.1/F2/F3
+五个 v1.1 子任务均完成本地实现与验收；剩余为环境依赖验证与生产部署。
+
+- **F0 P2P 传输增强（已完成并归档，`b8c9ec4`）**：新增 capability-gated
+  `FRAGMENT` 帧（0x08）实现
+  DataChannel 分片/重组；P2P 直发 `SNAPSHOT`（peer 不支持或发送失败时回退
+  relay `SNAPSHOT_TO`）；ICE 到期自动 `ice-refresh`；P2P 协商失败后按 provider
+  顺序重试一次，再回退 relay。设计已覆盖 viewer 先失败重试、旧快照 stale guard、
+  ICE refresh 串行/quiet 等失败路径。协议新增项需同步 golden vectors 与
+  `docs/protocol.md`；relay/DO 不改路由行为。
+- **F1 应用层可靠隧道（TUN profile，已实现并提交 `1cbebc8`，本地 e2e 通过）**：
+  任务 `.trellis/tasks/11-16-v1-1-f1-tunnel`。只封装 tokimeki 终端字节流，不做
+  OS TUN/VPN。首版在 WebRTC unreliable/unordered DataChannel 上做
+  selective-repeat ARQ（窗口 64、有界重传）+ AES-256-GCM，P2P-only；relay
+  路径保持现有 v1 帧与流控，TUNNEL 仍不转发。默认 `TOKIMEKI_TUNNEL=off`；
+  `auto` 需双方 capability/keyMode 匹配。默认由 session token 派生密钥时 relay
+  可推导，只作传输加固；relay-blind 需独立 `TOKIMEKI_TUNNEL_SECRET` 带外共享。
+  XOR FEC（`TOKIMEKI_TUNNEL_FEC=xor`）由 F1.1（`24a5dfb`）补齐：capability 声明
+  `fec:["none","xor"]`，每 8 条 data 记录发一条 AEAD parity，接收端恢复恰好
+  1 条丢失记录；丢 parity/多丢包继续依赖 ARQ。本地 live e2e（`E2E_TUNNEL=1`，
+  session-token 与 shared-secret 各一次）、listener+P2P、F0 P2P 快照、
+  flow-control+secret 与 host 重连已通过。
+  尚未验证：强制丢包/乱序注入、secret 不匹配的 live 回退、真实跨公网高丢包；
+  FEC 单丢包恢复目前只有单元/TunnelTransport 集成证据，没有真实丢包 e2e；
+  host/attach 的 tunnel 切换目前只有 live e2e 覆盖，没有纯单元测试（单测覆盖
+  crypto/ARQ/FEC/capability/TunnelTransport 本体）。
+- **F2 听众模式（已实现并提交 `147974f`，本地 live e2e 通过）**：任务
+  `.trellis/tasks/11-16-v1-1-f2-listener`。只读、无 ack/背压，第一版
+  snapshot-only（周期全量快照），独立上限 `TOKIMEKI_MAX_LISTENERS`；本地
+  host + viewer + listener live e2e（含 P2P viewer）已通过，生产/真实跨公网环境待复测。
+- **F3 同内网/相邻网络优化（LAN 提示已实现并提交 `53f6861`，fan-out 仅设计）**：v1 已利用
+  ICE host candidate；v1.1 增加 selected pair 的 `lan=yes|no` 诊断提示（仅提示，
+  不改变选路）。mDNS 不采用（不作发现权威）；peer fan-out 仅完成 leader 选举/
+  保序/信任/故障切换设计，默认 off、不在本版实现。
 - 交付顺序：Transport/capabilities/golden 骨架 → listener snapshot-only →
-  AEAD（先定密钥威胁模型）→ unreliable DataChannel ARQ → FEC → LAN 选路 →
-  peer fan-out（仅设计/实验开关）。
+  AEAD（先定密钥威胁模型）→ unreliable DataChannel ARQ → FEC（F1.1 已完成 XOR
+  单丢包）→ LAN 选路 → peer fan-out（仅设计/实验开关）。
 
 ## v2（独立任务）
 

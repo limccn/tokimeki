@@ -7,11 +7,11 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 
 import { Command, CommanderError } from "commander";
 
 import { runAttachSession } from "./attach/attach-session.js";
+import { readCliVersion } from "./client-info.js";
 import { runDoctor } from "./commands/doctor.js";
 import {
   type AttachConfig,
@@ -24,6 +24,7 @@ import {
 import { type HostCommandKind, runHostSession } from "./host/host-session.js";
 import { buildLocalCommand, isLocalHelpPassthrough } from "./host/pty-command.js";
 import { createRedactor, formatError, isLogLevel, Logger, type LogLevel } from "./logger.js";
+import { commandBasename, parseTuiCommandList } from "./window-policy.js";
 
 export interface CliDeps {
   readonly env?: NodeJS.ProcessEnv;
@@ -48,16 +49,6 @@ export interface CliDeps {
     env: NodeJS.ProcessEnv,
     platform: NodeJS.Platform,
   ) => Promise<number>;
-}
-
-function readVersion(): string {
-  try {
-    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
-    const parsed = JSON.parse(raw) as { version?: unknown };
-    return typeof parsed.version === "string" ? parsed.version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
 }
 
 function defaultRunLocal(
@@ -193,10 +184,10 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
     }
   };
 
-  const attachAction = async (): Promise<number> => {
+  const attachAction = async (listener: boolean): Promise<number> => {
     let config: AttachConfig;
     try {
-      config = loadAttachConfig(env);
+      config = loadAttachConfig(env, { listener });
     } catch (error) {
       printError(error);
       return 2;
@@ -242,11 +233,41 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
     }
   };
 
+  // Dynamic TUI subcommands: any non-option first arg whose basename is in
+  // TOKIMEKI_WINDOW_TUI is hosted directly (e.g. `tokimeki omp`). The list is
+  // also the allow-list: unknown commands never spawn anything implicitly.
+  const knownCommands = new Set(["claude", "pi", "run", "attach", "doctor", "help"]);
+  const dynamicCommand = userArgs[0];
+  if (
+    dynamicCommand !== undefined &&
+    !dynamicCommand.startsWith("-") &&
+    !knownCommands.has(dynamicCommand)
+  ) {
+    const tuiCommands = parseTuiCommandList(env.TOKIMEKI_WINDOW_TUI);
+    const base = commandBasename(dynamicCommand, platform);
+    if (tuiCommands.has(base)) {
+      if (isLocalHelpPassthrough(userArgs.slice(1))) {
+        try {
+          return await runLocal(dynamicCommand, userArgs.slice(1), env, platform);
+        } catch (error) {
+          printError(error);
+          return 1;
+        }
+      }
+      return await hostAction("custom", dynamicCommand, userArgs.slice(1));
+    }
+    printError(
+      `unknown command: ${dynamicCommand}; use "tokimeki run -- ${dynamicCommand}" ` +
+        `or add "${base}" to TOKIMEKI_WINDOW_TUI`,
+    );
+    return 1;
+  }
+
   const program = new Command();
   program
     .name("tokimeki")
     .description("Share TUI terminal sessions over Cloudflare relay, P2P, or TURN")
-    .version(readVersion(), "-V, --version");
+    .version(readCliVersion(), "-V, --version");
   program.exitOverride();
   program.configureOutput({
     writeOut: (text) => stdout.write(text),
@@ -298,8 +319,9 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
   program
     .command("attach")
     .description("Attach to a hosted session")
-    .action(async () => {
-      exitCode = await attachAction();
+    .option("--listen", "attach as a read-only listener (snapshot-only)")
+    .action(async (options: { listen?: boolean }) => {
+      exitCode = await attachAction(options.listen === true);
     });
 
   program

@@ -11,11 +11,17 @@
  * peer themselves receive no close callback.
  */
 
-import type { SignalKind, TransportMode } from "@limccn/tokimeki-protocol";
+import {
+  FRAME_TYPES,
+  MAX_FRAME_BYTES,
+  type SignalKind,
+  type TransportMode,
+} from "@limccn/tokimeki-protocol";
 import type { SelectedCandidateInfo } from "node-datachannel";
 import nodeDataChannel, { type DataChannel, type PeerConnection } from "node-datachannel";
 
 import type { Logger } from "../logger.js";
+import { FragmentReassembler, sendFragments } from "./fragmentation.js";
 import { classifyCandidatePair, type NodeRtcConfig } from "./ice.js";
 import {
   candidateBudgetBytes,
@@ -31,6 +37,8 @@ const MODE_LOOKUP_ATTEMPTS = 5;
 const MODE_LOOKUP_DELAY_MS = 100;
 const DRAIN_THRESHOLD_BYTES = 1_048_576;
 const MAX_PENDING_CANDIDATES = 256;
+/** Leave headroom below the host's 4 MiB P2P high-water mark. */
+const P2P_SEND_CAP = 4_194_304;
 
 export interface P2PSignalPayload {
   readonly kind: SignalKind;
@@ -41,6 +49,21 @@ export interface P2POpenInfo {
   readonly mode: TransportMode;
   /** Human-readable candidate detail, e.g. `host->srflx`. */
   readonly detail: string;
+  /** Diagnostic hint: both selected candidates are loopback/private/link-local. */
+  readonly lan: boolean;
+}
+
+/**
+ * DataChannel creation options for the host side.
+ *
+ * F1's TUN profile runs over `unordered: true` with no SCTP retransmissions;
+ * the tunnel supplies its own selective-repeat ARQ. The v1 path leaves this
+ * undefined so the channel stays reliable/ordered.
+ */
+export interface P2PDataChannelConfig {
+  readonly unordered?: boolean;
+  readonly maxRetransmits?: number;
+  readonly maxPacketLifeTime?: number;
 }
 
 export interface P2PPeerOptions {
@@ -53,6 +76,10 @@ export interface P2PPeerOptions {
   readonly onOpen: (info: P2POpenInfo) => void;
   readonly onFailed: (reason: string) => void;
   readonly onClosed: (reason: string) => void;
+  /** Host only: DataChannel reliability/delivery options. */
+  readonly dataChannelConfig?: P2PDataChannelConfig;
+  /** Host only: extra fields merged into the `offer` signal payload. */
+  readonly offerMetadata?: Record<string, unknown>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -84,8 +111,10 @@ export class P2PPeer {
   readonly #options: P2PPeerOptions;
   readonly #pc: PeerConnection;
   readonly #logger: Logger;
+  readonly #reassembler: FragmentReassembler;
 
   #dc: DataChannel | null = null;
+  #nextFragmentMessageId = 1;
   #open = false;
   #settled = false;
   #remoteDescriptionSet = false;
@@ -97,6 +126,7 @@ export class P2PPeer {
   constructor(options: P2PPeerOptions) {
     this.#options = options;
     this.#logger = options.logger;
+    this.#reassembler = new FragmentReassembler({ logger: options.logger });
     this.#pc = new nodeDataChannel.PeerConnection(options.label, {
       ...options.rtcConfig,
       iceServers: [...options.rtcConfig.iceServers],
@@ -123,7 +153,12 @@ export class P2PPeer {
   startOffer(): void {
     if (this.#options.role !== "host" || this.#dc !== null || this.#settled) return;
     try {
-      const dc = this.#pc.createDataChannel("tokimeki");
+      // The native binding requires an object when the second argument is
+      // present. Omit it entirely for the v1 reliable/ordered channel.
+      const dc =
+        this.#options.dataChannelConfig === undefined
+          ? this.#pc.createDataChannel("tokimeki")
+          : this.#pc.createDataChannel("tokimeki", this.#options.dataChannelConfig);
       this.#attachDataChannel(dc);
     } catch (error) {
       this.#fail(`failed to create data channel: ${String(error)}`);
@@ -192,6 +227,25 @@ export class P2PPeer {
     }
   }
 
+  /**
+   * Send a complete frame, splitting it into v1.1 `FRAGMENT` messages when it
+   * exceeds the DataChannel message budget. Returns false when the frame was
+   * not fully queued; the caller must fall back to the relay path.
+   */
+  sendFragmentableFrame(bytes: Uint8Array): boolean {
+    if (!this.isOpen) return false;
+    if (bytes.byteLength < 1 || bytes.byteLength > MAX_FRAME_BYTES) return false;
+    if (this.bufferedAmount + bytes.byteLength > P2P_SEND_CAP) return false;
+
+    const messageId = this.#nextFragmentMessageId;
+    this.#nextFragmentMessageId = messageId >= 0xffff_ffff ? 1 : messageId + 1;
+    if (sendFragments((fragment) => this.send(fragment), bytes, messageId)) {
+      return true;
+    }
+    this.#logger.debug(`p2p fragment send failed for ${this.#options.label}`);
+    return false;
+  }
+
   /** Register a callback for "buffer drained below the low-water mark". */
   onDrain(handler: () => void): void {
     this.#drainHandler = handler;
@@ -208,6 +262,7 @@ export class P2PPeer {
     this.#settled = true;
     this.#open = false;
     this.#clearTimer();
+    this.#reassembler.dispose();
     try {
       this.#dc?.close();
     } catch {
@@ -226,6 +281,11 @@ export class P2PPeer {
     pc.onLocalDescription((sdp, type) => {
       if (this.#settled) return;
       if (type !== "offer" && type !== "answer") return;
+      if (type === "offer" && this.#options.offerMetadata !== undefined) {
+        // Metadata must never spoof the SDP fields; spread it first.
+        this.#options.sendSignal(type, { ...this.#options.offerMetadata, sdp, type });
+        return;
+      }
       this.#options.sendSignal(type, { sdp, type });
     });
     pc.onLocalCandidate((candidate, mid) => {
@@ -275,6 +335,13 @@ export class P2PPeer {
         this.#logger.debug(`ignoring non-binary message on ${this.#options.label}`);
         return;
       }
+      if (bytes[0] === FRAME_TYPES.FRAGMENT) {
+        const complete = this.#reassembler.accept(bytes);
+        if (complete !== null) {
+          this.#options.onFrame(complete);
+        }
+        return;
+      }
       this.#options.onFrame(bytes);
     });
     dc.onError((error) => {
@@ -306,7 +373,7 @@ export class P2PPeer {
       return;
     }
     if (attempt + 1 >= MODE_LOOKUP_ATTEMPTS) {
-      this.#options.onOpen({ mode: "p2p-direct", detail: "unknown" });
+      this.#options.onOpen({ mode: "p2p-direct", detail: "unknown", lan: false });
       return;
     }
     setTimeout(() => this.#resolveMode(attempt + 1), MODE_LOOKUP_DELAY_MS);
@@ -353,6 +420,7 @@ export class P2PPeer {
     this.#settled = true;
     this.#open = false;
     this.#clearTimer();
+    this.#reassembler.dispose();
     try {
       this.#dc?.close();
     } catch {
@@ -372,6 +440,7 @@ export class P2PPeer {
     this.#settled = true;
     this.#open = false;
     this.#clearTimer();
+    this.#reassembler.dispose();
     try {
       this.#pc.close();
     } catch {

@@ -87,4 +87,23 @@ describe("TerminalMirror", () => {
     await mirror.flush();
     expect(mirror.term.buffer.active.cursorX).toBe(90);
   });
+
+  it("reports parsed chunks and resets at a snapshot boundary", async () => {
+    const mirror = createMirror({ cols: 40, rows: 5 });
+    let parsed = 0;
+    mirror.setOnParsed(() => {
+      parsed += 1;
+    });
+
+    mirror.write(encoder.encode("old-content"));
+    await mirror.flush();
+    expect(parsed).toBe(1);
+    expect(mirror.serialize()).toContain("old-content");
+
+    mirror.resetAndWrite(encoder.encode("new-content"));
+    await mirror.flush();
+    expect(parsed).toBe(2);
+    expect(mirror.serialize()).toContain("new-content");
+    expect(mirror.serialize()).not.toContain("old-content");
+  });
 });

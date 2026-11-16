@@ -158,8 +158,96 @@ export function buildNodeRtcConfig(
 }
 
 export interface CandidatePairLike {
-  readonly local: { readonly type: string };
-  readonly remote: { readonly type: string };
+  readonly local: { readonly type: string; readonly address?: string };
+  readonly remote: { readonly type: string; readonly address?: string };
+}
+
+/**
+ * True for loopback/private/link-local ICE addresses.
+ *
+ * Used only as a same-LAN diagnostic hint; it never changes route selection.
+ * Hostnames, mDNS names, public addresses, and malformed input are false.
+ */
+export function isLocalOrPrivateAddress(address: string | undefined): boolean {
+  if (address === undefined) return false;
+  let value = address.trim().toLowerCase();
+  if (value.length === 0) return false;
+
+  // Bracketed IPv6, optionally with a zone id.
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    if (end < 0) return false;
+    value = value.slice(1, end);
+  }
+  const zoneIndex = value.indexOf("%");
+  if (zoneIndex >= 0) value = value.slice(0, zoneIndex);
+
+  // Strip a single `:port` suffix from the unbracketed IPv4/hostname form.
+  // Unbracketed IPv6 carries multiple colons and is never given a port here.
+  if ((value.match(/:/g)?.length ?? 0) === 1) {
+    const colon = value.lastIndexOf(":");
+    if (/^\d+$/.test(value.slice(colon + 1))) value = value.slice(0, colon);
+  }
+
+  if (!value.includes(":")) return isPrivateIpv4(value);
+
+  if (value.startsWith("::ffff:")) {
+    // IPv4-mapped IPv6: classify the embedded IPv4 address.
+    return isPrivateIpv4(value.slice("::ffff:".length));
+  }
+  if (value === "::1" || value === "0:0:0:0:0:0:0:1") return true;
+  if (!isIpv6Literal(value)) return false;
+  const first = Number.parseInt(value.split(":")[0] ?? "", 16);
+  if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 (ULA)
+  if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 (link-local)
+  return false;
+}
+
+/**
+ * Structural IPv6 check (RFC 4291 `::` compression, optional trailing IPv4).
+ * Malformed input such as `fe80:` or `fc00:zz` must not inherit a private
+ * prefix classification.
+ */
+function isIpv6Literal(value: string): boolean {
+  if (!value.includes(":")) return false;
+  if ((value.match(/::/g)?.length ?? 0) > 1) return false;
+  const [head = "", tail] = value.split("::");
+  const headGroups = head.length === 0 ? [] : head.split(":");
+  const tailGroups = tail === undefined || tail.length === 0 ? [] : tail.split(":");
+  const groups = [...headGroups, ...tailGroups];
+  if (tail === undefined ? groups.length !== 8 : groups.length > 7) return false;
+  return groups.every((group, index) =>
+    index === groups.length - 1 && group.includes(".")
+      ? parseIpv4(group) !== null
+      : /^[0-9a-f]{1,4}$/.test(group),
+  );
+}
+
+/** Parse a dotted-quad IPv4 literal, returning null for malformed input. */
+function parseIpv4(value: string): number[] | null {
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number.parseInt(part, 10);
+    if (octet > 255) return null;
+    octets.push(octet);
+  }
+  return octets;
+}
+
+function isPrivateIpv4(value: string): boolean {
+  const octets = parseIpv4(value);
+  if (octets === null) return false;
+  const a = octets[0];
+  const b = octets[1];
+  if (a === undefined || b === undefined) return false;
+  if (a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
 }
 
 /**
@@ -168,14 +256,20 @@ export interface CandidatePairLike {
  * A relay on either side means the media path itself traverses TURN, so the
  * transport is reported as `p2p-turn`; otherwise it is `p2p-direct`.
  */
-export function classifyCandidatePair(
-  pair: CandidatePairLike | null | undefined,
-): { readonly mode: TransportMode; readonly detail: string } | null {
+export function classifyCandidatePair(pair: CandidatePairLike | null | undefined): {
+  readonly mode: TransportMode;
+  readonly detail: string;
+  readonly lan: boolean;
+} | null {
   if (pair === null || pair === undefined) return null;
   const type = (candidate: { readonly type: string }): string =>
     candidate.type.length === 0 ? "unknown" : candidate.type;
   const local = type(pair.local);
   const remote = type(pair.remote);
   const mode = local === "relay" || remote === "relay" ? "p2p-turn" : "p2p-direct";
-  return { mode, detail: `${local}->${remote}` };
+  const lan =
+    mode === "p2p-direct" &&
+    isLocalOrPrivateAddress(pair.local.address) &&
+    isLocalOrPrivateAddress(pair.remote.address);
+  return { mode, detail: `${local}->${remote}`, lan };
 }

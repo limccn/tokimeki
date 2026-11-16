@@ -22,6 +22,10 @@
 公网 VPS 有独立公网地址，NAT 穿透条件与真实双 NAT 不同。严格 NAT↔NAT
 仍缺真实客户端资源，相关项标记 blocked，未用本报告结果替代。
 
+> 2026-11-16 更新：严格 NAT↔NAT 已由维护者人工 e2e 确认
+> （`docs/deployment.md` §7.6）；本报告仍只覆盖 `wan-nat-to-vps` 性能测量，
+> 不把该确认混入性能结论。
+
 真实 CLI 吞吐包含：viewer 远端终端渲染、远端 PTY、P2P/TURN 数据面、
 跨境链路。它不是纯 DataChannel/TURN 网络吞吐；合成 relay-only 场景
 （无 TUI 渲染）是独立的网络测量。

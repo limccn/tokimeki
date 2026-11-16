@@ -6,8 +6,102 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-16
+
 ### Added
 
+- Fixed TUI window and full-screen viewport: commands listed in
+  `TOKIMEKI_WINDOW_TUI` (default `claude,pi`) get a session-level logical grid
+  (`TOKIMEKI_WINDOW_SIZE`, default `120x40`). Viewer `resize` and local terminal
+  resizes no longer change the hosted PTY, so attaching never re-lays out the
+  TUI. Local terminals letterbox the grid when larger and crop with cursor
+  following when smaller.
+- Dynamic TUI subcommands: `TOKIMEKI_WINDOW_TUI` is also the allow-list, so
+  `TOKIMEKI_WINDOW_TUI=claude,pi,omp` enables `tokimeki omp` without a code
+  change. Known commands keep precedence; unlisted unknown commands are
+  rejected with an actionable usage error.
+- Bottom status bar (`tokimeki  host  session=...  relay:ready  viewers:2
+  relay  120x40  view:fit`), mouse coordinate translation into the logical
+  grid, and a debug log panel above the status bar (`TOKIMEKI_LOG_PANEL_ROWS`,
+  default 8; debug only).
+- Protocol `hello.client` (User-Agent-like identity) and
+  `capabilities.display` (`fixed-grid`, `viewport`, `fixed`, `logPanel`,
+  `terminalQueries`); the relay echoes both in `welcome.clients` /
+  `presence.clients`. The wire version stays `v: 1`; older peers/relays ignore
+  the optional fields.
+- F12 viewer-config overlay in the host viewport: after the startup banner
+  scrolls away, press `F12` (configurable `TOKIMEKI_INVITE_KEY=f12|ctrl-]|off`)
+  to show the session, relay, token, and copyable viewer config JSON; `c` copies
+  the exact JSON through OSC 52. The overlay is local, host-side only, and never
+  writes a file.
+- `TOKIMEKI_CONFIG` JSON config envelope: fields map onto existing
+  `TOKIMEKI_*` variables, explicit env vars win, JSON only, and the envelope is
+  scrubbed from the hosted PTY environment. No YAML and no CLI-owned files.
+
+### Changed
+
+- `TOKIMEKI_WINDOW` defaults to `tui` and selects commands from
+  `TOKIMEKI_WINDOW_TUI`; `on` enables every host command and `off` restores the
+  legacy raw/resize path. `TOKIMEKI_PTY_SIZE` still overrides
+  `TOKIMEKI_WINDOW_SIZE`.
+- Debug CLI logs no longer write directly over the TUI: while a viewport owns
+  the screen they go to the log panel (debug) or an exit-time stderr replay
+  (non-debug).
+
+### Fixed
+
+- Attaching a viewer no longer resizes the host PTY or redraws Claude/pi; all
+  viewers share the same fixed logical grid.
+- Terminal query responses are answered exactly once: by the host mirror when
+  all viewers support the viewport, otherwise by a legacy viewer terminal.
+
+## [0.1.1] - 2026-11-16
+
+### Added
+
+- Tag-triggered GitHub Actions release workflow: pushing `v<version>` runs the
+  full verification gate, publishes `@limccn/tokimeki-protocol` before
+  `@limccn/tokimeki` to npmjs and GitHub Packages, and creates a GitHub
+  Release. `npm run release:bump` updates all package versions, exact internal
+  dependencies, and the lockfile; `npm run release:check` verifies the tag,
+  package versions, and lockfile agree.
+- v1.1 F0 P2P transport enhancements: capability-gated `FRAGMENT 0x08`
+  DataChannel fragmentation/reassembly, P2P-direct `SNAPSHOT`, automatic ICE
+  credential refresh, and one bounded TURN-provider retry before relay fallback.
+- v1.1 F2 read-only listener mode: `listener` is an active snapshot-only role;
+  `tokimeki attach --listen` receives immediate and periodic full
+  `SNAPSHOT_TO` snapshots without input, resize, ACK, resync, or P2P. The relay
+  advertises `listener.modes: ["snapshot-only"]`, enforces
+  `TOKIMEKI_MAX_LISTENERS` (default 8) on top of the total client cap, and
+  excludes listeners from output/ACK/backpressure/slow-consumer accounting.
+  Pre-v1.1 relays still reject listener with `not_implemented`.
+- v1.1 F1 opt-in P2P-only TUN profile: `TOKIMEKI_TUNNEL=auto` negotiates a
+  capability-gated `tunnel` envelope and runs AES-256-GCM records with HKDF
+  direction keys plus selective-repeat ARQ over an unreliable/unordered
+  DataChannel. Control messages, snapshots, resize, signaling, and relay ACK
+  flow-control stay on the v1 paths; the relay continues to answer
+  `TUNNEL`/`TUNNEL_TO` with `not_implemented`. A key-mode/dialect mismatch or
+  tunnel failure falls back to the relay and requests a fresh snapshot.
+  `TOKIMEKI_TUNNEL_SECRET` selects relay-blind `shared-secret` keys and is
+  scrubbed from the hosted PTY environment/redacted from logs. XOR FEC is
+  deferred to F1.1.
+- v1.1 F1.1 XOR FEC for the TUN profile: `TOKIMEKI_TUNNEL_FEC=xor` emits one
+  AEAD-authenticated parity record per full group of eight data records, and
+  the receiver rebuilds exactly one missing record before falling back to ARQ.
+  The capability advertises `fec: ["none", "xor"]`; the host offers `xor` only
+  when the peer advertises it and otherwise keeps `none`. FEC is supplementary:
+  lost parity, multiple losses, malformed records, or pruned recovery state
+  never bypass AEAD and continue to rely on ARQ or relay fallback. The default
+  `off` and `TOKIMEKI_TUNNEL=off` behaviors are unchanged.
+- v1.1 F3 same-LAN ICE hint: selected candidate pairs whose local and remote
+  addresses are loopback/private/link-local are logged as `lan=yes` (otherwise
+  `lan=no`) for diagnostics only. Route selection, relay fallback, flow control,
+  and security semantics are unchanged. mDNS is not adopted; peer fan-out
+  remains design-only and default-off.
+- Tunnel record layout/AAD golden vectors and a `tunnel` capability `keyMode`
+  field in `@limccn/tokimeki-protocol`.
+- Golden vectors and protocol/capability coverage for `FRAGMENT` and
+  `transports.fragmentation`.
 - 512×512 rounded PNG repository icon with transparent corners
   (`assets/icon.png`), generated from the new mascot artwork.
 
@@ -15,6 +109,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - English and Chinese READMEs now reference `assets/icon.png` instead of the
   legacy `assets/icon.svg` header icon.
+- Acceptance records now note that strict NAT↔NAT (including P2P attempts and
+  relay fallback) and real Claude/pi TUI interaction were manually confirmed at
+  the e2e layer on 2026-11-16. This is not a production, long-run,
+  direct-path-success-rate, or exhaustive interaction acceptance claim.
 
 ## [0.1.0] - 2026-11-14
 
@@ -39,13 +137,22 @@ First public release.
 ### Known limitations
 
 - P2P direct is best-effort; TURN or the Worker relay is the reliable path.
-- Strict NAT↔NAT validation, production edge hibernation/TTL long-run, and
-  real Claude/pi TUI manual acceptance remain environment-dependent.
+- At release time, strict NAT↔NAT validation, production edge hibernation/TTL
+  long-run, and real Claude/pi TUI manual acceptance remained
+  environment-dependent.
 - v1 has no DataChannel fragmentation, automatic TURN provider refresh, or
   listener/tunnel runtime.
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
   tests; link-quality work (selective-repeat/ARQ) is planned for a later
   release.
 
-[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.0...HEAD
+> Post-release update (2026-11-16): strict NAT↔NAT and real Claude/pi TUI were
+> manually confirmed at the e2e layer; see `docs/deployment.md` §7.6. v1.1
+> added DataChannel fragmentation, listener snapshot-only mode, and an opt-in
+> P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
+> recovery. The 0.1.0 limitation above is kept as the release-time record.
+
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/limccn/tokimeki/releases/tag/v0.1.2
+[0.1.1]: https://github.com/limccn/tokimeki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

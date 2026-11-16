@@ -19,6 +19,8 @@ export interface RelayEnv {
   readonly TOKIMEKI_MASTER_TOKEN?: string;
   readonly TOKIMEKI_SESSION_TTL_SECONDS?: string;
   readonly TOKIMEKI_MAX_CLIENTS_PER_SESSION?: string;
+  /** Independent limit for read-only listeners (default 8). */
+  readonly TOKIMEKI_MAX_LISTENERS?: string;
   readonly TOKIMEKI_STUN_URLS?: string;
   readonly TOKIMEKI_TURN_PROVIDER?: string;
   readonly TOKIMEKI_COTURN_URLS?: CoturnUrlConfig;
@@ -36,6 +38,7 @@ export interface RelayEnv {
 
 export const DEFAULT_SESSION_TTL_SECONDS = 86_400;
 export const DEFAULT_MAX_CLIENTS_PER_SESSION = 8;
+export const DEFAULT_MAX_LISTENERS = 8;
 export const DEFAULT_STUN_URLS = "stun:stun.cloudflare.com:3478";
 
 /** Parse a positive integer environment value, falling back on invalid input. */
@@ -57,6 +60,17 @@ export function sessionTtlSeconds(env: RelayEnv): number {
 /** Maximum active clients per session (`TOKIMEKI_MAX_CLIENTS_PER_SESSION`, default 8). */
 export function maxClientsPerSession(env: RelayEnv): number {
   return parsePositiveInt(env.TOKIMEKI_MAX_CLIENTS_PER_SESSION, DEFAULT_MAX_CLIENTS_PER_SESSION);
+}
+
+/**
+ * Maximum concurrent read-only listeners per session
+ * (`TOKIMEKI_MAX_LISTENERS`, default 8).
+ *
+ * Listeners also count toward `TOKIMEKI_MAX_CLIENTS_PER_SESSION`; this is an
+ * additional cap that keeps a snapshot fan-out from crowding out viewers.
+ */
+export function maxListenersPerSession(env: RelayEnv): number {
+  return parsePositiveInt(env.TOKIMEKI_MAX_LISTENERS, DEFAULT_MAX_LISTENERS);
 }
 
 /** ICE transport policy advertised in `welcome`; defaults to `all`. */

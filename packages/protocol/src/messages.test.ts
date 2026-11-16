@@ -20,6 +20,7 @@ import {
   ControlMessageSchema,
   createNotImplementedErrorMessage,
   encodeControlMessage,
+  type HelloMessage,
   HelloMessageSchema,
   isAgentMessage,
   KNOWN_CONTROL_MESSAGE_TYPES,
@@ -108,6 +109,7 @@ describe("hello and welcome", () => {
           arq: "future-arq",
           fec: ["xor", "future-fec"],
           crypto: "future-aead",
+          keyMode: "shared-secret",
           maxFrameSize: 9000,
         },
         listener: { modes: ["snapshot-only"] },
@@ -122,7 +124,7 @@ describe("hello and welcome", () => {
     expect(parsed.protocolVersion).toBe(1);
     expect(parsed.capabilities).toMatchObject({
       transports: { modes: ["p2p-direct", "relay"] },
-      tunnel: { arq: "future-arq" },
+      tunnel: { arq: "future-arq", keyMode: "shared-secret" },
     });
 
     const encoded = JSON.parse(encodeControlMessage(parsed)) as Record<string, unknown>;
@@ -133,16 +135,37 @@ describe("hello and welcome", () => {
     });
   });
 
-  it("accepts the reserved listener role and detects it as reserved", () => {
+  it("accepts listener as an active role", () => {
     const parsed = parseControlMessage({ ...minimalHello, role: "listener" });
     expect(parsed.type).toBe("hello");
     const { role } = HelloMessageSchema.parse({ ...minimalHello, role: "listener" });
     expect(role).toBe("listener");
-    expect(isReservedRole(role)).toBe(true);
-    expect(isActiveRole(role)).toBe(false);
-    expect(ROLES).toEqual(["host", "viewer", "observer", "agent"]);
-    expect(RESERVED_ROLES).toEqual(["listener"]);
+    expect(isActiveRole(role)).toBe(true);
+    expect(isReservedRole(role)).toBe(false);
+    expect(ROLES).toEqual(["host", "viewer", "observer", "agent", "listener"]);
+    expect(RESERVED_ROLES).toEqual([]);
     expect(ALL_ROLES).toContain("listener");
+  });
+
+  it("roundtrips the optional peer-joined role", () => {
+    const joined = parseControlMessage({
+      v: 1,
+      type: "peer-joined",
+      clientId: "listener-1",
+      role: "listener",
+      capabilities: { listener: { modes: ["snapshot-only"] } },
+    });
+    expect(joined.type).toBe("peer-joined");
+    if (joined.type !== "peer-joined") throw new Error("expected peer-joined");
+    expect(joined.role).toBe("listener");
+
+    const legacy = parseControlMessage({
+      v: 1,
+      type: "peer-joined",
+      clientId: "viewer-1",
+    });
+    if (legacy.type !== "peer-joined") throw new Error("expected peer-joined");
+    expect(legacy.role).toBeUndefined();
   });
 
   it("roundtrips the minimum fields through the schema and encoder", () => {
@@ -175,6 +198,104 @@ describe("hello and welcome", () => {
       }),
     ).toThrow();
     expect(() => HelloMessageSchema.parse({ ...minimalHello, cols: 1.5 })).toThrow();
+  });
+
+  it("roundtrips client identity and display capabilities", () => {
+    const parsed = parseControlMessage({
+      ...minimalHello,
+      client: {
+        name: "tokimeki-cli",
+        version: "0.1.2",
+        kind: "cli",
+        platform: "win32",
+        runtime: "node/22.12.0",
+        futureField: "kept",
+      },
+      capabilities: {
+        display: {
+          modes: ["viewport", "future-mode"],
+          fixed: { cols: 120, rows: 40 },
+          logPanel: true,
+          terminalQueries: "host",
+          futureField: 1,
+        },
+      },
+    });
+    expect(parsed.type).toBe("hello");
+    if (parsed.type !== "hello") throw new Error("expected hello");
+    expect(parsed.client).toMatchObject({
+      name: "tokimeki-cli",
+      version: "0.1.2",
+      kind: "cli",
+    });
+    const hello = parsed as HelloMessage;
+    expect(hello.capabilities.display).toMatchObject({
+      modes: ["viewport", "future-mode"],
+      fixed: { cols: 120, rows: 40 },
+      logPanel: true,
+      terminalQueries: "host",
+    });
+
+    const encoded = JSON.parse(encodeControlMessage(parsed)) as Record<string, unknown>;
+    expect(encoded.client).toMatchObject({ name: "tokimeki-cli", futureField: "kept" });
+    expect(encoded.capabilities).toMatchObject({
+      display: { fixed: { cols: 120, rows: 40 }, futureField: 1 },
+    });
+  });
+
+  it("validates client identity and fixed display size", () => {
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        client: { name: "tokimeki-cli" },
+      }),
+    ).toThrow();
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        client: { name: "", version: "0.1.2" },
+      }),
+    ).toThrow();
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        capabilities: { display: { fixed: { cols: 0, rows: 40 } } },
+      }),
+    ).toThrow();
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        capabilities: { display: { fixed: { cols: 5000, rows: 5000 } } },
+      }),
+    ).toThrow();
+  });
+
+  it("carries client identity and capabilities in welcome clients", () => {
+    const parsed = WelcomeMessageSchema.parse({
+      v: 1,
+      type: "welcome",
+      session: "demo-session",
+      hostOnline: true,
+      iceProvider: "stun",
+      sessionTtlSeconds: 60,
+      clients: [
+        {
+          clientId: "host-1",
+          role: "host",
+          client: { name: "tokimeki-cli", version: "0.1.2", kind: "cli" },
+          capabilities: {
+            display: {
+              modes: ["fixed-grid", "viewport"],
+              fixed: { cols: 120, rows: 40 },
+              logPanel: true,
+              terminalQueries: "host",
+            },
+          },
+        },
+      ],
+    });
+    expect(parsed.clients[0]?.client?.name).toBe("tokimeki-cli");
+    expect(parsed.clients[0]?.capabilities?.display?.fixed).toEqual({ cols: 120, rows: 40 });
   });
 
   it("applies welcome defaults and validates providers", () => {

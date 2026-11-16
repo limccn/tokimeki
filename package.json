@@ -1,6 +1,6 @@
 {
   "name": "tokimeki-monorepo",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Cloudflare Worker relay + P2P terminal sharing for TUI programs",
@@ -20,6 +20,8 @@
     "test:all": "vitest run && vitest run --config packages/relay/vitest.config.ts",
     "lint": "biome check .",
     "format": "biome format --write .",
+    "release:bump": "node scripts/release/version.mjs bump",
+    "release:check": "node scripts/release/version.mjs check",
     "dev:relay": "npm run build && wrangler dev --config packages/relay/wrangler.jsonc",
     "deploy": "npm run build && wrangler deploy",
     "perf:smoke": "node scripts/perf/cli.mjs --scenario smoke",

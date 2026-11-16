@@ -127,6 +127,70 @@ describe("tokimeki CLI wiring", () => {
     }
   });
 
+  it("dispatches allow-listed TUI subcommands dynamically", async () => {
+    const runHost = makeRunHost();
+    const { deps } = harness({ ...hostEnv, TOKIMEKI_WINDOW_TUI: "claude,pi,omp" }, { runHost });
+    const code = await main(["node", "tokimeki", "omp", "--flag", "x"], deps);
+    expect(code).toBe(0);
+    expect(runHost).toHaveBeenCalledTimes(1);
+    const call = runHost.mock.calls[0];
+    expect(call?.[1]).toBe("omp");
+    expect(call?.[2]).toEqual(["--flag", "x"]);
+    expect(call?.[3]).toBe("custom");
+    expect(call?.[0].windowMode).toBe("tui");
+  });
+
+  it("runs allow-listed subcommand help locally without relay configuration", async () => {
+    const runLocal = vi.fn(async (): Promise<number> => 0);
+    const runHost = makeRunHost();
+    const { deps } = harness({ TOKIMEKI_WINDOW_TUI: "omp" }, { runLocal, runHost });
+    const code = await main(["node", "tokimeki", "omp", "--help"], deps);
+    expect(code).toBe(0);
+    expect(runLocal).toHaveBeenCalledTimes(1);
+    expect(runLocal).toHaveBeenCalledWith(
+      "omp",
+      ["--help"],
+      { TOKIMEKI_WINDOW_TUI: "omp" },
+      "linux",
+    );
+    expect(runHost).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown subcommands unless they are allow-listed", async () => {
+    const runHost = makeRunHost();
+    const { deps, stderr } = harness({}, { runHost });
+    const code = await main(["node", "tokimeki", "omp"], deps);
+    expect(code).toBe(1);
+    expect(runHost).not.toHaveBeenCalled();
+    expect(stderr()).toContain("unknown command: omp");
+    expect(stderr()).toContain("TOKIMEKI_WINDOW_TUI");
+  });
+
+  it("keeps known commands ahead of the dynamic TUI allow-list", async () => {
+    const runAttach = vi.fn(async (): Promise<number> => 0);
+    const runHost = makeRunHost();
+    const { deps } = harness(
+      { ...hostEnv, TOKIMEKI_WINDOW_TUI: "attach,omp" },
+      { runAttach, runHost },
+    );
+    const code = await main(["node", "tokimeki", "attach"], deps);
+    expect(code).toBe(0);
+    expect(runAttach).toHaveBeenCalledTimes(1);
+    expect(runHost).not.toHaveBeenCalled();
+  });
+
+  it("dispatches the allow-list even when the window mode is off", async () => {
+    const runHost = makeRunHost();
+    const { deps } = harness(
+      { ...hostEnv, TOKIMEKI_WINDOW: "off", TOKIMEKI_WINDOW_TUI: "omp" },
+      { runHost },
+    );
+    const code = await main(["node", "tokimeki", "omp"], deps);
+    expect(code).toBe(0);
+    expect(runHost).toHaveBeenCalledTimes(1);
+    expect(runHost.mock.calls[0]?.[0].windowMode).toBe("off");
+  });
+
   it("still requires relay configuration to host pi or run", async () => {
     const runHost = makeRunHost();
     const hostPi = harness({}, { runHost });
@@ -213,6 +277,28 @@ describe("tokimeki CLI wiring", () => {
     const [config] = runAttach.mock.calls[0] ?? [];
     expect(config).toMatchObject({
       role: "viewer",
+      session: "sess-1",
+      websocketUrl: "wss://relay.example/base/ws/sess-1",
+    });
+  });
+
+  it("wires attach --listen as a read-only listener", async () => {
+    const runAttach = vi.fn(async (_config: AttachConfig, _logger: Logger): Promise<number> => 0);
+    const { deps } = harness(
+      {
+        TOKIMEKI_RELAY_URL: "https://relay.example/base/",
+        TOKIMEKI_SESSION: "sess-1",
+        TOKIMEKI_SESSION_TOKEN: "session-token-9876",
+      },
+      { runAttach },
+    );
+
+    const code = await main(["node", "tokimeki", "attach", "--listen"], deps);
+    expect(code).toBe(0);
+    expect(runAttach).toHaveBeenCalledTimes(1);
+    const [config] = runAttach.mock.calls[0] ?? [];
+    expect(config).toMatchObject({
+      role: "listener",
       session: "sess-1",
       websocketUrl: "wss://relay.example/base/ws/sess-1",
     });

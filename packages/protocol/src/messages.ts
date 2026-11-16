@@ -21,6 +21,56 @@ import { zU64String } from "./u64.js";
 
 const zV1 = z.literal(PROTOCOL_VERSION);
 const textEncoder = new TextEncoder();
+const terminalDimension = z.number().int().min(1).max(MAX_TERMINAL_DIMENSION);
+
+/**
+ * User-Agent-like client identity carried in `hello`.
+ *
+ * `name`/`version` are required when the object is present; the remaining
+ * fields are advisory and intentionally loose so a newer client can add
+ * platform/runtime details without a protocol bump.
+ */
+export const ClientDescriptorSchema = z.looseObject({
+  name: z.string().min(1).max(64),
+  version: z.string().min(1).max(64),
+  /** Suggested values: `cli`, `web`, `library`, `test`. */
+  kind: z.string().min(1).max(32).optional(),
+  platform: z.string().min(1).max(32).optional(),
+  runtime: z.string().min(1).max(64).optional(),
+});
+
+/**
+ * Rendering/window capability advertised in `hello`.
+ *
+ * Hosts advertise `fixed-grid` (and `viewport` when they render locally) plus
+ * the session's fixed logical size. Viewers advertise `viewport` when they can
+ * render the fixed grid locally. Unknown modes are ignored.
+ */
+export const DisplayCapabilitySchema = z
+  .looseObject({
+    modes: z.array(z.string().min(1).max(32)).max(16).optional(),
+    fixed: z
+      .looseObject({
+        cols: terminalDimension,
+        rows: terminalDimension,
+      })
+      .optional(),
+    logPanel: z.boolean().optional(),
+    /** Host uses `host` when its mirror answers terminal queries. */
+    terminalQueries: z.string().min(1).max(32).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (
+      value.fixed !== undefined &&
+      !isTerminalSizeWithinLimits(value.fixed.cols, value.fixed.rows)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "fixed display size exceeds the cell limit",
+        path: ["fixed", "cols"],
+      });
+    }
+  });
 
 /**
  * Capability objects advertised in `hello` and echoed (as a negotiated
@@ -39,11 +89,13 @@ export const TunnelCapabilitySchema = z.looseObject({
   fec: z.array(z.string().min(1)).optional(),
   /** Expected v1.1 value: `aes-256-gcm`. */
   crypto: z.string().min(1).optional(),
+  /** v1.1: `session-token` (default) or `shared-secret`. */
+  keyMode: z.string().min(1).optional(),
   maxFrameSize: z.number().int().positive().optional(),
 });
 
 export const ListenerCapabilitySchema = z.looseObject({
-  /** Expected v1.1 values include `snapshot-only` and `safe-boundary`. */
+  /** v1.1 value: `snapshot-only`; `safe-boundary` remains reserved. */
   modes: z.array(z.string().min(1)).optional(),
 });
 
@@ -61,6 +113,17 @@ export const SnapshotCapabilitySchema = z.looseObject({
 export const TransportsCapabilitySchema = z.looseObject({
   /** Expected v1 values: `p2p-direct`, `p2p-turn`, `relay`. */
   modes: z.array(z.string().min(1)).optional(),
+  /**
+   * v1.1 optional P2P fragmentation envelope. Values must match the protocol
+   * constants; peers with a different version/limit are treated as unsupported.
+   */
+  fragmentation: z
+    .looseObject({
+      version: z.number().int().positive().optional(),
+      maxFrameBytes: z.number().int().positive().optional(),
+      maxMessageBytes: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 
 export const CapabilitiesSchema = z.looseObject({
@@ -68,9 +131,11 @@ export const CapabilitiesSchema = z.looseObject({
   protocolVersion: z.number().int().nonnegative().optional(),
   transports: TransportsCapabilitySchema.optional(),
   snapshot: SnapshotCapabilitySchema.optional(),
+  /** Fixed-grid/viewport/log-panel rendering capabilities (v1.2). */
+  display: DisplayCapabilitySchema.optional(),
   /** Reserved for v1.1; ignored by v1. */
   tunnel: TunnelCapabilitySchema.optional(),
-  /** Reserved for v1.1; ignored by v1. */
+  /** v1.1 listener modes (`snapshot-only`); ignored by pre-v1.1 relays. */
   listener: ListenerCapabilitySchema.optional(),
   /** Reserved for v1.1; ignored by v1. */
   peerRelay: PeerRelayCapabilitySchema.optional(),
@@ -99,6 +164,7 @@ export const ClientInfoSchema = z.looseObject({
   connectedAt: z.number().int().nonnegative().optional(),
   lastSeenAt: z.number().int().nonnegative().optional(),
   transport: ClientTransportSchema.optional(),
+  client: ClientDescriptorSchema.optional(),
   capabilities: CapabilitiesSchema.optional(),
 });
 
@@ -118,8 +184,6 @@ export const SessionMetaSchema = z.looseObject({
   hostOnline: z.boolean().optional(),
 });
 
-const terminalDimension = z.number().int().min(1).max(MAX_TERMINAL_DIMENSION);
-
 export const HelloMessageSchema = z
   .looseObject({
     v: zV1,
@@ -128,6 +192,7 @@ export const HelloMessageSchema = z
     session: zSessionId,
     clientId: zClientId,
     protocolVersion: zV1.default(PROTOCOL_VERSION),
+    client: ClientDescriptorSchema.optional(),
     capabilities: CapabilitiesSchema.default({}),
     cols: terminalDimension.optional(),
     rows: terminalDimension.optional(),
@@ -181,6 +246,11 @@ export const PeerJoinedMessageSchema = z.looseObject({
   v: zV1,
   type: z.literal("peer-joined"),
   clientId: zClientId,
+  /**
+   * v1.1: role of the joining client so the host can separate viewers from
+   * read-only listeners. Absent on a v1 relay, where every peer is a viewer.
+   */
+  role: z.enum(ALL_ROLES).optional(),
   capabilities: CapabilitiesSchema.default({}),
 });
 
@@ -381,6 +451,8 @@ export type ListenerCapability = z.infer<typeof ListenerCapabilitySchema>;
 export type PeerRelayCapability = z.infer<typeof PeerRelayCapabilitySchema>;
 export type SnapshotCapability = z.infer<typeof SnapshotCapabilitySchema>;
 export type TransportsCapability = z.infer<typeof TransportsCapabilitySchema>;
+export type DisplayCapability = z.infer<typeof DisplayCapabilitySchema>;
+export type ClientDescriptor = z.infer<typeof ClientDescriptorSchema>;
 export type Capabilities = z.infer<typeof CapabilitiesSchema>;
 export type IceServerConfig = z.infer<typeof IceServerConfigSchema>;
 export type ClientTransport = z.infer<typeof ClientTransportSchema>;
@@ -585,7 +657,7 @@ export interface NotImplementedReplyOptions {
 
 /**
  * Build the canonical `not_implemented` error a v1 relay returns for reserved
- * agent messages, reserved roles (`listener`), and reserved features.
+ * agent messages, pre-v1.1 `listener` connections, and reserved features.
  */
 export function createNotImplementedErrorMessage(
   options: NotImplementedReplyOptions = {},

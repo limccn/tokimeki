@@ -11,10 +11,11 @@ import { randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 
 import {
+  type ClientInfo,
   decodeFrame,
   encodeFrame,
-  type IceServerConfig,
   type IceTransportPolicy,
+  isTerminalSizeWithinLimits,
   type KnownControlMessage,
   PROTOCOL_VERSION,
   type TransportMode,
@@ -22,22 +23,39 @@ import {
   type WelcomeMessage,
 } from "@limccn/tokimeki-protocol";
 
+import { buildClientDescriptor } from "../client-info.js";
 import type { AttachConfig } from "../config.js";
 import { formatError, type Logger } from "../logger.js";
+import { TerminalMirror } from "../terminal/mirror.js";
+import { ModeTracker } from "../terminal/mode-tracker.js";
 import {
   CLEAR_SCREEN,
   ENTER_ALTERNATE_SCREEN,
   terminalRestoreSequence,
 } from "../terminal/restore.js";
-import { buildCapabilities } from "../transport/capabilities.js";
+import {
+  LocalViewport,
+  type ViewportRelayState,
+  type ViewportStatus,
+  type ViewportTransport,
+} from "../terminal/viewport/index.js";
+import { buildCapabilities, hostAnswersTerminalQueries } from "../transport/capabilities.js";
 import { buildNodeRtcConfig, resolveIceTransportPolicy } from "../transport/ice.js";
+import { IceConfigManager } from "../transport/ice-config.js";
 import { P2PPeer } from "../transport/p2p-peer.js";
-import { RelayClient } from "../transport/relay-client.js";
+import { RelayClient, type RelayClientOptions } from "../transport/relay-client.js";
 import { RelayTransport } from "../transport/relay-transport.js";
 import type { RelayConnectionState, RelayFatalError } from "../transport/relay-types.js";
 import { RouteSelector } from "../transport/route-selector.js";
+import {
+  parseTunnelOffer,
+  type TunnelFecMode,
+  type TunnelOfferParams,
+  tunnelOfferCompatible,
+} from "../transport/tunnel/capability.js";
+import { TunnelTransport } from "../transport/tunnel/tunnel-transport.js";
 import type { Transport } from "../transport/types.js";
-import { SeqReducer } from "./seq-reducer.js";
+import { isStaleSnapshot, SeqReducer } from "./seq-reducer.js";
 
 export interface AttachSessionDeps {
   readonly logger: Logger;
@@ -45,6 +63,10 @@ export interface AttachSessionDeps {
   readonly stdout?: NodeJS.WriteStream;
   readonly stderr?: NodeJS.WriteStream;
   readonly platform?: NodeJS.Platform;
+  /** Test seam: replace the WebSocket relay client. */
+  readonly createClient?: (options: RelayClientOptions) => RelayClient;
+  /** Test seam: replace relay transport selection. */
+  readonly selectTransport?: (client: RelayClient) => Promise<Transport>;
 }
 
 const RESYNC_THROTTLE_MS = 500;
@@ -57,6 +79,12 @@ interface BufferedOutput {
 }
 
 type SizedWriteStream = NodeJS.WriteStream & { columns?: number; rows?: number; fd?: number };
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 export async function runAttachSession(
   config: AttachConfig,
@@ -71,14 +99,29 @@ class AttachSession {
   readonly #logger: Logger;
   readonly #stdin: NodeJS.ReadStream;
   readonly #stdout: NodeJS.WriteStream;
+  readonly #stderr: NodeJS.WriteStream;
+  readonly #platform: NodeJS.Platform;
   readonly #clientId = randomUUID();
   readonly #reducer = new SeqReducer();
+  /** v1.1 read-only mode: snapshots only, no input/resize/ACK/resync/P2P. */
+  readonly #listener: boolean;
+  readonly #createClient: ((options: RelayClientOptions) => RelayClient) | null;
+  readonly #selectTransport: ((client: RelayClient) => Promise<Transport>) | null;
 
   #client: RelayClient | null = null;
   #transport: Transport | null = null;
-  #iceServers: readonly IceServerConfig[] = [];
+  #mirror: TerminalMirror | null = null;
+  #viewport: LocalViewport | null = null;
+  #fixedSize: { cols: number; rows: number } | null = null;
+  #relayState: ViewportRelayState = "connecting";
+  #transportMode: ViewportTransport = "relay";
+  /** Logs captured by the viewport sink and replayed after restore. */
+  readonly #deferredLogs: string[] = [];
+  readonly #iceManager: IceConfigManager;
   #iceTransportPolicy: IceTransportPolicy;
   #peer: P2PPeer | null = null;
+  #tunnel: TunnelTransport | null = null;
+  #tunnelFec: TunnelFecMode | null = null;
   #p2pReady = false;
   #p2pSnapshotSeen = false;
   #p2pBufferOverflow = false;
@@ -103,12 +146,27 @@ class AttachSession {
 
   constructor(config: AttachConfig, deps: AttachSessionDeps) {
     this.#config = config;
+    this.#listener = config.role === "listener";
+    this.#createClient = deps.createClient ?? null;
+    this.#selectTransport = deps.selectTransport ?? null;
     this.#iceTransportPolicy = config.iceTransportPolicy;
     this.#logger = deps.logger;
     this.#stdin = deps.stdin ?? process.stdin;
     this.#stdout = deps.stdout ?? process.stdout;
+    this.#stderr = deps.stderr ?? process.stderr;
+    this.#platform = deps.platform ?? process.platform;
     this.#finishedPromise = new Promise<number>((resolve) => {
       this.#resolveFinished = resolve;
+    });
+    this.#iceManager = new IceConfigManager({
+      logger: this.#logger,
+      sendIceRefresh: (provider) => {
+        this.#client?.sendControl({
+          v: PROTOCOL_VERSION,
+          type: "ice-refresh",
+          ...(provider === undefined ? {} : { provider }),
+        });
+      },
     });
   }
 
@@ -116,33 +174,58 @@ class AttachSession {
     this.#interactive = this.#stdin.isTTY === true && this.#stdout.isTTY === true;
     this.#installLocalTerminal();
 
-    const client = new RelayClient({
+    const localSize = this.#localSize();
+    const clientOptions: RelayClientOptions = {
       url: this.#config.websocketUrl,
       headers: {
         "X-Tokimeki-Session": this.#config.sessionToken,
+        ...(this.#listener ? { "X-Tokimeki-Listener": "1" } : {}),
       },
-      role: "viewer",
+      role: this.#config.role,
       session: this.#config.session,
       clientId: this.#clientId,
-      cols: this.#localSize().cols,
-      rows: this.#localSize().rows,
+      // Listeners must not drive PTY sizing (and hello dims would be ignored
+      // by the relay anyway); omit them entirely.
+      ...(this.#listener ? {} : { cols: localSize.cols, rows: localSize.rows }),
       heartbeatSeconds: this.#config.heartbeatSeconds,
-      capabilities: buildCapabilities({ p2p: this.#config.p2p === "auto" }),
+      client: buildClientDescriptor({ platform: this.#platform }),
+      capabilities: buildCapabilities({
+        p2p: this.#config.p2p === "auto" && !this.#listener,
+        listener: this.#listener,
+        ...(this.#config.tunnel === "auto" && !this.#listener
+          ? { tunnelKeyMode: this.#config.tunnelKeyMode }
+          : {}),
+        ...(this.#config.windowMode === "off"
+          ? {}
+          : {
+              display: {
+                modes: ["viewport"],
+                logPanel: true,
+              },
+            }),
+      }),
       logger: this.#logger,
-    });
+    };
+    const client =
+      this.#createClient === null
+        ? new RelayClient(clientOptions)
+        : this.#createClient(clientOptions);
     this.#client = client;
     client.onWelcome((welcome) => this.#handleWelcome(welcome));
     client.onMessage((message) => this.#handleControl(message));
     client.onState((state) => this.#handleState(state));
     client.onFatal((error) => this.#handleFatal(error));
 
-    const selector = new RouteSelector({
-      p2p: this.#config.p2p,
-      logger: this.#logger,
-      createRelayTransport: () => new RelayTransport(client),
-    });
-    void selector
-      .select()
+    const selectTransport =
+      this.#selectTransport ??
+      ((relayClient: RelayClient) =>
+        new RouteSelector({
+          // Listeners never attempt P2P; their base transport is the relay.
+          p2p: this.#listener ? "off" : this.#config.p2p,
+          logger: this.#logger,
+          createRelayTransport: () => new RelayTransport(relayClient),
+        }).select());
+    void selectTransport(client)
       .then((transport) => {
         this.#transport = transport;
         transport.onFrame((bytes) => this.#handleFrame(bytes));
@@ -171,17 +254,19 @@ class AttachSession {
       if (!this.#screenActive) return;
       const data = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
       if (data.byteLength === 0) return;
-      try {
-        const frame = encodeFrame({ type: "input", payload: data });
-        // Control-plane frames stay on the relay; terminal input prefers the
-        // direct path once the host has announced it ready.
-        if (this.#p2pReady && this.#peer !== null && this.#peer.send(frame)) {
-          return;
+      if (this.#listener) {
+        // A listener is read-only. Ctrl-C (0x03) only stops this local
+        // listener; every other keystroke is ignored and never reaches the PTY.
+        if (data.includes(0x03)) {
+          this.#finish(0, "listener stopped");
         }
-        this.#transport?.send(frame);
-      } catch (error) {
-        this.#logger.debug(`failed to encode input: ${formatError(error)}`);
+        return;
       }
+      if (this.#viewport !== null) {
+        this.#viewport.handleInput(data);
+        return;
+      }
+      this.#sendInput(data);
     };
     try {
       this.#stdin.resume();
@@ -190,7 +275,10 @@ class AttachSession {
       // stdin may not be readable
     }
 
-    this.#resizeHandler = () => this.#sendResize();
+    this.#resizeHandler = () => {
+      this.#viewport?.resizeLocal(this.#localSize());
+      this.#sendResize();
+    };
     process.on("SIGWINCH", this.#resizeHandler);
     try {
       (this.#stdout as SizedWriteStream).on("resize", this.#resizeHandler);
@@ -208,6 +296,11 @@ class AttachSession {
 
     this.#exitHandler = () => {
       if (!this.#screenActive) return;
+      if (this.#viewport !== null) {
+        this.#viewport.restoreSync();
+        this.#flushDeferredLogs();
+        return;
+      }
       const fd = (this.#stdout as SizedWriteStream).fd;
       if (typeof fd !== "number") return;
       try {
@@ -219,8 +312,29 @@ class AttachSession {
     process.once("exit", this.#exitHandler);
   }
 
+  #sendInput(data: Uint8Array): void {
+    if (this.#closing || this.#listener || data.byteLength === 0) return;
+    try {
+      // Control-plane frames stay on the relay; terminal input prefers the
+      // direct path once the host has announced it ready. Tunnel input is
+      // split into records by the endpoint before encoding.
+      if (this.#p2pReady && this.#peer !== null) {
+        if (this.#tunnel !== null) {
+          if (this.#tunnel.sendTerminalInput(data)) return;
+          this.#handleP2PFailure("tunnel input send failed");
+        } else {
+          const frame = encodeFrame({ type: "input", payload: data });
+          if (this.#peer.send(frame)) return;
+        }
+      }
+      this.#transport?.send(encodeFrame({ type: "input", payload: data }));
+    } catch (error) {
+      this.#logger.debug(`failed to encode input: ${formatError(error)}`);
+    }
+  }
+
   #handleWelcome(welcome: WelcomeMessage): void {
-    this.#iceServers = welcome.iceServers;
+    this.#iceManager.updateFromWelcome(welcome);
     this.#iceTransportPolicy = resolveIceTransportPolicy(
       this.#config.iceTransportPolicy,
       welcome.transportPolicy,
@@ -234,17 +348,93 @@ class AttachSession {
     }
     this.#reducer.reset();
     this.#logger.info(`attached to session ${this.#config.session}`);
+    this.#relayState = "ready";
+    this.#prepareViewport(welcome.clients);
     this.#enterScreen();
     // Tell the host our terminal size even if the relay did not synthesize a
     // resize from hello. The host ignores no-op resizes.
     this.#sendResize();
   }
 
+  #prepareViewport(clients: readonly ClientInfo[]): boolean {
+    if (!this.#interactive || this.#config.windowMode === "off") {
+      this.#disposeViewport();
+      return false;
+    }
+
+    const host = clients.find((client) => client.role === "host");
+    const display = host?.capabilities?.display;
+    const fixed = display?.fixed;
+    if (
+      host === undefined ||
+      fixed === undefined ||
+      display?.modes?.includes("fixed-grid") !== true ||
+      !isTerminalSizeWithinLimits(fixed.cols, fixed.rows)
+    ) {
+      if (this.#viewport === null) {
+        this.#logger.debug("fixed window metadata unavailable; using legacy rendering");
+      }
+      return false;
+    }
+    if (
+      this.#viewport !== null &&
+      this.#fixedSize?.cols === fixed.cols &&
+      this.#fixedSize.rows === fixed.rows
+    ) {
+      return false;
+    }
+
+    this.#disposeViewport();
+    const tracker = new ModeTracker();
+    const mirror = new TerminalMirror({
+      cols: fixed.cols,
+      rows: fixed.rows,
+      scrollback: 0,
+      // New hosts answer terminal queries themselves. Legacy hosts expect the
+      // viewer terminal (now the mirror) to answer as INPUT.
+      ...(this.#listener || hostAnswersTerminalQueries(host.capabilities)
+        ? {}
+        : { onReply: (data: string) => this.#sendInput(Buffer.from(data, "utf8")) }),
+    });
+    this.#mirror = mirror;
+    this.#fixedSize = { cols: fixed.cols, rows: fixed.rows };
+    this.#viewport = new LocalViewport({
+      mirror,
+      tracker,
+      stdout: this.#stdout,
+      logRows: this.#config.logLevel === "debug" ? this.#config.logPanelRows : 0,
+      status: this.#statusModel(),
+      onInput: (data) => this.#sendInput(data),
+    });
+    return true;
+  }
+
+  #disposeViewport(): void {
+    this.#viewport?.dispose();
+    this.#mirror?.dispose();
+    this.#viewport = null;
+    this.#mirror = null;
+    this.#fixedSize = null;
+  }
+
   #enterScreen(): void {
     this.#screenActive = true;
     if (!this.#interactive) return;
-    this.#writeRaw(ENTER_ALTERNATE_SCREEN);
-    this.#logger.setMuted(true);
+    if (this.#viewport !== null) {
+      this.#viewport.start();
+      this.#logger.setSink((line) => {
+        this.#viewport?.appendLog(line);
+        if (this.#config.logLevel !== "debug" || this.#config.logPanelRows === 0) {
+          if (this.#deferredLogs.length >= 256) this.#deferredLogs.shift();
+          this.#deferredLogs.push(line);
+        }
+      });
+      this.#logger.setMuted(false);
+      this.#updateViewportStatus();
+    } else {
+      this.#writeRaw(ENTER_ALTERNATE_SCREEN);
+      this.#logger.setMuted(true);
+    }
     try {
       this.#stdin.setRawMode(true);
       this.#rawMode = true;
@@ -257,7 +447,13 @@ class AttachSession {
     if (!this.#screenActive) return;
     this.#screenActive = false;
     if (!this.#interactive) return;
-    this.#writeRaw(terminalRestoreSequence());
+    if (this.#viewport !== null) {
+      this.#logger.setSink(null);
+      this.#disposeViewport();
+      this.#flushDeferredLogs();
+    } else {
+      this.#writeRaw(terminalRestoreSequence());
+    }
     if (this.#rawMode) {
       try {
         this.#stdin.setRawMode(false);
@@ -286,7 +482,7 @@ class AttachSession {
   }
 
   #sendResize(): void {
-    if (this.#closing) return;
+    if (this.#closing || this.#listener) return;
     const size = this.#localSize();
     this.#client?.sendControl({
       v: PROTOCOL_VERSION,
@@ -298,6 +494,9 @@ class AttachSession {
   }
 
   #handleState(state: RelayConnectionState): void {
+    this.#relayState = state;
+    this.#updateViewportStatus();
+    this.#iceManager.onRelayState(state);
     if (state === "reconnecting") {
       this.#restoreTerminal();
       this.#logger.info("relay disconnected; reconnecting");
@@ -306,6 +505,30 @@ class AttachSession {
       // P2P attempt down and let the host re-offer after the next hello.
       this.#disposeP2P("relay reconnecting");
     }
+  }
+
+  #statusModel(): ViewportStatus {
+    return {
+      role: this.#listener ? "listener" : "viewer",
+      session: this.#config.session,
+      relayState: this.#relayState,
+      viewers: 0,
+      transport: this.#transportMode,
+    };
+  }
+
+  #flushDeferredLogs(): void {
+    if (this.#deferredLogs.length === 0) return;
+    const lines = this.#deferredLogs.splice(0);
+    try {
+      for (const line of lines) this.#stderr.write(`${line}\n`);
+    } catch {
+      // stderr may be gone during shutdown
+    }
+  }
+
+  #updateViewportStatus(): void {
+    this.#viewport?.setStatus(this.#statusModel());
   }
 
   #handleFatal(error: RelayFatalError): void {
@@ -354,44 +577,84 @@ class AttachSession {
         }
         return;
       case "signal": {
+        // Listeners never participate in P2P signaling.
+        if (this.#listener) return;
         if (message.kind === "offer") {
-          this.#startViewerPeer(message.from);
+          // A new offer means the host started a new P2P attempt (initial
+          // switch or the one-shot retry). Silently drop any old peer so a
+          // lost relay-failure control message cannot strand the viewer.
+          if (this.#peer !== null) {
+            this.#disposeP2P("host restarted p2p negotiation");
+          }
+          const payload = asRecord(message.payload);
+          const rawTunnel = payload?.tunnel;
+          let tunnelOffer: TunnelOfferParams | null = null;
+          if (rawTunnel !== undefined) {
+            const offer = parseTunnelOffer(rawTunnel);
+            if (
+              offer === null ||
+              this.#config.tunnel !== "auto" ||
+              !tunnelOfferCompatible(offer, this.#config.tunnelKeyMode)
+            ) {
+              // An unreliable DataChannel must never carry v1 frames. Refuse
+              // the attempt instead of silently downgrading.
+              this.#refuseTunnel(
+                offer === null ? "unsupported offer parameters" : "tunnel key mode mismatch",
+              );
+              return;
+            }
+            tunnelOffer = offer;
+          }
+          this.#startViewerPeer(message.from, tunnelOffer);
         }
         this.#peer?.handleSignal({ kind: message.kind, payload: message.payload });
         return;
       }
       case "transport": {
+        // Listener transport is fixed to the relay; ignore any update.
+        if (this.#listener) return;
         if (message.clientId !== this.#clientId) return;
         this.#handleTransportUpdate(message.mode, message.state, message.reason);
         return;
       }
-      case "peer-joined":
-      case "peer-left":
-      case "host":
-      case "presence":
       case "ice":
+        this.#iceManager.updateFromIce(message);
+        return;
       case "ice-refresh":
-      case "resync":
-      case "ack":
-      case "pause":
-      case "resume":
-      case "ping":
-      case "pong":
-      case "welcome":
-      case "hello":
-      case "resize":
+        this.#logger.debug("ice refresh requested");
+        return;
+      case "host": {
+        // A restarted host process resets its output sequence to 0. A listener
+        // that stayed connected across that restart would otherwise reject
+        // every new snapshot as stale (`seq < lastSeq`) and freeze on the old
+        // screen, so rebase on the next snapshot when a host comes online.
+        if (this.#listener && message.online) {
+          this.#logger.debug("host online; resetting listener snapshot sequence");
+          this.#reducer.reset();
+        }
+        return;
+      }
+      case "presence": {
+        // A viewer may attach before the host; presence is how the relay
+        // announces the host (and its display.fixed metadata) later.
+        const created = this.#prepareViewport(message.clients);
+        if (created && this.#screenActive) {
+          this.#enterScreen();
+        }
+        return;
+      }
       default:
         return;
     }
   }
 
-  #startViewerPeer(hostClientId: string): void {
-    if (this.#config.p2p === "off" || this.#closing) return;
+  #startViewerPeer(hostClientId: string, tunnelOffer: TunnelOfferParams | null): void {
+    if (this.#config.p2p === "off" || this.#closing || this.#listener) return;
     if (this.#peer !== null) return;
     const peer = new P2PPeer({
       label: `viewer:${hostClientId}`,
       role: "viewer",
-      rtcConfig: buildNodeRtcConfig(this.#iceServers, this.#iceTransportPolicy),
+      rtcConfig: buildNodeRtcConfig(this.#iceManager.current.servers, this.#iceTransportPolicy),
       logger: this.#logger,
       sendSignal: (kind, payload) => {
         this.#client?.sendControl({
@@ -404,17 +667,77 @@ class AttachSession {
         });
       },
       onFrame: (bytes) => this.#handleDcFrame(bytes),
-      onOpen: (info) => this.#handleP2POpen(info.mode, info.detail),
+      onOpen: (info) => this.#handleP2POpen(info.mode, info.detail, info.lan),
       onFailed: (reason) => this.#handleP2PFailure(reason),
       onClosed: (reason) => this.#handleP2PFailure(reason),
     });
     this.#peer = peer;
+    if (tunnelOffer !== null) {
+      // The host decides parity per link; this endpoint only sends parity when
+      // its local policy also allows it. Receiving peer parity always works.
+      const fec: TunnelFecMode =
+        tunnelOffer.fec === "xor" && this.#config.tunnelFec === "xor" ? "xor" : "none";
+      try {
+        this.#tunnel = new TunnelTransport({
+          role: "viewer",
+          sessionId: this.#config.session,
+          sessionToken: this.#config.sessionToken,
+          keyMode: this.#config.tunnelKeyMode,
+          secret: this.#config.tunnelSecret,
+          fec,
+          logger: this.#logger,
+          sendFrame: (bytes) => peer.send(bytes),
+          onFrame: (bytes) => this.#handleDcFrame(bytes, true),
+          onFailure: (reason) => this.#handleTunnelFailure(reason),
+        });
+        this.#tunnelFec = fec;
+        this.#logger.info(`tunnel negotiated (keyMode=${this.#config.tunnelKeyMode}, fec=${fec})`);
+      } catch (error) {
+        this.#logger.warn(`tunnel setup failed: ${formatError(error)}`);
+        this.#disposeP2P("tunnel setup failed");
+        this.#refuseTunnel("tunnel setup failed");
+        return;
+      }
+    }
     this.#logger.debug(`p2p answer path started for host ${hostClientId}`);
   }
 
-  #handleP2POpen(mode: TransportMode, detail: string): void {
+  /** Refuse an unreliable tunnel attempt and stay on the relay path. */
+  #refuseTunnel(reason: string): void {
+    this.#logger.warn(`tunnel offer refused (${reason}); staying on relay`);
+    try {
+      this.#client?.sendControl({
+        v: PROTOCOL_VERSION,
+        type: "transport",
+        clientId: this.#clientId,
+        mode: "relay",
+        state: "failed",
+        reason: reason.slice(0, 512),
+      });
+    } catch {
+      // best effort
+    }
+  }
+
+  #handleTunnelFailure(reason: string): void {
+    const stats = this.#tunnel?.stats;
+    if (stats !== undefined) {
+      this.#logger.debug(
+        `tunnel stats: sent=${stats.sentRecords} received=${stats.receivedRecords} ` +
+          `retransmits=${stats.retransmits} decryptFailures=${stats.decryptFailures} ` +
+          `fecGroups=${stats.fecGroupsSent} fecRecovered=${stats.fecRecovered} ` +
+          `fecDropped=${stats.fecParityDropped}`,
+      );
+    }
+    this.#handleP2PFailure(`tunnel: ${reason}`);
+  }
+
+  #handleP2POpen(mode: TransportMode, detail: string, lan: boolean): void {
+    this.#transportMode = mode;
+    this.#updateViewportStatus();
     this.#logger.debug(
-      `p2p data channel open (${mode}, ${detail}); waiting for host snapshot+switch`,
+      `p2p data channel open (${mode}, ${detail}, lan=${lan ? "yes" : "no"}); ` +
+        "waiting for host snapshot+switch",
     );
   }
 
@@ -426,7 +749,11 @@ class AttachSession {
         return;
       }
       this.#p2pReady = true;
-      this.#logger.info(`p2p transport ready: ${mode}`);
+      this.#logger.info(
+        this.#tunnel === null
+          ? `p2p transport ready: ${mode}`
+          : `p2p tunnel ready: ${mode} (fec=${this.#tunnelFec ?? "none"})`,
+      );
       this.#flushDcBuffer();
       return;
     }
@@ -454,20 +781,37 @@ class AttachSession {
   #disposeP2P(reason: string): void {
     const peer = this.#peer;
     this.#peer = null;
+    this.#tunnel?.dispose();
+    this.#tunnel = null;
+    this.#tunnelFec = null;
     this.#p2pReady = false;
     this.#p2pSnapshotSeen = false;
     this.#p2pBufferOverflow = false;
     this.#dcBuffer = [];
     this.#dcBufferBytes = 0;
+    this.#transportMode = "relay";
+    this.#updateViewportStatus();
     peer?.close(reason);
   }
 
-  #handleDcFrame(bytes: Uint8Array): void {
+  #handleDcFrame(bytes: Uint8Array, viaTunnel = false): void {
     let frame: ReturnType<typeof decodeFrame>;
     try {
       frame = decodeFrame(bytes);
     } catch (error) {
       this.#logger.debug(`invalid frame over p2p: ${formatError(error)}`);
+      return;
+    }
+    if (frame.type === "tunnel") {
+      if (viaTunnel) {
+        this.#logger.debug("ignoring nested tunnel frame");
+        return;
+      }
+      if (this.#tunnel === null) {
+        this.#logger.debug("ignoring tunnel frame without an active tunnel");
+        return;
+      }
+      this.#tunnel.receive(frame.payload);
       return;
     }
     if (frame.type !== "output") {
@@ -508,11 +852,19 @@ class AttachSession {
   #applyOutput(seq: number, payload: Uint8Array, viaRelay: boolean): void {
     const decision = this.#reducer.classify(seq);
     if (decision === "apply") {
-      this.#writeRaw(payload);
+      this.#writeTerminal(payload);
       if (viaRelay) this.#sendAck(seq);
     } else if (decision === "gap") {
       this.#requestResync();
     }
+  }
+
+  #writeTerminal(data: Uint8Array): void {
+    if (this.#viewport !== null) {
+      this.#viewport.write(data);
+      return;
+    }
+    this.#writeRaw(data);
   }
 
   #handleFrame(bytes: Uint8Array): void {
@@ -534,14 +886,21 @@ class AttachSession {
         return;
       case "snapshot":
         // Relay-targeted snapshots are delivered as SNAPSHOT_TO; the untargeted
-        // variant belongs to the P2P path (Phase 4).
+        // variant is only valid on the direct P2P DataChannel.
+        if (viaRelay) return;
+        this.#applySnapshot(frame.seq, frame.payload, false);
         return;
       case "output":
+        // Snapshot-only: a listener must never apply incremental output even
+        // if a relay bug or a stale server sends it.
+        if (this.#listener) return;
         this.#applyOutput(frame.seq, frame.payload, viaRelay);
         return;
       case "tunnel":
       case "tunnel_to":
-        this.#logger.debug("tunnel frames are not implemented in v1");
+        // Raw TUNNEL records are handled by the P2P tunnel endpoint; the relay
+        // never forwards them, so anything here is stale or out of contract.
+        this.#logger.debug("ignoring unhandled tunnel frame");
         return;
       default:
         return;
@@ -556,6 +915,9 @@ class AttachSession {
    * a healthy viewer is eventually dropped as a slow consumer.
    */
   #sendAck(seq: number): void {
+    // Listeners are outside the relay's ACK/backpressure accounting. A
+    // snapshot ACK from a listener would be rejected and must never be sent.
+    if (this.#listener) return;
     try {
       this.#client?.sendControl({ v: PROTOCOL_VERSION, type: "ack", seq: toU64String(seq) });
     } catch (error) {
@@ -564,28 +926,46 @@ class AttachSession {
   }
 
   #applySnapshot(seq: number, payload: Uint8Array, viaRelay: boolean): void {
-    this.#reducer.applySnapshot(seq);
-    this.#writeRaw(CLEAR_SCREEN);
-    if (payload.byteLength > 0) {
-      this.#writeRaw(payload);
+    const lastSeq = this.#reducer.lastSeq;
+    if (isStaleSnapshot(lastSeq, seq)) {
+      // A fallback/retry race can deliver an old DataChannel snapshot after a
+      // newer relay snapshot; never clear the screen or move the reducer back.
+      this.#logger.debug(`ignoring stale snapshot (seq=${seq}, lastSeq=${lastSeq})`);
+    } else {
+      this.#reducer.applySnapshot(seq);
+      if (this.#viewport !== null) {
+        this.#viewport.resetAndWriteSnapshot(payload);
+      } else {
+        this.#writeRaw(CLEAR_SCREEN);
+        if (payload.byteLength > 0) {
+          this.#writeRaw(payload);
+        }
+      }
+      this.#logger.debug(
+        `applied snapshot (seq=${seq}, bytes=${payload.byteLength}, ` +
+          `via=${viaRelay ? "relay" : "p2p"})`,
+      );
     }
-    this.#logger.debug(`applied snapshot (seq=${seq}, bytes=${payload.byteLength})`);
+
     if (viaRelay) {
-      // The snapshot supersedes every earlier relay byte for this viewer.
+      // The snapshot supersedes every earlier relay byte for this viewer, even
+      // when a stale snapshot payload was skipped.
       this.#sendAck(seq);
     }
 
     if (this.#peer !== null) {
-      // The host sends this snapshot over the relay immediately before
-      // announcing the P2P switch, so buffered DataChannel frames can now be
-      // applied in order after the snapshot boundary. If the switch control
-      // has not arrived yet, `#flushDcBuffer` waits for it.
+      // The switch snapshot is a boundary for buffered DataChannel frames even
+      // when the viewer already has newer state; `#flushDcBuffer` still waits
+      // for the host's `transport ready` if it has not arrived yet.
       this.#p2pSnapshotSeen = true;
       this.#flushDcBuffer();
     }
   }
 
   #requestResync(): void {
+    // Listeners recover from the host's next periodic snapshot; they never
+    // send resync requests.
+    if (this.#listener) return;
     const now = Date.now();
     if (now - this.#lastResyncAt < RESYNC_THROTTLE_MS) return;
     this.#lastResyncAt = now;
@@ -645,6 +1025,7 @@ class AttachSession {
     this.#disposeP2P("session closing");
     this.#client?.stop();
     this.#client = null;
+    this.#iceManager.dispose();
     this.#transport = null;
   }
 }

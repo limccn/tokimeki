@@ -23,7 +23,8 @@ uses `node-pty` and `node-datachannel` native modules.
 | `tokimeki claude [args...]` | Host the `claude` CLI in a PTY |
 | `tokimeki pi [args...]` | Host the `pi` CLI in a PTY |
 | `tokimeki run -- <cmd...>` | Host any command in a PTY (`--` protects flags) |
-| `tokimeki attach` | Attach to a hosted session |
+| `tokimeki attach` | Attach to a hosted session (shared control) |
+| `tokimeki attach --listen` | Attach as a read-only snapshot-only listener (v1.1) |
 | `tokimeki doctor` | Check config, PTY support, and relay reachability |
 
 `claude`/`pi` arguments are passed through. `tokimeki claude --help` runs the
@@ -46,12 +47,79 @@ On startup the host prints a banner:
 [tokimeki] session: <hostname>-<cwd-or-session>
 [tokimeki] relay: wss://relay.example.com
 [tokimeki] viewers: 0
-[tokimeki] session token (generated, save it): <session-token>
+[tokimeki] window: 120x40
+[tokimeki] viewer config (secret, copy as one line): {"version":1,"relayUrl":"wss://relay.example.com","session":"...","sessionToken":"...","window":{"cols":120,"rows":40}}
+[tokimeki] hint: press F12 to show this again
 ```
 
-If you set `TOKIMEKI_SESSION_TOKEN` yourself, the banner says it was provided
-instead of printing the value. The host owns the PTY; closing the host or
-pressing Ctrl-C in the hosted program ends the session.
+The viewer config line is the complete JSON envelope a viewer needs. Treat it
+as a secret. The host owns the PTY; closing the host or pressing Ctrl-C in the
+hosted program ends the session.
+
+### Viewer config and the F12 overlay
+
+`TOKIMEKI_CONFIG` accepts a JSON object (no YAML, no files written by the CLI).
+Fields map to the usual `TOKIMEKI_*` variables; explicit environment variables
+win, and empty environment placeholders do not erase config values.
+
+```powershell
+$env:TOKIMEKI_CONFIG='{"v":1,"relayUrl":"wss://relay.example.com","session":"demo","sessionToken":"...","window":{"cols":120,"rows":40}}'
+tokimeki attach
+```
+
+In the host's full-screen viewport, press **F12** to reopen the viewer config
+overlay after the startup banner has scrolled away. The overlay shows the
+session, relay, token, and exact config JSON. Press `c` to copy the exact JSON
+through OSC 52 (terminal-native clipboard), and F12 or Esc to close. Other keys
+are consumed while the overlay is open so they do not reach the TUI.
+
+- `TOKIMEKI_INVITE_KEY` selects the key: `f12` (default), `ctrl-]`, or `off`.
+- The overlay is host-side only and requires the full-screen viewport. Legacy
+  `TOKIMEKI_WINDOW=off` and headless hosts only have the startup banner.
+- `TOKIMEKI_CONFIG` and its mapped token fields are removed from the hosted
+  PTY environment; the config is never written to disk or uploaded to the
+  relay.
+
+If the banner has scrolled away and the overlay is disabled, there is no
+protocol-only way to recover the token: it exists only in the host process and
+the terminal output. Set `TOKIMEKI_SESSION_TOKEN` explicitly if you need a
+stable, externally supplied credential.
+
+### Fixed TUI window
+
+For commands listed in `TOKIMEKI_WINDOW_TUI` (default `claude,pi`), the host
+creates one session-level logical grid (`TOKIMEKI_WINDOW_SIZE`, default
+`120x40`). Viewer `resize` messages and local terminal resizes no longer change
+the hosted PTY; the TUI is not laid out again when someone attaches.
+
+The local terminal is split into:
+
+```text
+TUI viewport        (letterboxed when larger, cursor-following crop when smaller)
+debug log panel     (only with TOKIMEKI_LOG_LEVEL=debug, default 8 rows)
+status bar          (always the bottom row; no token)
+```
+
+`TOKIMEKI_WINDOW=off` restores the legacy raw/resize behavior. A headless host
+(stdout not a TTY) still keeps the PTY fixed; it just does not draw a local
+viewport.
+
+### Other TUI commands
+
+`TOKIMEKI_WINDOW_TUI` is also the dynamic subcommand allow-list:
+
+```bash
+export TOKIMEKI_WINDOW_TUI=claude,pi,omp
+tokimeki omp
+# equivalent: tokimeki run -- omp
+```
+
+Matching is by executable basename (case-insensitive; Windows `.exe/.cmd`
+suffixes are ignored). Unknown commands that are not listed are rejected with a
+usage error, so a typo never spawns anything implicitly. `claude`, `pi`, `run`,
+`attach`, `doctor`, and `help` always keep their built-in meaning, even if they
+appear in the list. `--help`/`-h`/`--version` for a listed command runs locally
+without relay configuration.
 
 Useful host variables:
 
@@ -63,13 +131,23 @@ Useful host variables:
 | `TOKIMEKI_SESSION_TOKEN` | generated | Per-session viewer token; generated value is printed once |
 | `TOKIMEKI_P2P` | `auto` | `off` forces the Worker relay |
 | `TOKIMEKI_ICE_TRANSPORT_POLICY` | `all` | `relay` restricts ICE to TURN (test/forced TURN) |
-| `TOKIMEKI_RESIZE_POLICY` | `latest` | `latest`, `min`, or `pinned` |
-| `TOKIMEKI_PTY_SIZE` | — | `<cols>x<rows>`, used with `pinned` |
+| `TOKIMEKI_RESIZE_POLICY` | `latest` | `latest`, `min`, or `pinned`; ignored when the fixed TUI window is active |
+| `TOKIMEKI_PTY_SIZE` | — | `<cols>x<rows>`; overrides `TOKIMEKI_WINDOW_SIZE` when set |
+| `TOKIMEKI_WINDOW` | `tui` | `tui`: use `TOKIMEKI_WINDOW_TUI`; `on`: every host command; `off`: legacy raw/resize behavior |
+| `TOKIMEKI_WINDOW_TUI` | `claude,pi` | Comma-separated command basenames that use the fixed TUI window; also enables `tokimeki <cmd>` |
+| `TOKIMEKI_WINDOW_SIZE` | `120x40` | Fixed logical TUI window; cannot be changed by viewers |
+| `TOKIMEKI_LOG_PANEL_ROWS` | `8` | Debug log panel rows (`0` disables); shown only at `TOKIMEKI_LOG_LEVEL=debug` |
+| `TOKIMEKI_INVITE_KEY` | `f12` | Host overlay key: `f12`, `ctrl-]`, or `off` |
+| `TOKIMEKI_CONFIG` | — | Optional JSON config envelope; maps fields to `TOKIMEKI_*` variables; explicit env wins; JSON only, never written to disk |
 | `TOKIMEKI_TERM` | `xterm-256color` | PTY TERM |
 | `TOKIMEKI_COLORTERM` | `truecolor` | PTY COLORTERM |
 | `TOKIMEKI_HEARTBEAT_SECONDS` | `25` | WebSocket heartbeat; `0` disables |
 | `TOKIMEKI_SCROLLBACK_LINES` | `1000` | Headless screen scrollback |
 | `TOKIMEKI_SNAPSHOT_MAX_BYTES` | `262144` | Snapshot size budget |
+| `TOKIMEKI_LISTENER_SNAPSHOT_MS` | `1000` | Read-only listener snapshot interval (250–60000 ms) |
+| `TOKIMEKI_TUNNEL` | `off` | `auto` runs the P2P-only AEAD/ARQ tunnel |
+| `TOKIMEKI_TUNNEL_FEC` | `off` | `xor` emits AEAD parity for single-loss recovery |
+| `TOKIMEKI_TUNNEL_SECRET` | — | Optional >=16-byte shared secret for relay-blind tunnel keys |
 | `TOKIMEKI_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
 
 ## Attach from another machine
@@ -86,17 +164,70 @@ Attach needs `TOKIMEKI_SESSION` and `TOKIMEKI_SESSION_TOKEN`; it does **not**
 need the relay master token. The viewer enters the alternate screen, applies
 the current snapshot, and forwards keyboard input.
 
+- **Config envelope:** the host's `viewer config` JSON can be passed as
+  `TOKIMEKI_CONFIG` instead of setting `TOKIMEKI_RELAY_URL`,
+  `TOKIMEKI_SESSION`, and `TOKIMEKI_SESSION_TOKEN` separately.
 - **Disconnect/reconnect:** the host PTY stays alive; a reconnecting viewer
   requests a fresh snapshot.
-- **Multiple viewers:** all viewers share control; resize follows
-  `TOKIMEKI_RESIZE_POLICY`.
+- **Multiple viewers:** all viewers share control. With a fixed TUI window,
+  attaching or resizing a viewer never changes the host PTY; each viewer only
+  changes its own local viewport.
+- **Fixed window discovery:** the viewer reads the host's
+  `capabilities.display.fixed` from `welcome.clients`. If present, it renders
+  the fixed grid through a local mirror with a bottom status bar (and a debug
+  log panel when enabled). Old hosts or old relays without that metadata fall
+  back to legacy raw rendering and the existing resize policy.
+- **Small terminals:** the viewport letterboxes the grid when the local
+  terminal is larger, and crops with cursor-following when it is smaller.
+  Mouse clicks are mapped from local coordinates into the logical grid.
 - **Exit:** Ctrl-C is forwarded to the hosted program; quitting the viewer
   restores the local terminal.
 - **P2P:** with `TOKIMEKI_P2P=auto` the viewer may switch to a WebRTC
-  DataChannel. If ICE fails (~12 s), it falls back to the relay.
+  DataChannel. Large P2P switch/resync snapshots use the DataChannel when both
+  peers advertise `transports.fragmentation`; otherwise they stay on the relay
+  `SNAPSHOT_TO` path.
+- **ICE refresh/retry:** clients refresh ICE credentials before `iceExpiresAt`.
+  If a not-yet-ready P2P attempt fails (~12 s), the host refreshes to the next
+  usable TURN provider once and renegotiates; a second failure stays on relay.
+- **LAN hint:** when both selected ICE candidates are loopback/private/link-local,
+  P2P debug logs include `lan=yes` (otherwise `lan=no`). The hint is diagnostic
+  only and does not change candidate selection or relay fallback.
+- **Adjacent-network optimization:** mDNS and peer fan-out are not implemented;
+  peer fan-out remains a design-only, default-off future item.
 - **TURN:** set `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` to require TURN; with no
   usable TURN the attempt times out and falls back to the relay. The CLI only
   uses TURN over UDP (libjuice).
+
+### Read-only listener (v1.1)
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.example.com
+export TOKIMEKI_SESSION=<host-session-name>
+export TOKIMEKI_SESSION_TOKEN=<session-token>
+
+tokimeki attach --listen
+```
+
+`--listen` connects with the `listener` role instead of `viewer`:
+
+- The host sends one full ANSI snapshot immediately and then every
+  `TOKIMEKI_LISTENER_SNAPSHOT_MS` (default 1000 ms; 250–60000 ms).
+- Local keyboard input is ignored. Ctrl-C stops only the local listener and is
+  never written to the hosted PTY.
+- The listener never sends input, resize, ACK, resync, or P2P signaling. It
+  does not affect viewer flow control or PTY sizing and never attempts P2P.
+- It receives only relay `SNAPSHOT_TO` (plus presence/host-exited); there is no
+  incremental output in this version.
+- If the relay predates v1.1 listener support, the CLI prints an actionable
+  `not_implemented` error and exits non-zero instead of falling back to a
+  shared-control viewer.
+- Relay operators can cap concurrent listeners with
+  `TOKIMEKI_MAX_LISTENERS` (default 8; listeners also count toward
+  `TOKIMEKI_MAX_CLIENTS_PER_SESSION`).
+- Mixed versions: a v1.1 relay with a pre-v1.1 host still delivers snapshots
+  (the old host treats the listener as a viewer), but the old host may attempt
+  P2P signaling that the relay rejects. Upgrade the host to v1.1 for clean
+  listener handling.
 
 ## Doctor
 
@@ -120,14 +251,55 @@ configuration. It prints actionable warnings for missing/conflicting values.
 ## P2P / TURN / relay selection
 
 1. `TOKIMEKI_P2P=off` — Worker relay only.
-2. `auto` — attempt WebRTC per viewer; if ICE cannot connect within ~12 s,
-   resume relay output and request a fresh snapshot.
+2. `auto` — attempt WebRTC per viewer; if a not-yet-ready attempt fails within
+   ~12 s, refresh to the next usable TURN provider once and retry, then resume
+   relay output and request a fresh snapshot.
 3. `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` — force TURN candidates for testing;
    no usable TURN means timeout + relay fallback.
 4. Relay fallback is always available; control/signaling always use the relay.
 
-Logs go to stderr and redact known tokens. Use `TOKIMEKI_LOG_LEVEL=debug` when
-diagnosing connection issues.
+## TUN profile (v1.1, opt-in)
+
+`TOKIMEKI_TUNNEL=auto` adds an application-layer tunnel for terminal bytes on
+top of an unreliable/unordered WebRTC DataChannel:
+
+- The host creates the unordered DataChannel only after the viewer advertises
+  the exact `tunnel` capability (`version:1`, `arq:"selective-repeat"`,
+  `crypto:"aes-256-gcm"`, matching `keyMode`, `maxFrameSize:16339`).
+- Records use AES-256-GCM with HKDF direction keys, selective-repeat ARQ
+  (window 64), and a bounded retransmission budget. Control messages,
+  snapshots, resize, signaling, and relay ACK flow-control stay on their
+  existing v1 paths.
+- `TOKIMEKI_TUNNEL=off` (default) keeps the v1 reliable DataChannel behavior.
+  A tunnel mismatch or failure falls back to the relay and requests a fresh
+  snapshot; the PTY/TUI session is not terminated.
+- `keyMode` is `session-token` by default. The relay has seen the session
+  token and can derive those keys, so this mode is transport hardening only,
+  **not** end-to-end encryption. Setting `TOKIMEKI_TUNNEL_SECRET` switches to
+  `shared-secret`; the relay cannot derive those keys, so only that mode may
+  be described as relay-blind.
+- `TOKIMEKI_TUNNEL_SECRET` must be shared out of band between host and viewer.
+  It is scrubbed from the hosted PTY environment and redacted from logs. A
+  missing secret on one end prevents negotiation (keyMode mismatch) and the
+  session stays on the relay. If the values differ while both ends use
+  `shared-secret`, the tunnel is negotiated but AEAD authentication fails;
+  after the failure threshold it falls back to the relay and requests a fresh
+  snapshot.
+- `TOKIMEKI_TUNNEL_FEC=xor` (default `off`) emits one AEAD parity record per
+  full group of eight data records. The receiver can rebuild exactly one lost
+  record; lost parity or multiple losses stay on ARQ. Both peers advertise
+  `fec: ["none", "xor"]`; the host offers `xor` only when the peer advertises
+  it, otherwise the link keeps the plain F1 dialect. Incoming parity is always
+  understood, even when the local sender policy is `off`. FEC does not change
+  the ARQ/relay fallback guarantees.
+- The relay never forwards `TUNNEL` frames; it still returns
+  `not_implemented`. TUN is P2P-only in this release.
+
+Logs redact known tokens. When a fixed viewport owns the screen,
+`TOKIMEKI_LOG_LEVEL=debug` routes logs to the bottom panel
+(`TOKIMEKI_LOG_PANEL_ROWS`, default 8); non-debug logs are buffered and written
+back to stderr after the viewport exits. Legacy/non-TTY sessions keep the
+existing stderr behavior.
 
 ## Troubleshooting
 
@@ -136,7 +308,14 @@ diagnosing connection issues.
 | `401 unauthorized` | `TOKIMEKI_MASTER_TOKEN` matches the relay secret; host/session tokens differ |
 | `host_offline` | Host is connected to the same relay/session and still running |
 | `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
+| Viewer shows only part of the TUI | Local terminal is smaller than `TOKIMEKI_WINDOW_SIZE`; enlarge it or set a smaller fixed size at host start. The status bar shows `view:WxH@x,y` and the camera follows the TUI cursor |
+| F12 does not open the viewer config | The overlay needs the full-screen host viewport (`TOKIMEKI_WINDOW=off` and headless hosts do not have it). Try `TOKIMEKI_INVITE_KEY=ctrl-]` if the terminal intercepts F12 |
+| `TOKIMEKI_CONFIG` is ignored | It must be valid JSON; explicit non-empty `TOKIMEKI_*` env vars override its fields |
+| Fixed window never activates | Relay must echo `capabilities` in `welcome.clients`; upgrade/redeploy the relay. Old relays fall back to legacy rendering |
+| `tokimeki omp` says unknown command | Add `omp` to `TOKIMEKI_WINDOW_TUI` or use `tokimeki run -- omp` |
 | P2P never opens | Corporate UDP firewall; try TURN or `TOKIMEKI_P2P=off` |
+| Tunnel never activates | Both ends need `TOKIMEKI_TUNNEL=auto`, P2P enabled, and the same key mode (`TOKIMEKI_TUNNEL_SECRET` present on both or absent on both) |
+| Tunnel falls back to relay | Check debug logs for `tunnel unavailable`; a wrong shared secret, high loss, or oversized frames cause fallback |
 | TURN attempt takes ~12 s | Expected when TURN is unreachable; relay takes over |
 | Garbled screen after reconnect | Enable `debug` logs and file an issue with the terminal/OS details |
 | Local terminal not restored | Run `reset`; report the terminal emulator and OS |
