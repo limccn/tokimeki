@@ -84,12 +84,14 @@ describe("buildChildEnvironment", () => {
         Path: "C:\\Windows",
         Tokimeki_Master_Token: "master-secret",
         tokimeki_session_token: "session-secret",
+        Tokimeki_Tunnel_Secret: "tunnel-secret",
         Tokimeki_Turn_Api_Token: "turn-api-token",
         ssh_connection: "1 2 3 4",
       },
     });
     expect(env.Tokimeki_Master_Token).toBeUndefined();
     expect(env.tokimeki_session_token).toBeUndefined();
+    expect(env.Tokimeki_Tunnel_Secret).toBeUndefined();
     expect(env.Tokimeki_Turn_Api_Token).toBeUndefined();
     expect(env.ssh_connection).toBeUndefined();
     expect(env.Path).toBe("C:\\Windows");

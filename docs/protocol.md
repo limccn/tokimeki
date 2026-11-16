@@ -2,9 +2,11 @@
 
 > 状态：v1 实现完成（Phase 6）；v1.1 F0 已在 v1 基线上实现（`FRAGMENT 0x08`、
 > P2P 直发快照、ICE 到期自动刷新、provider 重试一次），v1.1 F2 已实现只读
-> `listener`（snapshot-only）角色；单测与 relay 测试通过。
+> `listener`（snapshot-only）角色；v1.1 F1 已实现 P2P-only TUN profile
+> （AES-256-GCM + selective-repeat ARQ，XOR FEC 在本版暂缓）；单测、relay
+> 测试与本地 live e2e（session-token 与 shared-secret）通过。
 > 生产部署、跨 NAT/TURN 与真实 TUI 的验收记录见 `docs/deployment.md` §7；wire
-> `v` 仍为 1，F0/F2 新增项是 capability-gated 可选扩展。
+> `v` 仍为 1，F0/F1/F2 新增项是 capability-gated 可选扩展。
 > 规范性实现：`packages/protocol`；语言无关向量：`packages/protocol/test/vectors/`。
 > 本文描述的是线上格式，不是 Node/TypeScript 实现细节。v2 Go/Rust 实现必须能仅凭本文与 golden vectors 互通。
 
@@ -16,8 +18,11 @@
 - v1.1 F2 可选扩展：`listener` 角色（只读、snapshot-only）与 `listener.modes: ["snapshot-only"]`
   capability。旧于 v1.1 的 relay 收到 `listener` hello 仍返回 `not_implemented`；v1.1
   客户端必须明确报错退出，不得静默降级为 viewer。
-- v1 只定义、不实现：`TUNNEL`/`TUNNEL_TO` 应用层隧道、`tunnel`/`peerRelay`
-  capabilities、Agent 运行时。收到这些预留项时返回 `not_implemented`。
+- v1.1 F1 可选扩展：`tunnel` capability 与 `TUNNEL 0x06` 内层 AEAD/ARQ 记录。F1
+  首版只在 P2P unreliable/unordered DataChannel 上运行；relay 数据路径保持 v1 帧
+  与流控，收到 `TUNNEL`/`TUNNEL_TO` 仍返回 `not_implemented`。未协商时保持 v1 行为。
+- v1 只定义、不实现：`TUNNEL_TO` 应用层隧道定向投递、`tunnel`/`peerRelay`
+  capabilities 的 relay 行为、Agent 运行时。收到 `TUNNEL_TO` 时返回 `not_implemented`。
 - 破坏性变更必须提升 `v`。向后兼容的新增字段可以保留 `v: 1`；旧实现必须忽略未知字段。
 - 线上格式只使用：字节、UTF-8、大端 `u64`、JSON。不得出现 Node `Buffer`、TypeScript 特有类型或平台相关序列化。
 
@@ -50,7 +55,7 @@
 | `SNAPSHOT` | `0x03` | host → viewer（P2P 直发） | `[0x03][seq:u64BE][ANSI snapshot...]` |
 | `RESYNC_REQ` | `0x04` | viewer → host | `[0x04]` |
 | `SNAPSHOT_TO` | `0x05` | host → relay → 指定 viewer 或 listener | `[0x05][targetLen:u8][targetId UTF-8][seq:u64BE][ANSI snapshot...]` |
-| `TUNNEL` | `0x06` | 预留 v1.1 | `[0x06][opaque tunnel record...]` |
+| `TUNNEL` | `0x06` | v1.1 F1 P2P host↔viewer（relay 不转发） | `[0x06][TUN record...]` |
 | `TUNNEL_TO` | `0x07` | 预留 v1.1 | `[0x07][targetLen:u8][targetId UTF-8][opaque tunnel record...]` |
 | `FRAGMENT` | `0x08` | P2P 双向（F0 仅 host → viewer） | `[0x08][messageId:u32BE][fragIndex:u16BE][fragCount:u16BE][totalBytes:u32BE][chunk...]` |
 
@@ -65,7 +70,7 @@
 - `SNAPSHOT_TO` 的 target 可以是 relay viewer，也可以是只读 listener。viewer 的快照进入 ACK/背压路径；listener 的快照不产生 ACK、不改变 `unackedBytes`/`droppedBytes`，只会被下一次周期快照覆盖。
 - `FRAGMENT` header 固定 13 字节：`messageId` 为非 0 u32；`fragIndex` 从 0 开始；`fragCount` 为 1..65 且必须等于 `ceil(totalBytes / 16371)`；`totalBytes` 是原始完整帧长度（包含原帧 type byte），范围 1..1 MiB；除最后一片外每片 payload 恰好 16371 字节，最后一片为余数。重组后的帧不得仍是 `FRAGMENT`（禁止嵌套）。
 - `FRAGMENT` 只允许在已协商分片的 P2P DataChannel 上发送；relay 收到时返回 `invalid_frame`，不得转发。
-- `TUNNEL`/`TUNNEL_TO` 在 v1 必须能被识别和路由，但不得执行任何隧道行为；收到时返回 `error{code:"not_implemented"}`，不得静默丢弃或转发。
+- `TUNNEL`/`TUNNEL_TO` 在 v1 必须能被识别和路由，但不得执行任何隧道行为；收到时返回 `error{code:"not_implemented"}`，不得静默丢弃或转发。v1.1 F1 的 `TUNNEL` 只在已协商 tunnel capability 的 P2P DataChannel 上承载内层记录（见 §7.4）；relay 路径仍返回 `not_implemented`。
 - `0x09..0xFF` 在 v1 未定义。实现返回 `unknown_frame_type`；relay 可映射为 `error{code:"invalid_frame"}` 并按策略关闭连接。
 
 ### 3.2 边界行为
@@ -164,7 +169,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `protocolVersion` | number | 可选 |
 | `transports` | `modes: string[]`, `fragmentation?` | v1 使用 `modes`；v1.1 F0 使用 `fragmentation: {version, maxFrameBytes, maxMessageBytes}` |
 | `snapshot` | `formats: string[]`, `maxBytes` | v1 使用；预期格式含 `xterm-serialize`、`raw-ring` |
-| `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `maxFrameSize` | v1.1 预留，v1 只透传/忽略 |
+| `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `keyMode`, `maxFrameSize` | v1.1 F1 使用 `version:1`、`arq:"selective-repeat"`、`crypto:"aes-256-gcm"`、`keyMode:"session-token"\|"shared-secret"`、`maxFrameSize:16339`；`fec:["none"]`（XOR 暂缓） |
 | `listener` | `modes: string[]` | v1.1 F2 使用 `snapshot-only`；`safe-boundary` 仍预留 |
 | `peerRelay` | `version`, `roles: string[]` | v1.1 预留 |
 
@@ -348,6 +353,112 @@ viewer                     relay / DO                         host
 5. 失败、12 秒 ICE 超时或 DataChannel 关闭时，host 或 viewer 发送 `transport{mode:"relay", state:"failed", reason}`；host 关闭 PeerConnection、恢复 relay 输出并重新发送快照，viewer 恢复 relay 输入。若 host 侧 link 尚未 ready，v1.1 F0 最多再用下一个可用 ICE provider 重试一次；无可用配置或再次失败则保持 relay。relay 对已 `p2p ready` 的 viewer 抑制 `OUTPUT`，避免双路径重复。
 6. 控制信令、presence、ICE 配置与快照始终走 DO WebSocket，确保 P2P 失败时可立即降级。
 
+### 7.4 TUN 隧道（v1.1 F1）
+
+TUN profile 是可选、P2P-only 的终端字节流隧道：在 unreliable/unordered
+DataChannel 上用 selective-repeat ARQ + AES-256-GCM 承载完整的 `INPUT`/`OUTPUT`
+帧。控制消息、快照、resize、signal 与 relay ACK 流控仍走各自 v1 路径；relay
+不转发 `TUNNEL`，收到时仍返回 `not_implemented`。
+
+**开关与协商**
+
+- `TOKIMEKI_TUNNEL=off`（默认）时不声明 `tunnel` capability，DataChannel 保持
+  reliable/ordered，行为与 v1/F0/F2 一致。
+- `TOKIMEKI_TUNNEL=auto` 时双方在 hello/peer-joined 中声明：
+
+  ```json
+  "tunnel": {
+    "version": 1,
+    "arq": "selective-repeat",
+    "fec": ["none"],
+    "crypto": "aes-256-gcm",
+    "keyMode": "session-token",
+    "maxFrameSize": 16339
+  }
+  ```
+
+- `fec` 首版只声明 `["none"]`；`TOKIMEKI_TUNNEL_FEC=xor` 被识别但降级为无 FEC
+  并记录警告。XOR FEC 不影响 ARQ 正确性，留待 F1.1。
+- host 只有在 viewer 的 capability 与本地 `version`/`arq`/`crypto`/`keyMode`/
+  `maxFrameSize` 完全兼容时，才创建 `unordered:true, maxRetransmits:0` 的
+  DataChannel，并在 `offer` signal payload 中加入：
+
+  ```json
+  "tunnel": { "version": 1, "keyMode": "session-token", "fec": "none", "initialSeq": 0 }
+  ```
+
+- viewer 校验 offer 参数；`TOKIMEKI_TUNNEL=off`、keyMode 不匹配或参数未知时
+  必须拒绝该次 P2P，并发送 `transport{mode:"relay",state:"failed"}`，绝不能在
+  unreliable channel 上运行 v1 帧。
+- P2P 失败、ARQ 超预算、AEAD 连续失败或 keyMode 不一致时回退 relay：host 发送
+  `transport relay failed` 并重新 `SNAPSHOT_TO`，viewer 恢复 relay 输入。
+  tunnel 不自动重试；provider retry 仍只作用于 P2P 协商。
+
+**密钥派生**
+
+```text
+ikm  = TOKIMEKI_TUNNEL_SECRET ?? sessionToken
+prk  = HKDF-Extract(salt = UTF-8(sessionId), ikm)
+h2v  = HKDF-Expand(prk, "tokimeki-tunnel-v1/host-to-viewer", 32)
+v2h  = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
+```
+
+- `keyMode="session-token"` 时 relay 在握手时见过 session token，可以推导密钥；
+  该模式只作传输加固，**不得**宣称 relay-blind/E2E。
+- 设置 `TOKIMEKI_TUNNEL_SECRET`（>=16 UTF-8 字节）时 `keyMode="shared-secret"`；
+  relay 不持有该 secret，只有 secret 带外共享且未泄漏时才可宣称 relay-blind。
+- 两端 keyMode 不一致时不得建立隧道，回退 v1。
+
+**内层记录（`TUNNEL` 0x06 payload）**
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 1 | version (`1`) |
+| 1 | 1 | type (`1=data`, `2=ack`, `3=fec`, `4=ping`) |
+| 2 | 1 | flags（bit0 = FEC parity；首版为 0） |
+| 3 | 1 | reserved (`0`) |
+| 4 | 4 | seq u32BE |
+| 8 | 4 | ackSeq u32BE（next expected；ACK/data 使用） |
+| 12 | 4 | ackBits u32BE（selective ACK，`ackSeq+1..ackSeq+32`） |
+| 16 | 12 | nonce（96-bit） |
+| 28 | N | ciphertext + 16-byte GCM tag |
+
+- `seq` 在 data 方向是 ARQ 数据序号；ACK 记录使用独立的 control 序号空间，避免
+  与数据序号冲突。`ackSeq`/`ackBits` 始终引用对端 data 序号。
+- 明文 payload 是一条完整终端帧（`INPUT` 或 `OUTPUT` 字节，包含帧类型字节）。
+  `TUNNEL_MAX_FRAME_BYTES = 16384 - 1 - 28 - 16 = 16339`；tunnel 启用时 host
+  把 OUTPUT payload 限制为 `16339 - 9 = 16330`，viewer 把 INPUT payload 限制为
+  `16339 - 1 = 16338`，以保证整帧落在一条 DataChannel 消息内。
+- AAD（大端）：
+
+  ```text
+  [version u8][type u8][flags u8][direction u8]
+  [seq u32BE][ackSeq u32BE][ackBits u32BE][sessionId UTF-8]
+  ```
+
+  `direction` 为 1（host→viewer）或 2（viewer→host）。方向与会话绑定阻止反射
+  与跨会话替换。
+- AES-256-GCM 使用随机 96-bit nonce 与 16-byte tag。AEAD 失败、未知版本/类型、
+  错误方向或超大记录一律丢弃并计数；连续 16 条失败后隧道失败并回退 relay。
+- 重放：data 序号低于 `nextExpected - 1024` 的记录直接丢弃；窗口内重复记录
+  不重复交付，但重新 ACK，避免 ACK 丢失导致发送端卡死。
+
+**ARQ**
+
+- selective-repeat，发送窗口 64（硬上限 256），未确认字节上限 1 MiB。
+- `ackSeq` 累积确认所有 `< ackSeq` 的 data 记录；`ackBits` bit `i` 确认
+  `ackSeq + 1 + i`。
+- 初始 RTO 200 ms，指数退避到 5 s；单记录最多重传 8 次或 10 s 总龄，超过即
+  隧道失败。
+- 接收端乱序缓冲上限 256 条 / 1 MiB / 10 s；超限或超时即失败。
+- ACK 记录本身不进入 ARQ 队列，也不被 ACK；ACK 丢失由数据重传触发重复 ACK。
+- 隧道失败只影响数据面：host 重新快照、viewer 恢复 relay，PTY/TUI 会话不退出。
+
+**FEC**
+
+首版只实现 `none`。capability 不得声明 `xor`，直到 XOR parity 的 wire layout
+被冻结并有单元/e2e 覆盖。
+
 ## 8. 错误码与关闭码
 
 ### 8.1 `error.code`
@@ -443,9 +554,9 @@ Envelope：
 
 以下内容在 v1 只保留名称/号码，不实现行为：
 
-1. **应用层隧道**：`TUNNEL 0x06`、`TUNNEL_TO 0x07` 以及 `0x09..0x7F` 扩展区间。`0x08` 已在 v1.1 F0 分配给 `FRAGMENT`（capability-gated P2P 分片，relay 拒绝）。v1 relay 对 0x06/0x07 返回 `not_implemented`；其他未知字节按 `unknown_frame_type` 处理。v1.1 才会冻结 ARQ/FEC/AEAD 布局、`txSeq`/`streamSeq` 与密钥威胁模型。
+1. **应用层隧道**：`TUNNEL 0x06`、`TUNNEL_TO 0x07` 以及 `0x09..0x7F` 扩展区间。`0x08` 已在 v1.1 F0 分配给 `FRAGMENT`（capability-gated P2P 分片，relay 拒绝）。v1.1 F1 的 `TUNNEL 0x06` 已用于 P2P-only 内层 AEAD/ARQ 记录（§7.4）；relay 仍返回 `not_implemented`，`TUNNEL_TO` 仍预留。v1 relay 对 0x06/0x07 返回 `not_implemented`；其他未知字节按 `unknown_frame_type` 处理。ARQ/FEC/AEAD 的跨语言 wire 方言由本文与 golden vectors 冻结；OS TUN/VPN、文件传输、任意 IP 不属于 TUN profile。
 2. **listener 角色**：v1.1 F2 已激活 `hello.role = "listener"`（只读、snapshot-only、不参与 resize/输入/ack/背压/P2P）。更早的 v1 relay 返回 `not_implemented`。`safe-boundary`、listener 增量输出与 listener P2P 仍预留。
-3. **Capabilities**：`tunnel`、`peerRelay` 预留；`transports`、`snapshot`、`listener`（`snapshot-only`）在 v1.1 可用；`transports.fragmentation` 在 v1.1 F0 可用（仅 P2P 大帧分片/直发快照）。未知 capability 必须忽略，不能拒绝连接。
+3. **Capabilities**：`peerRelay` 预留；`tunnel` 在 v1.1 F1 可用（P2P-only、`fec:["none"]`）；`transports`、`snapshot`、`listener`（`snapshot-only`）在 v1.1 可用；`transports.fragmentation` 在 v1.1 F0 可用（仅 P2P 大帧分片/直发快照）。未知 capability 必须忽略，不能拒绝连接。
 4. **transport.via**：`host`、`peer:<id>`、`relay` 预留，v1 可忽略。
 5. v1.1 新增控制消息（如 `tunnel.*`、`listener.*`）时，v1 relay 应识别预留命名空间并返回 `not_implemented`，而不是静默丢弃。
 
@@ -457,6 +568,7 @@ Envelope：
 |---|---|
 | `constants.json` | 版本、帧类型值、角色、传输模式、provider、resize policy、错误码、关闭码、限制、正则 |
 | `frames.json` | 每种二进制帧至少一个合法 hex（含 v1.1 `FRAGMENT`）；含空 payload、u64 最大安全值、64 字节 target、非法 fragment header 等边界；`invalid` 数组给出错误码 |
+| `tunnel-records.json` | v1.1 F1 内层记录固定 layout + AEAD AAD 向量（无真实密钥）；`invalid` 数组给出 `invalid_frame` 边界 |
 | `control-messages.json` | 全部 19 种 v1 控制消息（含 v1.1 listener hello 与带 `role` 的 `peer-joined`）+ 未知 `agent.*` + `not_implemented` 回复 |
 | `handshake.json` | hello → welcome → ice-refresh → ice 的完整 transcript |
 
@@ -484,5 +596,6 @@ npm test -- packages/protocol
 - 终端数据依赖传输层加密（WSS/WebRTC DTLS）；v1 不提供应用层 E2E 加密。v1.1 隧道密钥模型未定，默认不得宣称 relay-blind。
 - v1.1 F0 使用 capability-gated `FRAGMENT 0x08` 与 P2P `SNAPSHOT`；未声明分片的 v1 peer 仍走 relay 快照，不会收到 fragment。新增帧类型/可选字段保持 `v: 1`；删除字段、改变既有帧布局或语义才提升主版本。
 - v1.1 F2 将 `listener` 激活为只读 snapshot-only 角色，并新增可选 `peer-joined.role`。未带 `role` 的旧 `peer-joined` 按 viewer 处理；旧 relay 对 listener 返回 `not_implemented`，v1.1 客户端必须报错而非降级。v1.1 relay + pre-v1.1 host 时，host 会把 listener 当 viewer 处理并可能尝试被 relay 拒绝的 P2P 信令；完整 listener 服务需要 v1.1 host。新增可选字段/角色保持 `v: 1`。
+- v1.1 F1 增加 capability-gated `tunnel` 与 P2P-only `TUNNEL 0x06` 内层记录。未声明/不匹配的 peer 不建立隧道，继续 v1 P2P/relay；relay 永不转发 TUNNEL。session-token keyMode 可被 relay 推导，只有 shared-secret 模式可声明 relay-blind。新增可选 capability/帧内层保持 `v: 1`。
 - token、TURN secret、credential、终端内容不得进入日志、错误消息、URL 或 `hello`。
 - 所有长度限制以字节计（UTF-8），除非明确写为字符。

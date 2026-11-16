@@ -111,6 +111,10 @@ describe("loadHostConfig", () => {
     expect(config.resizePolicy).toBe("latest");
     expect(config.p2p).toBe("auto");
     expect(config.iceTransportPolicy).toBe("all");
+    expect(config.tunnel).toBe("off");
+    expect(config.tunnelFec).toBe("off");
+    expect(config.tunnelKeyMode).toBe("session-token");
+    expect(config.tunnelSecret).toBeNull();
     expect(config.piTuiMode).toBe("fullscreen");
     expect(config.ptySize).toBeNull();
     expect(config.claudeBg).toBe(false);
@@ -259,19 +263,18 @@ describe("loadAttachConfig", () => {
 describe("v1.1 environment variables", () => {
   it("emits a single warning with names but never values", () => {
     const warnings = collectV11Warnings({
-      TOKIMEKI_TUNNEL_SECRET: "supersecret",
+      TOKIMEKI_ROUTE_POLICY: "lan",
       TOKIMEKI_LAN_DISCOVERY: "1",
     });
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("TOKIMEKI_TUNNEL_SECRET");
+    expect(warnings[0]).toContain("TOKIMEKI_ROUTE_POLICY");
     expect(warnings[0]).toContain("TOKIMEKI_LAN_DISCOVERY");
-    expect(warnings[0]).not.toContain("supersecret");
     expect(warnings[0]).toContain("not implemented");
   });
 
   it("adds the warning through host and attach configs", () => {
     const host = loadHostConfig({
-      env: baseHostEnv({ TOKIMEKI_TUNNEL: "1" }),
+      env: baseHostEnv({ TOKIMEKI_ROUTE_POLICY: "lan" }),
     });
     expect(host.warnings).toHaveLength(1);
 
@@ -282,6 +285,91 @@ describe("v1.1 environment variables", () => {
       TOKIMEKI_VIEW_MODE: "auto",
     });
     expect(attach.warnings).toHaveLength(1);
+  });
+});
+
+describe("tunnel configuration", () => {
+  it("defaults to off and session-token mode", () => {
+    const config = loadHostConfig({ env: baseHostEnv() });
+    expect(config.tunnel).toBe("off");
+    expect(config.tunnelKeyMode).toBe("session-token");
+    expect(config.tunnelSecret).toBeNull();
+    expect(config.tunnelFec).toBe("off");
+  });
+
+  it("enables auto and switches to shared-secret when a secret is configured", () => {
+    const secret = "1234567890abcdef";
+    const config = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_TUNNEL: "auto",
+        TOKIMEKI_TUNNEL_SECRET: secret,
+      }),
+    });
+    expect(config.tunnel).toBe("auto");
+    expect(config.tunnelKeyMode).toBe("shared-secret");
+    expect(config.tunnelSecret).toBe(secret);
+    expect(config.secrets).toContain(secret);
+  });
+
+  it("rejects a short tunnel secret only when the tunnel is enabled", () => {
+    expect(() =>
+      loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_SECRET: "short" }),
+      }),
+    ).toThrow(/at least 16 bytes/);
+    expect(() =>
+      loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL_SECRET: "short" }),
+      }),
+    ).not.toThrow();
+  });
+
+  it("never echoes a bad secret value in the error message", () => {
+    try {
+      loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_SECRET: "leaky-secret" }),
+      });
+    } catch (error) {
+      expect((error as Error).message).not.toContain("leaky-secret");
+      return;
+    }
+    throw new Error("expected ConfigError");
+  });
+
+  it("normalizes the deferred XOR FEC request with a warning", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_TUNNEL_FEC: "xor" }),
+    });
+    expect(config.tunnelFec).toBe("off");
+    expect(config.warnings.some((warning) => warning.includes("XOR FEC is deferred"))).toBe(true);
+  });
+
+  it("rejects unknown tunnel modes and FEC values", () => {
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_TUNNEL: "on" }) })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadHostConfig({ env: baseHostEnv({ TOKIMEKI_TUNNEL_FEC: "rs" }) })).toThrow(
+      ConfigError,
+    );
+  });
+
+  it("warns when auto is requested without P2P or with a listener", () => {
+    const noP2p = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_TUNNEL: "auto", TOKIMEKI_P2P: "off" }),
+    });
+    expect(noP2p.warnings.some((warning) => warning.includes("requires P2P"))).toBe(true);
+
+    const listener = loadAttachConfig(
+      {
+        TOKIMEKI_RELAY_URL: "https://relay.example",
+        TOKIMEKI_SESSION: "sess-1",
+        TOKIMEKI_SESSION_TOKEN: "token-1234",
+        TOKIMEKI_TUNNEL: "auto",
+      },
+      { listener: true },
+    );
+    expect(listener.warnings.some((warning) => warning.includes("read-only listeners"))).toBe(true);
+    expect(listener.tunnel).toBe("auto");
   });
 });
 

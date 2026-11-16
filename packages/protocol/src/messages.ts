@@ -39,6 +39,8 @@ export const TunnelCapabilitySchema = z.looseObject({
   fec: z.array(z.string().min(1)).optional(),
   /** Expected v1.1 value: `aes-256-gcm`. */
   crypto: z.string().min(1).optional(),
+  /** v1.1: `session-token` (default) or `shared-secret`. */
+  keyMode: z.string().min(1).optional(),
   maxFrameSize: z.number().int().positive().optional(),
 });
 

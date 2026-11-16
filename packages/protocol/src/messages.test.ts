@@ -108,6 +108,7 @@ describe("hello and welcome", () => {
           arq: "future-arq",
           fec: ["xor", "future-fec"],
           crypto: "future-aead",
+          keyMode: "shared-secret",
           maxFrameSize: 9000,
         },
         listener: { modes: ["snapshot-only"] },
@@ -122,7 +123,7 @@ describe("hello and welcome", () => {
     expect(parsed.protocolVersion).toBe(1);
     expect(parsed.capabilities).toMatchObject({
       transports: { modes: ["p2p-direct", "relay"] },
-      tunnel: { arq: "future-arq" },
+      tunnel: { arq: "future-arq", keyMode: "shared-secret" },
     });
 
     const encoded = JSON.parse(encodeControlMessage(parsed)) as Record<string, unknown>;

@@ -36,6 +36,12 @@ import { RelayClient, type RelayClientOptions } from "../transport/relay-client.
 import { RelayTransport } from "../transport/relay-transport.js";
 import type { RelayConnectionState, RelayFatalError } from "../transport/relay-types.js";
 import { RouteSelector } from "../transport/route-selector.js";
+import {
+  parseTunnelOffer,
+  type TunnelOfferParams,
+  tunnelOfferCompatible,
+} from "../transport/tunnel/capability.js";
+import { TunnelTransport } from "../transport/tunnel/tunnel-transport.js";
 import type { Transport } from "../transport/types.js";
 import { isStaleSnapshot, SeqReducer } from "./seq-reducer.js";
 
@@ -62,6 +68,12 @@ interface BufferedOutput {
 
 type SizedWriteStream = NodeJS.WriteStream & { columns?: number; rows?: number; fd?: number };
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 export async function runAttachSession(
   config: AttachConfig,
   deps: AttachSessionDeps,
@@ -87,6 +99,7 @@ class AttachSession {
   readonly #iceManager: IceConfigManager;
   #iceTransportPolicy: IceTransportPolicy;
   #peer: P2PPeer | null = null;
+  #tunnel: TunnelTransport | null = null;
   #p2pReady = false;
   #p2pSnapshotSeen = false;
   #p2pBufferOverflow = false;
@@ -154,6 +167,9 @@ class AttachSession {
       capabilities: buildCapabilities({
         p2p: this.#config.p2p === "auto" && !this.#listener,
         listener: this.#listener,
+        ...(this.#config.tunnel === "auto" && !this.#listener
+          ? { tunnelKeyMode: this.#config.tunnelKeyMode }
+          : {}),
       }),
       logger: this.#logger,
     };
@@ -214,13 +230,19 @@ class AttachSession {
         return;
       }
       try {
-        const frame = encodeFrame({ type: "input", payload: data });
         // Control-plane frames stay on the relay; terminal input prefers the
-        // direct path once the host has announced it ready.
-        if (this.#p2pReady && this.#peer !== null && this.#peer.send(frame)) {
-          return;
+        // direct path once the host has announced it ready. Tunnel input is
+        // split into records by the endpoint before encoding.
+        if (this.#p2pReady && this.#peer !== null) {
+          if (this.#tunnel !== null) {
+            if (this.#tunnel.sendTerminalInput(data)) return;
+            this.#handleP2PFailure("tunnel input send failed");
+          } else {
+            const frame = encodeFrame({ type: "input", payload: data });
+            if (this.#peer.send(frame)) return;
+          }
         }
-        this.#transport?.send(frame);
+        this.#transport?.send(encodeFrame({ type: "input", payload: data }));
       } catch (error) {
         this.#logger.debug(`failed to encode input: ${formatError(error)}`);
       }
@@ -406,7 +428,26 @@ class AttachSession {
           if (this.#peer !== null) {
             this.#disposeP2P("host restarted p2p negotiation");
           }
-          this.#startViewerPeer(message.from);
+          const payload = asRecord(message.payload);
+          const rawTunnel = payload?.tunnel;
+          let tunnelOffer: TunnelOfferParams | null = null;
+          if (rawTunnel !== undefined) {
+            const offer = parseTunnelOffer(rawTunnel);
+            if (
+              offer === null ||
+              this.#config.tunnel !== "auto" ||
+              !tunnelOfferCompatible(offer, this.#config.tunnelKeyMode)
+            ) {
+              // An unreliable DataChannel must never carry v1 frames. Refuse
+              // the attempt instead of silently downgrading.
+              this.#refuseTunnel(
+                offer === null ? "unsupported offer parameters" : "tunnel key mode mismatch",
+              );
+              return;
+            }
+            tunnelOffer = offer;
+          }
+          this.#startViewerPeer(message.from, tunnelOffer);
         }
         this.#peer?.handleSignal({ kind: message.kind, payload: message.payload });
         return;
@@ -452,7 +493,7 @@ class AttachSession {
     }
   }
 
-  #startViewerPeer(hostClientId: string): void {
+  #startViewerPeer(hostClientId: string, tunnelOffer: TunnelOfferParams | null): void {
     if (this.#config.p2p === "off" || this.#closing || this.#listener) return;
     if (this.#peer !== null) return;
     const peer = new P2PPeer({
@@ -476,7 +517,56 @@ class AttachSession {
       onClosed: (reason) => this.#handleP2PFailure(reason),
     });
     this.#peer = peer;
+    if (tunnelOffer !== null) {
+      try {
+        this.#tunnel = new TunnelTransport({
+          role: "viewer",
+          sessionId: this.#config.session,
+          sessionToken: this.#config.sessionToken,
+          keyMode: this.#config.tunnelKeyMode,
+          secret: this.#config.tunnelSecret,
+          logger: this.#logger,
+          sendFrame: (bytes) => peer.send(bytes),
+          onFrame: (bytes) => this.#handleDcFrame(bytes, true),
+          onFailure: (reason) => this.#handleTunnelFailure(reason),
+        });
+        this.#logger.info(`tunnel negotiated (keyMode=${this.#config.tunnelKeyMode}, fec=none)`);
+      } catch (error) {
+        this.#logger.warn(`tunnel setup failed: ${formatError(error)}`);
+        this.#disposeP2P("tunnel setup failed");
+        this.#refuseTunnel("tunnel setup failed");
+        return;
+      }
+    }
     this.#logger.debug(`p2p answer path started for host ${hostClientId}`);
+  }
+
+  /** Refuse an unreliable tunnel attempt and stay on the relay path. */
+  #refuseTunnel(reason: string): void {
+    this.#logger.warn(`tunnel offer refused (${reason}); staying on relay`);
+    try {
+      this.#client?.sendControl({
+        v: PROTOCOL_VERSION,
+        type: "transport",
+        clientId: this.#clientId,
+        mode: "relay",
+        state: "failed",
+        reason: reason.slice(0, 512),
+      });
+    } catch {
+      // best effort
+    }
+  }
+
+  #handleTunnelFailure(reason: string): void {
+    const stats = this.#tunnel?.stats;
+    if (stats !== undefined) {
+      this.#logger.debug(
+        `tunnel stats: sent=${stats.sentRecords} received=${stats.receivedRecords} ` +
+          `retransmits=${stats.retransmits} decryptFailures=${stats.decryptFailures}`,
+      );
+    }
+    this.#handleP2PFailure(`tunnel: ${reason}`);
   }
 
   #handleP2POpen(mode: TransportMode, detail: string): void {
@@ -493,7 +583,11 @@ class AttachSession {
         return;
       }
       this.#p2pReady = true;
-      this.#logger.info(`p2p transport ready: ${mode}`);
+      this.#logger.info(
+        this.#tunnel === null
+          ? `p2p transport ready: ${mode}`
+          : `p2p tunnel ready: ${mode} (fec=none)`,
+      );
       this.#flushDcBuffer();
       return;
     }
@@ -521,6 +615,8 @@ class AttachSession {
   #disposeP2P(reason: string): void {
     const peer = this.#peer;
     this.#peer = null;
+    this.#tunnel?.dispose();
+    this.#tunnel = null;
     this.#p2pReady = false;
     this.#p2pSnapshotSeen = false;
     this.#p2pBufferOverflow = false;
@@ -529,12 +625,24 @@ class AttachSession {
     peer?.close(reason);
   }
 
-  #handleDcFrame(bytes: Uint8Array): void {
+  #handleDcFrame(bytes: Uint8Array, viaTunnel = false): void {
     let frame: ReturnType<typeof decodeFrame>;
     try {
       frame = decodeFrame(bytes);
     } catch (error) {
       this.#logger.debug(`invalid frame over p2p: ${formatError(error)}`);
+      return;
+    }
+    if (frame.type === "tunnel") {
+      if (viaTunnel) {
+        this.#logger.debug("ignoring nested tunnel frame");
+        return;
+      }
+      if (this.#tunnel === null) {
+        this.#logger.debug("ignoring tunnel frame without an active tunnel");
+        return;
+      }
+      this.#tunnel.receive(frame.payload);
       return;
     }
     if (frame.type !== "output") {
@@ -613,7 +721,9 @@ class AttachSession {
         return;
       case "tunnel":
       case "tunnel_to":
-        this.#logger.debug("tunnel frames are not implemented in v1");
+        // Raw TUNNEL records are handled by the P2P tunnel endpoint; the relay
+        // never forwards them, so anything here is stale or out of contract.
+        this.#logger.debug("ignoring unhandled tunnel frame");
         return;
       default:
         return;

@@ -88,6 +88,12 @@ assets/              README icon
 - `transport/`: relay client, P2P peer (node-datachannel), fragmentation,
   ICE config/refresh, P2P retry policy, route selector, ICE/TURN config, signal
   limits.
+- `transport/tunnel/`: v1.1 F1 TUN profile — HKDF direction keys + AES-256-GCM
+  records (`crypto.ts`), selective-repeat ARQ (`arq.ts`), capability/offer
+  negotiation (`capability.ts`), and the P2P endpoint (`tunnel-transport.ts`).
+  It is opt-in (`TOKIMEKI_TUNNEL=auto`), P2P-only, and falls back to the relay;
+  the relay still rejects `TUNNEL` with `not_implemented`. XOR FEC is deferred;
+  the capability advertises `fec:["none"]`.
 - Exit codes: `0` success, `1` runtime/connection (including a failed
   `doctor` check and Commander usage errors), `2` invalid `TOKIMEKI_*`
   configuration at host/attach startup.
@@ -132,6 +138,10 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   README examples, or committed files.
 - The relay can see terminal bytes by design; P2P/TURN change the transport,
   not the trust model. Do not describe the relay as end-to-end encrypted.
+  TUN's default `session-token` keyMode is derivable by the relay; only
+  `TOKIMEKI_TUNNEL_SECRET` (`shared-secret`) may be called relay-blind.
+- `TOKIMEKI_TUNNEL_SECRET` is scrubbed from the hosted PTY environment and
+  redacted from logs; never log tunnel keys, nonces, ciphertext, or plaintext.
 - Production deploy/provider/secret changes need explicit user approval.
 - Scan changes for master/session/TURN secrets before committing.
 
@@ -144,10 +154,16 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   environment-dependent.
 - v1.1 F0 adds capability-gated `FRAGMENT 0x08` DataChannel fragmentation,
   P2P direct snapshots, automatic ICE refresh, and one provider retry. v1.1 F2
-  adds the read-only snapshot-only `listener` role; there is still no tunnel
-  runtime or listener incremental/safe-boundary output.
+  adds the read-only snapshot-only `listener` role. v1.1 F1 adds the opt-in
+  P2P-only TUN profile (AEAD + selective-repeat ARQ); XOR FEC is deferred and
+  the capability advertises `fec:["none"]`. Local tunnel e2e passes for
+  session-token and shared-secret key modes; cross-machine tunnel e2e, forced
+  loss/reorder injection, and secret-mismatch fallback remain to be run. The
+  host/attach tunnel switch has no pure unit test (live e2e covers it).
+  There is still no listener incremental/safe-boundary output.
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
-  tests (delivery worked); link-quality work (selective-repeat/ARQ) is future.
+  tests (delivery worked); link-quality work beyond the F1 tunnel
+  (fragmentation-independent ARQ tuning/FEC) is future.
 
 ## Documentation
 

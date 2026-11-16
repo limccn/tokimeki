@@ -4,6 +4,7 @@ import {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
   parseControlMessage,
+  TUNNEL_MAX_FRAME_BYTES,
 } from "@limccn/tokimeki-protocol";
 import { describe, expect, it } from "vitest";
 
@@ -82,6 +83,26 @@ describe("buildCapabilities", () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it("advertises the tunnel dialect only when requested and P2P is enabled", () => {
+    const enabled = buildCapabilities({ p2p: true, tunnelKeyMode: "shared-secret" });
+    expect(enabled.tunnel).toEqual({
+      version: 1,
+      arq: "selective-repeat",
+      fec: ["none"],
+      crypto: "aes-256-gcm",
+      keyMode: "shared-secret",
+      maxFrameSize: TUNNEL_MAX_FRAME_BYTES,
+    });
+
+    expect(buildCapabilities({ p2p: true }).tunnel).toBeUndefined();
+    expect(
+      buildCapabilities({ p2p: false, tunnelKeyMode: "session-token" }).tunnel,
+    ).toBeUndefined();
+    expect(
+      buildCapabilities({ p2p: true, listener: true, tunnelKeyMode: "session-token" }).tunnel,
+    ).toBeUndefined();
   });
 
   it("roundtrips through the hello schema", () => {

@@ -72,6 +72,9 @@ Useful host variables:
 | `TOKIMEKI_SCROLLBACK_LINES` | `1000` | Headless screen scrollback |
 | `TOKIMEKI_SNAPSHOT_MAX_BYTES` | `262144` | Snapshot size budget |
 | `TOKIMEKI_LISTENER_SNAPSHOT_MS` | `1000` | Read-only listener snapshot interval (250–60000 ms) |
+| `TOKIMEKI_TUNNEL` | `off` | `auto` runs the P2P-only AEAD/ARQ tunnel |
+| `TOKIMEKI_TUNNEL_FEC` | `off` | `xor` is recognized but deferred; currently runs without FEC |
+| `TOKIMEKI_TUNNEL_SECRET` | — | Optional >=16-byte shared secret for relay-blind tunnel keys |
 | `TOKIMEKI_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
 
 ## Attach from another machine
@@ -165,6 +168,38 @@ configuration. It prints actionable warnings for missing/conflicting values.
    no usable TURN means timeout + relay fallback.
 4. Relay fallback is always available; control/signaling always use the relay.
 
+## TUN profile (v1.1, opt-in)
+
+`TOKIMEKI_TUNNEL=auto` adds an application-layer tunnel for terminal bytes on
+top of an unreliable/unordered WebRTC DataChannel:
+
+- The host creates the unordered DataChannel only after the viewer advertises
+  the exact `tunnel` capability (`version:1`, `arq:"selective-repeat"`,
+  `crypto:"aes-256-gcm"`, matching `keyMode`, `maxFrameSize:16339`).
+- Records use AES-256-GCM with HKDF direction keys, selective-repeat ARQ
+  (window 64), and a bounded retransmission budget. Control messages,
+  snapshots, resize, signaling, and relay ACK flow-control stay on their
+  existing v1 paths.
+- `TOKIMEKI_TUNNEL=off` (default) keeps the v1 reliable DataChannel behavior.
+  A tunnel mismatch or failure falls back to the relay and requests a fresh
+  snapshot; the PTY/TUI session is not terminated.
+- `keyMode` is `session-token` by default. The relay has seen the session
+  token and can derive those keys, so this mode is transport hardening only,
+  **not** end-to-end encryption. Setting `TOKIMEKI_TUNNEL_SECRET` switches to
+  `shared-secret`; the relay cannot derive those keys, so only that mode may
+  be described as relay-blind.
+- `TOKIMEKI_TUNNEL_SECRET` must be shared out of band between host and viewer.
+  It is scrubbed from the hosted PTY environment and redacted from logs. A
+  missing secret on one end prevents negotiation (keyMode mismatch) and the
+  session stays on the relay. If the values differ while both ends use
+  `shared-secret`, the tunnel is negotiated but AEAD authentication fails;
+  after the failure threshold it falls back to the relay and requests a fresh
+  snapshot.
+- XOR FEC is deferred: `TOKIMEKI_TUNNEL_FEC=xor` is accepted but logs a
+  warning and runs without FEC (`fec: ["none"]` in the capability).
+- The relay never forwards `TUNNEL` frames; it still returns
+  `not_implemented`. TUN is P2P-only in this release.
+
 Logs go to stderr and redact known tokens. Use `TOKIMEKI_LOG_LEVEL=debug` when
 diagnosing connection issues.
 
@@ -176,6 +211,8 @@ diagnosing connection issues.
 | `host_offline` | Host is connected to the same relay/session and still running |
 | `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
 | P2P never opens | Corporate UDP firewall; try TURN or `TOKIMEKI_P2P=off` |
+| Tunnel never activates | Both ends need `TOKIMEKI_TUNNEL=auto`, P2P enabled, and the same key mode (`TOKIMEKI_TUNNEL_SECRET` present on both or absent on both) |
+| Tunnel falls back to relay | Check debug logs for `tunnel unavailable`; a wrong shared secret, high loss, or oversized frames cause fallback |
 | TURN attempt takes ~12 s | Expected when TURN is unreachable; relay takes over |
 | Garbled screen after reconnect | Enable `debug` logs and file an issue with the terminal/OS details |
 | Local terminal not restored | Run `reset`; report the terminal emulator and OS |

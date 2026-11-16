@@ -11,8 +11,10 @@ import { hostname as defaultHostname } from "node:os";
 import {
   isValidSessionId,
   MAX_TERMINAL_DIMENSION,
+  MIN_TUNNEL_SECRET_BYTES,
   RESIZE_POLICIES,
   type ResizePolicy,
+  type TunnelKeyMode,
 } from "@limccn/tokimeki-protocol";
 import { isLogLevel, LOG_LEVELS, type LogLevel } from "./logger.js";
 
@@ -23,6 +25,10 @@ export class ConfigError extends Error {
 export type P2PMode = "auto" | "off";
 export type IceTransportPolicy = "all" | "relay";
 export type PiTuiMode = "fullscreen" | "regular";
+/** TUN profile switch (`TOKIMEKI_TUNNEL`). F1 is opt-in. */
+export type TunnelMode = "off" | "auto";
+/** XOR FEC is recognized but deferred; `xor` normalizes to `off` with a warning. */
+export type TunnelFecMode = "off" | "xor";
 
 export interface TerminalSize {
   readonly cols: number;
@@ -38,6 +44,13 @@ export interface CommonConfig {
   readonly heartbeatSeconds: number;
   readonly p2p: P2PMode;
   readonly iceTransportPolicy: IceTransportPolicy;
+  /** Opt-in v1.1 TUN profile; default off. P2P-only. */
+  readonly tunnel: TunnelMode;
+  /** Normalized FEC setting. F1 ships `none`, so `xor` becomes `off`. */
+  readonly tunnelFec: TunnelFecMode;
+  readonly tunnelKeyMode: TunnelKeyMode;
+  /** Shared secret for relay-blind mode; null derives from the session token. */
+  readonly tunnelSecret: string | null;
   readonly logLevel: LogLevel;
   /** One-line warnings (for example, recognized-but-unimplemented v1.1 vars). */
   readonly warnings: readonly string[];
@@ -83,11 +96,8 @@ export interface HostConfigInputs {
 }
 
 const V11_ENV_VARS = [
-  "TOKIMEKI_TUNNEL",
-  "TOKIMEKI_TUNNEL_FEC",
   "TOKIMEKI_TUNNEL_WINDOW",
   "TOKIMEKI_TUNNEL_MTU",
-  "TOKIMEKI_TUNNEL_SECRET",
   "TOKIMEKI_VIEW_MODE",
   "TOKIMEKI_ROUTE_POLICY",
   "TOKIMEKI_LAN_DISCOVERY",
@@ -333,9 +343,52 @@ interface CommonConfigParts {
   readonly heartbeatSeconds: number;
   readonly p2p: P2PMode;
   readonly iceTransportPolicy: IceTransportPolicy;
+  readonly tunnel: TunnelMode;
+  readonly tunnelFec: TunnelFecMode;
+  readonly tunnelKeyMode: TunnelKeyMode;
+  readonly tunnelSecret: string | null;
   readonly logLevel: LogLevel;
   readonly warnings: string[];
   readonly secrets: string[];
+}
+
+function parseTunnelMode(env: NodeJS.ProcessEnv): TunnelMode {
+  return parseEnum(
+    "TOKIMEKI_TUNNEL",
+    optionalEnv(env, "TOKIMEKI_TUNNEL"),
+    ["off", "auto"] as const,
+    "off",
+  );
+}
+
+function parseTunnelFec(env: NodeJS.ProcessEnv, warnings: string[]): TunnelFecMode {
+  const raw = optionalEnv(env, "TOKIMEKI_TUNNEL_FEC");
+  if (raw === undefined) return "off";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "off" || normalized === "none" || normalized === "0") return "off";
+  if (normalized === "xor") {
+    // F1 ships `fec: ["none"]`; claiming XOR without an implementation would
+    // weaken the compatibility contract, so the request is downgraded loudly.
+    warnings.push(
+      "TOKIMEKI_TUNNEL_FEC=xor is not implemented in this release; " +
+        "XOR FEC is deferred and the tunnel runs without FEC",
+    );
+    return "off";
+  }
+  throw new ConfigError(
+    `TOKIMEKI_TUNNEL_FEC must be one of off, xor (received ${JSON.stringify(raw)})`,
+  );
+}
+
+function parseTunnelSecret(env: NodeJS.ProcessEnv, tunnel: TunnelMode): string | null {
+  const raw = optionalEnv(env, "TOKIMEKI_TUNNEL_SECRET");
+  if (raw === undefined) return null;
+  if (tunnel === "auto" && Buffer.byteLength(raw, "utf8") < MIN_TUNNEL_SECRET_BYTES) {
+    throw new ConfigError(
+      `TOKIMEKI_TUNNEL_SECRET must be at least ${MIN_TUNNEL_SECRET_BYTES} bytes when TOKIMEKI_TUNNEL=auto`,
+    );
+  }
+  return raw;
 }
 
 function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts {
@@ -346,6 +399,13 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
   const warnings: string[] = [];
   warnings.push(...collectV11Warnings(env));
   const logLevel = parseLogLevel(env, warnings);
+  const p2p = parseP2P(env);
+  const tunnel = parseTunnelMode(env);
+  const tunnelFec = parseTunnelFec(env, warnings);
+  const tunnelSecret = parseTunnelSecret(env, tunnel);
+  if (tunnel === "auto" && p2p === "off") {
+    warnings.push("TOKIMEKI_TUNNEL=auto requires P2P; the tunnel will not be used");
+  }
   const secrets = [
     optionalEnv(env, "TOKIMEKI_MASTER_TOKEN"),
     optionalEnv(env, "TOKIMEKI_SESSION_TOKEN"),
@@ -356,8 +416,12 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
     websocketUrl: buildRelayWebSocketUrl(relayUrl, session),
     session,
     heartbeatSeconds: parseHeartbeat(env),
-    p2p: parseP2P(env),
+    p2p,
     iceTransportPolicy: parseIcePolicy(env),
+    tunnel,
+    tunnelFec,
+    tunnelKeyMode: tunnelSecret === null ? "session-token" : "shared-secret",
+    tunnelSecret,
     logLevel,
     warnings,
     secrets,
@@ -419,9 +483,13 @@ export function loadAttachConfig(
   const session = requireEnv(env, "TOKIMEKI_SESSION");
   const sessionToken = requireEnv(env, "TOKIMEKI_SESSION_TOKEN");
   const common = loadCommon(env, session);
+  const role = options.listener === true ? "listener" : "viewer";
+  if (role === "listener" && common.tunnel === "auto") {
+    common.warnings.push("TOKIMEKI_TUNNEL=auto is ignored for read-only listeners");
+  }
   return {
     ...common,
-    role: options.listener === true ? "listener" : "viewer",
+    role,
     sessionToken,
     secrets: [...common.secrets, sessionToken],
   };

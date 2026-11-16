@@ -169,6 +169,100 @@ export const MAX_FRAGMENT_CHUNK_BYTES = MAX_DATACHANNEL_MESSAGE_BYTES - FRAGMENT
 /** Maximum fragments for a 1 MiB frame using canonical chunk sizes. */
 export const MAX_FRAGMENT_COUNT = Math.ceil(MAX_FRAME_BYTES / MAX_FRAGMENT_CHUNK_BYTES);
 
+/**
+ * v1.1 TUN profile wire version (`TUNNEL 0x06` inner record).
+ *
+ * v1 relays never forward `TUNNEL` frames. F1 runs the tunnel only on an
+ * unreliable WebRTC DataChannel between a host and a viewer.
+ */
+export const TUNNEL_RECORD_VERSION = 1;
+
+/**
+ * Inner record types carried by a `TUNNEL` (0x06) frame.
+ *
+ * `data` carries one complete terminal frame (INPUT/OUTPUT). `ack` carries
+ * selective ACK state. `fec`/`ping` are reserved by the record layout; F1 only
+ * emits `data` and `ack`.
+ */
+export const TUNNEL_RECORD_TYPES = {
+  data: 1,
+  ack: 2,
+  fec: 3,
+  ping: 4,
+} as const;
+export type TunnelRecordType = keyof typeof TUNNEL_RECORD_TYPES;
+export type TunnelRecordTypeValue = (typeof TUNNEL_RECORD_TYPES)[TunnelRecordType];
+
+/** Bit 0 of `flags`: the record is an XOR-FEC parity record (reserved in F1). */
+export const TUNNEL_FLAG_FEC_PARITY = 0x01;
+
+/** Fixed tunnel record header: 22 metadata bytes + 12-byte GCM nonce. */
+export const TUNNEL_RECORD_HEADER_BYTES = 28;
+
+/** AES-256-GCM nonce size (96 bits). */
+export const TUNNEL_NONCE_BYTES = 12;
+
+/** AES-256-GCM authentication tag size. */
+export const TUNNEL_TAG_BYTES = 16;
+
+/** Derived direction key size. */
+export const TUNNEL_KEY_BYTES = 32;
+
+/** Minimum `TOKIMEKI_TUNNEL_SECRET` length in UTF-8 bytes. */
+export const MIN_TUNNEL_SECRET_BYTES = 16;
+
+/**
+ * Largest plaintext (one complete terminal frame) carried by one tunnel record.
+ *
+ * `MAX_DATACHANNEL_MESSAGE_BYTES` includes the outer `TUNNEL` frame type byte,
+ * the 28-byte tunnel header, and the 16-byte GCM tag. 16384 - 1 - 28 - 16 =
+ * 16339 bytes.
+ */
+export const TUNNEL_MAX_FRAME_BYTES =
+  MAX_DATACHANNEL_MESSAGE_BYTES - 1 - TUNNEL_RECORD_HEADER_BYTES - TUNNEL_TAG_BYTES;
+
+/** Largest terminal payload in one tunneled OUTPUT frame (9-byte frame header). */
+export const TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES = TUNNEL_MAX_FRAME_BYTES - 9;
+
+/** Largest terminal payload in one tunneled INPUT frame (1-byte frame header). */
+export const TUNNEL_INPUT_PAYLOAD_MAX_BYTES = TUNNEL_MAX_FRAME_BYTES - 1;
+
+/** Largest tunnel record wire size, excluding the outer 0x06 frame type byte. */
+export const TUNNEL_MAX_RECORD_BYTES =
+  TUNNEL_RECORD_HEADER_BYTES + TUNNEL_MAX_FRAME_BYTES + TUNNEL_TAG_BYTES;
+
+/** Direction bytes bound into the AEAD AAD. */
+export const TUNNEL_DIRECTIONS = {
+  hostToViewer: 1,
+  viewerToHost: 2,
+} as const;
+export type TunnelDirectionName = keyof typeof TUNNEL_DIRECTIONS;
+export type TunnelDirectionValue = (typeof TUNNEL_DIRECTIONS)[TunnelDirectionName];
+
+/**
+ * HKDF info labels. The exact byte layout is part of the wire contract:
+ *
+ * ```text
+ * prk = HKDF-Extract(salt = UTF-8(sessionId), ikm)
+ * h2v = HKDF-Expand(prk, "tokimeki-tunnel-v1/host-to-viewer", 32)
+ * v2h = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
+ * ```
+ */
+export const TUNNEL_HKDF_LABELS = {
+  hostToViewer: "tokimeki-tunnel-v1/host-to-viewer",
+  viewerToHost: "tokimeki-tunnel-v1/viewer-to-host",
+} as const;
+
+/** Tunnel capability keyMode strings. */
+export const TUNNEL_KEY_MODES = ["session-token", "shared-secret"] as const;
+export type TunnelKeyMode = (typeof TUNNEL_KEY_MODES)[number];
+
+/** Tunnel capability `arq` value implemented by F1. */
+export const TUNNEL_ARQ_MODE = "selective-repeat";
+
+/** Tunnel capability `crypto` value implemented by F1. */
+export const TUNNEL_CRYPTO_MODE = "aes-256-gcm";
+
 /** Upper bound for terminal `cols` / `rows` values in control messages. */
 export const MAX_TERMINAL_DIMENSION = 10_000;
 

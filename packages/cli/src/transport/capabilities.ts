@@ -3,7 +3,10 @@ import {
   MAX_DATACHANNEL_MESSAGE_BYTES,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  type TunnelKeyMode,
 } from "@limccn/tokimeki-protocol";
+
+import { buildTunnelCapability } from "./tunnel/capability.js";
 
 export interface CapabilityOptions {
   /** Advertise the P2P transports this process can actually negotiate. */
@@ -11,6 +14,8 @@ export interface CapabilityOptions {
   readonly snapshotMaxBytes?: number;
   /** Advertise read-only listener support (relay-only, snapshot-only). */
   readonly listener?: boolean;
+  /** Advertise the TUN profile only when `TOKIMEKI_TUNNEL=auto`. */
+  readonly tunnelKeyMode?: TunnelKeyMode;
 }
 
 /**
@@ -32,6 +37,7 @@ export function buildCapabilities(options: CapabilityOptions): Capabilities {
   // Listeners are relay-only by design: they never negotiate P2P, so they
   // advertise the relay transport and the snapshot-only listener mode.
   const p2p = options.p2p && options.listener !== true;
+  const tunnelKeyMode = p2p ? options.tunnelKeyMode : undefined;
   return {
     protocolVersion: PROTOCOL_VERSION,
     transports: {
@@ -50,6 +56,7 @@ export function buildCapabilities(options: CapabilityOptions): Capabilities {
       formats: ["xterm-serialize", "raw-ring"],
       ...(options.snapshotMaxBytes === undefined ? {} : { maxBytes: options.snapshotMaxBytes }),
     },
+    ...(tunnelKeyMode === undefined ? {} : { tunnel: buildTunnelCapability(tunnelKeyMode) }),
     ...(options.listener === true ? { listener: { modes: ["snapshot-only"] } } : {}),
   };
 }

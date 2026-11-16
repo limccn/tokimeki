@@ -148,7 +148,10 @@ class FakeTransport implements Transport {
   }
 }
 
-function attachConfig(role: AttachConfig["role"]): AttachConfig {
+function attachConfig(
+  role: AttachConfig["role"],
+  overrides: Partial<AttachConfig> = {},
+): AttachConfig {
   return {
     relayUrl: "wss://relay.example",
     websocketUrl: "wss://relay.example/ws/sess-1",
@@ -156,11 +159,16 @@ function attachConfig(role: AttachConfig["role"]): AttachConfig {
     heartbeatSeconds: 0,
     p2p: "auto",
     iceTransportPolicy: "all",
+    tunnel: "off",
+    tunnelFec: "off",
+    tunnelKeyMode: "session-token",
+    tunnelSecret: null,
     logLevel: "silent",
     warnings: [],
     secrets: [],
     role,
     sessionToken: "session-token-9876",
+    ...overrides,
   };
 }
 
@@ -187,7 +195,10 @@ async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
   }
 }
 
-function makeSession(role: AttachConfig["role"]): {
+function makeSession(
+  role: AttachConfig["role"],
+  overrides: Partial<AttachConfig> = {},
+): {
   client: FakeRelayClient;
   transport: FakeTransport;
   stdin: FakeInput;
@@ -199,7 +210,7 @@ function makeSession(role: AttachConfig["role"]): {
   const stdin = new FakeInput();
   const stdout = new FakeOutput();
   const logger = new Logger({ level: "silent", write: () => {} });
-  const done = runAttachSession(attachConfig(role), {
+  const done = runAttachSession(attachConfig(role, overrides), {
     logger,
     stdin: stdin as unknown as NodeJS.ReadStream,
     stdout: stdout as unknown as NodeJS.WriteStream,
@@ -300,6 +311,91 @@ describe("attach listener mode", () => {
     await waitFor(() => stdout.text.includes("new host screen"));
 
     stdin.emit("data", Buffer.from("\u0003"));
+    await expect(done).resolves.toBe(0);
+  });
+});
+
+describe("attach tunnel negotiation", () => {
+  function tunnelOffer(keyMode: "session-token" | "shared-secret"): {
+    sdp: string;
+    type: "offer";
+    tunnel: {
+      version: number;
+      keyMode: "session-token" | "shared-secret";
+      fec: "none";
+      initialSeq: number;
+    };
+  } {
+    return {
+      sdp: "v=0",
+      type: "offer",
+      tunnel: { version: 1, keyMode, fec: "none", initialSeq: 0 },
+    };
+  }
+
+  it("advertises the tunnel capability for viewers but never for listeners", async () => {
+    const viewer = makeSession("viewer", { tunnel: "auto" });
+    await waitFor(() => viewer.client.options.role !== undefined && viewer.client.started);
+    expect(viewer.client.options.capabilities.tunnel).toEqual({
+      version: 1,
+      arq: "selective-repeat",
+      fec: ["none"],
+      crypto: "aes-256-gcm",
+      keyMode: "session-token",
+      maxFrameSize: 16_339,
+    });
+    viewer.client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(viewer.done).resolves.toBe(0);
+
+    const listener = makeSession("listener", { tunnel: "auto" });
+    await waitFor(() => listener.client.options.role !== undefined && listener.client.started);
+    expect(listener.client.options.capabilities.tunnel).toBeUndefined();
+    listener.client.emitWelcome(welcomeMessage());
+    listener.stdin.emit("data", Buffer.from("\u0003"));
+    await expect(listener.done).resolves.toBe(0);
+  });
+
+  it("refuses a tunnel offer when the local tunnel is off", async () => {
+    const { client, done } = makeSession("viewer", { tunnel: "off" });
+    await waitFor(() => client.options.role !== undefined && client.started);
+    client.emitMessage({
+      v: PROTOCOL_VERSION,
+      type: "signal",
+      to: client.options.clientId,
+      from: "host-1",
+      kind: "offer",
+      payload: tunnelOffer("session-token"),
+    });
+    await waitFor(() =>
+      client.controls.some(
+        (control) =>
+          (control as { type?: string; mode?: string }).type === "transport" &&
+          (control as { mode?: string }).mode === "relay",
+      ),
+    );
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+
+  it("refuses a tunnel offer whose key mode does not match", async () => {
+    const { client, done } = makeSession("viewer", { tunnel: "auto" });
+    await waitFor(() => client.options.role !== undefined && client.started);
+    client.emitMessage({
+      v: PROTOCOL_VERSION,
+      type: "signal",
+      to: client.options.clientId,
+      from: "host-1",
+      kind: "offer",
+      payload: tunnelOffer("shared-secret"),
+    });
+    await waitFor(() =>
+      client.controls.some(
+        (control) =>
+          (control as { type?: string; reason?: string }).type === "transport" &&
+          (control as { reason?: string }).reason === "tunnel key mode mismatch",
+      ),
+    );
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
     await expect(done).resolves.toBe(0);
   });
 });

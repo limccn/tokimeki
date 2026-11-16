@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  type Capabilities,
   decodeFrame,
   encodeFrame,
   type IceTransportPolicy,
@@ -19,6 +20,8 @@ import {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
   type TransportMode,
+  TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES,
+  type TunnelKeyMode,
   type WelcomeMessage,
 } from "@limccn/tokimeki-protocol";
 
@@ -36,6 +39,12 @@ import { RelayClient } from "../transport/relay-client.js";
 import { RelayTransport } from "../transport/relay-transport.js";
 import type { RelayFatalError } from "../transport/relay-types.js";
 import { RouteSelector } from "../transport/route-selector.js";
+import {
+  buildTunnelOffer,
+  matchingTunnelCapability,
+  tunnelCapabilitiesCompatible,
+} from "../transport/tunnel/capability.js";
+import { TunnelTransport } from "../transport/tunnel/tunnel-transport.js";
 import type { Transport } from "../transport/types.js";
 import { HostPty, type PtyExitInfo } from "./host-pty.js";
 import { buildPtyCommand } from "./pty-command.js";
@@ -78,12 +87,21 @@ const RESYNC_THROTTLE_MS = 500;
 
 /**
  * Output frames are always split to the SCTP interop budget so the same frame
- * can travel over the relay or a DataChannel without re-encoding.
+ * can travel over the relay or a reliable DataChannel without re-encoding.
+ * When the TUN profile is enabled, the payload is capped one tunnel record
+ * smaller so the whole OUTPUT frame fits inside a single AEAD record.
  */
 const OUTPUT_PAYLOAD_MAX = MAX_DATACHANNEL_MESSAGE_BYTES - 16;
+const TUNNEL_HIGH_WATER = 524_288;
 
 interface HostP2PLink {
   readonly peer: P2PPeer;
+  /**
+   * TUN profile endpoint when the viewer advertised a compatible capability.
+   * Null means this link uses the v1 reliable DataChannel path.
+   */
+  tunnel: TunnelTransport | null;
+  tunnelKeyMode: TunnelKeyMode | null;
   mode: TransportMode | null;
   ready: boolean;
   sentFrames: number;
@@ -207,6 +225,11 @@ class HostSession {
   readonly #p2pLinks = new Map<string, HostP2PLink>();
   readonly #pendingP2PSwitches = new Set<string>();
   readonly #fragmentationViewers = new Set<string>();
+  /**
+   * Viewers whose `hello`/`peer-joined` capabilities match this build's TUN
+   * dialect. Only these viewers get an unreliable DataChannel and AEAD/ARQ.
+   */
+  readonly #tunnelViewers = new Set<string>();
   readonly #p2pRetryUsed = new Set<string>();
   readonly #p2pRetryTimers = new Map<string, NodeJS.Timeout>();
   #p2pRetriesInFlight = 0;
@@ -412,6 +435,7 @@ class HostSession {
       capabilities: buildCapabilities({
         p2p: this.#config.p2p === "auto",
         snapshotMaxBytes: this.#config.snapshotMaxBytes,
+        ...(this.#config.tunnel === "auto" ? { tunnelKeyMode: this.#config.tunnelKeyMode } : {}),
       }),
       logger: this.#logger,
     });
@@ -464,6 +488,7 @@ class HostSession {
       }
       if (client.role !== undefined && client.role !== "viewer") continue;
       this.#viewers.add(client.clientId);
+      this.#updateTunnelViewer(client.clientId, client.capabilities);
       this.#scheduleSnapshot(client.clientId);
       const link = this.#p2pLinks.get(client.clientId);
       if (link !== undefined && link.ready && link.peer.isOpen && link.mode !== null) {
@@ -508,6 +533,7 @@ class HostSession {
         } else {
           this.#fragmentationViewers.delete(message.clientId);
         }
+        this.#updateTunnelViewer(message.clientId, message.capabilities);
         const existingLink = this.#p2pLinks.get(message.clientId);
         if (existingLink !== undefined) {
           existingLink.supportsFragmentation = fragments;
@@ -533,6 +559,7 @@ class HostSession {
         this.#pendingSnapshots.delete(message.clientId);
         this.#resyncAt.delete(message.clientId);
         this.#fragmentationViewers.delete(message.clientId);
+        this.#tunnelViewers.delete(message.clientId);
         this.#clearP2PRetry(message.clientId);
         this.#logger.info(`viewer left: ${message.clientId} (viewers=${this.#viewers.size})`);
         this.#applyResize();
@@ -610,9 +637,30 @@ class HostSession {
     }
   }
 
+  #updateTunnelViewer(clientId: string, capabilities: Capabilities | undefined): void {
+    if (this.#config.tunnel !== "auto") {
+      this.#tunnelViewers.delete(clientId);
+      return;
+    }
+    if (capabilities === undefined) {
+      // `welcome.clients` on pre-F1 relays omits capabilities. Keep a known
+      // peer's eligibility across a host relay reconnect; peer-joined carries
+      // the authoritative capabilities for new viewers.
+      return;
+    }
+    const peerCapability = matchingTunnelCapability(capabilities);
+    if (tunnelCapabilitiesCompatible(peerCapability, this.#config.tunnelKeyMode)) {
+      this.#tunnelViewers.add(clientId);
+      return;
+    }
+    this.#tunnelViewers.delete(clientId);
+    this.#logger.debug(`tunnel not negotiated for ${clientId}: capability mismatch`);
+  }
+
   #startP2P(clientId: string, iceConfig?: IceConfig): void {
     if (this.#config.p2p === "off" || this.#closing) return;
     if (this.#p2pLinks.has(clientId)) return;
+    const useTunnel = this.#config.tunnel === "auto" && this.#tunnelViewers.has(clientId);
     const peer = new P2PPeer({
       label: `host:${clientId}`,
       role: "host",
@@ -635,9 +683,52 @@ class HostSession {
       onOpen: (info) => this.#handleP2POpen(clientId, info.mode, info.detail),
       onFailed: (reason) => this.#handleP2PUnavailable(clientId, reason),
       onClosed: (reason) => this.#fallbackToRelay(clientId, reason),
+      ...(useTunnel
+        ? {
+            // TUN profile: unordered with no SCTP retransmissions. The tunnel
+            // supplies ordering and reliability; v1 frames must never use this
+            // channel.
+            dataChannelConfig: { unordered: true, maxRetransmits: 0 },
+            offerMetadata: { tunnel: buildTunnelOffer(this.#config.tunnelKeyMode) },
+          }
+        : {}),
     });
+
+    let tunnel: TunnelTransport | null = null;
+    if (useTunnel) {
+      try {
+        tunnel = new TunnelTransport({
+          role: "host",
+          sessionId: this.#config.session,
+          sessionToken: this.#config.sessionToken,
+          keyMode: this.#config.tunnelKeyMode,
+          secret: this.#config.tunnelSecret,
+          logger: this.#logger,
+          sendFrame: (bytes) => peer.send(bytes),
+          onFrame: (bytes) => this.#handleFrame(bytes, clientId, true),
+          onFailure: (reason) => this.#handleTunnelFailure(clientId, reason),
+        });
+        tunnel.onDrain(() => this.#pty?.resume(`tunnel:${clientId}`));
+      } catch (error) {
+        this.#logger.warn(`tunnel setup failed for ${clientId}: ${formatError(error)}`);
+        peer.close("tunnel setup failed");
+        this.#client?.sendControl({
+          v: PROTOCOL_VERSION,
+          type: "transport",
+          clientId,
+          mode: "relay",
+          state: "failed",
+          reason: "tunnel setup failed",
+        });
+        this.#scheduleSnapshot(clientId);
+        return;
+      }
+    }
+
     this.#p2pLinks.set(clientId, {
       peer,
+      tunnel,
+      tunnelKeyMode: tunnel === null ? null : this.#config.tunnelKeyMode,
       mode: null,
       ready: false,
       sentFrames: 0,
@@ -646,7 +737,9 @@ class HostSession {
     });
     peer.onDrain(() => this.#pty?.resume(`p2p:${clientId}`));
     peer.startOffer();
-    this.#logger.debug(`p2p offer started for viewer ${clientId}`);
+    this.#logger.debug(
+      `p2p offer started for viewer ${clientId}${tunnel === null ? "" : " (tunnel)"}`,
+    );
   }
 
   #handleP2POpen(clientId: string, mode: TransportMode, detail: string): void {
@@ -678,6 +771,11 @@ class HostSession {
       `p2p ready for ${clientId}: ${link.mode} (snapshot seq ${snapshotSeq}); ` +
         "relay output suppressed for this viewer",
     );
+    if (link.tunnel !== null) {
+      this.#logger.info(
+        `tunnel ready for ${clientId} (keyMode=${link.tunnelKeyMode ?? "session-token"}, fec=none)`,
+      );
+    }
   }
 
   #fallbackToRelay(clientId: string, reason: string, scheduleSnapshot = true): void {
@@ -685,8 +783,10 @@ class HostSession {
     if (link === undefined) return;
     this.#p2pLinks.delete(clientId);
     this.#pendingP2PSwitches.delete(clientId);
+    link.tunnel?.dispose();
     link.peer.close(reason);
     this.#pty?.resume(`p2p:${clientId}`);
+    this.#pty?.resume(`tunnel:${clientId}`);
     if (this.#closing) return;
     this.#logger.warn(`p2p unavailable for ${clientId} (${reason}); using relay`);
     this.#client?.sendControl({
@@ -701,6 +801,19 @@ class HostSession {
       // Resume relay delivery with a known-good screen boundary.
       this.#scheduleSnapshot(clientId);
     }
+  }
+
+  #handleTunnelFailure(clientId: string, reason: string): void {
+    const stats = this.#p2pLinks.get(clientId)?.tunnel?.stats;
+    if (stats !== undefined) {
+      this.#logger.debug(
+        `tunnel stats for ${clientId}: sent=${stats.sentRecords} ` +
+          `received=${stats.receivedRecords} retransmits=${stats.retransmits} ` +
+          `decryptFailures=${stats.decryptFailures}`,
+      );
+    }
+    this.#logger.warn(`tunnel unavailable for ${clientId} (${reason}); using relay`);
+    this.#fallbackToRelay(clientId, `tunnel: ${reason}`);
   }
 
   #handleP2PUnavailable(
@@ -769,8 +882,10 @@ class HostSession {
     if (link === undefined) return;
     this.#p2pLinks.delete(clientId);
     this.#pendingP2PSwitches.delete(clientId);
+    link.tunnel?.dispose();
     link.peer.close(reason);
     this.#pty?.resume(`p2p:${clientId}`);
+    this.#pty?.resume(`tunnel:${clientId}`);
   }
 
   #isP2PReady(clientId: string): boolean {
@@ -784,7 +899,7 @@ class HostSession {
     this.#finish(code);
   }
 
-  #handleFrame(bytes: Uint8Array, p2pClientId?: string): void {
+  #handleFrame(bytes: Uint8Array, p2pClientId?: string, viaTunnel = false): void {
     let frame: ReturnType<typeof decodeFrame>;
     try {
       frame = decodeFrame(bytes);
@@ -812,9 +927,28 @@ class HostSession {
           this.#snapshotAll();
         }
         return;
-      case "tunnel":
+      case "tunnel": {
+        if (p2pClientId === undefined) {
+          // v1 relay paths must never forward TUNNEL frames.
+          this.#logger.debug("ignoring tunnel frame from the relay");
+          return;
+        }
+        if (viaTunnel) {
+          // Tunnel plaintext is one complete terminal frame; nesting is out
+          // of contract and must not feed the ARQ state recursively.
+          this.#logger.debug("ignoring nested tunnel frame");
+          return;
+        }
+        const link = this.#p2pLinks.get(p2pClientId);
+        if (link?.tunnel != null) {
+          link.tunnel.receive(frame.payload);
+        } else {
+          this.#logger.debug(`ignoring tunnel frame from ${p2pClientId} without an active tunnel`);
+        }
+        return;
+      }
       case "tunnel_to":
-        this.#logger.debug("tunnel frames are not implemented in v1");
+        this.#logger.debug("ignoring unsupported TUNNEL_TO frame");
         return;
       default:
         return;
@@ -827,13 +961,24 @@ class HostSession {
     this.#lastOutputAt = Date.now();
     this.#writeLocal(chunk);
 
-    for (const part of splitChunk(chunk, OUTPUT_PAYLOAD_MAX)) {
+    for (const part of splitChunk(chunk, this.#outputPayloadMax())) {
       const seq = this.#nextSeq;
       this.#nextSeq += 1;
       this.#lastAssignedSeq = seq;
       this.#mirror?.write(part);
       this.#sendOutput(seq, part);
     }
+  }
+
+  /**
+   * When the TUN profile is enabled, keep every OUTPUT frame inside one AEAD
+   * record. The same split is safe on the relay (slightly smaller frames), so
+   * one frame can travel either path without re-encoding.
+   */
+  #outputPayloadMax(): number {
+    return this.#config.tunnel === "auto" && this.#config.p2p !== "off"
+      ? TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES
+      : OUTPUT_PAYLOAD_MAX;
   }
 
   #sendOutput(seq: number, payload: Uint8Array): void {
@@ -872,16 +1017,24 @@ class HostSession {
     }
     for (const [clientId, link] of this.#p2pLinks) {
       if (!link.ready || !link.peer.isOpen) continue;
-      if (!link.peer.send(frame)) {
+      const sent = link.tunnel === null ? link.peer.send(frame) : link.tunnel.send(frame);
+      if (!sent) {
         this.#logger.warn(`p2p send rejected output seq ${seq} for ${clientId}`);
         this.#fallbackToRelay(clientId, "data channel send failed");
         continue;
       }
       if (link.sentFrames === 0) {
-        this.#logger.info(`p2p output started on data channel for ${clientId} (seq ${seq})`);
+        this.#logger.info(
+          `p2p output started on ${link.tunnel === null ? "data channel" : "tunnel"} ` +
+            `for ${clientId} (seq ${seq})`,
+        );
       }
       link.sentFrames += 1;
-      if (link.peer.bufferedAmount > P2P_HIGH_WATER) {
+      if (link.tunnel !== null) {
+        if (link.tunnel.pendingBytes > TUNNEL_HIGH_WATER) {
+          this.#pty?.pause(`tunnel:${clientId}`);
+        }
+      } else if (link.peer.bufferedAmount > P2P_HIGH_WATER) {
         this.#pty?.pause(`p2p:${clientId}`);
       }
     }
@@ -1021,7 +1174,13 @@ class HostSession {
       let directFrame: Uint8Array | null = null;
       for (const target of targets) {
         const link = this.#p2pLinks.get(target);
-        const canSendDirect = link !== undefined && link.peer.isOpen && link.supportsFragmentation;
+        // The TUN profile runs on an unreliable DataChannel; snapshots stay on
+        // the relay path (they are the recovery boundary, not tunnel data).
+        const canSendDirect =
+          link !== undefined &&
+          link.peer.isOpen &&
+          link.supportsFragmentation &&
+          link.tunnel === null;
         if (canSendDirect) {
           try {
             directFrame ??= encodeFrame({
@@ -1219,6 +1378,7 @@ class HostSession {
     }
     this.#pendingP2PSwitches.clear();
     this.#fragmentationViewers.clear();
+    this.#tunnelViewers.clear();
     for (const timer of this.#p2pRetryTimers.values()) {
       clearTimeout(timer);
     }

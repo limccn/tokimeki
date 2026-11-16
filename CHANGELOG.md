@@ -18,6 +18,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `TOKIMEKI_MAX_LISTENERS` (default 8) on top of the total client cap, and
   excludes listeners from output/ACK/backpressure/slow-consumer accounting.
   Pre-v1.1 relays still reject listener with `not_implemented`.
+- v1.1 F1 opt-in P2P-only TUN profile: `TOKIMEKI_TUNNEL=auto` negotiates a
+  capability-gated `tunnel` envelope and runs AES-256-GCM records with HKDF
+  direction keys plus selective-repeat ARQ over an unreliable/unordered
+  DataChannel. Control messages, snapshots, resize, signaling, and relay ACK
+  flow-control stay on the v1 paths; the relay continues to answer
+  `TUNNEL`/`TUNNEL_TO` with `not_implemented`. A key-mode/dialect mismatch or
+  tunnel failure falls back to the relay and requests a fresh snapshot.
+  `TOKIMEKI_TUNNEL_SECRET` selects relay-blind `shared-secret` keys and is
+  scrubbed from the hosted PTY environment/redacted from logs. XOR FEC is
+  deferred; the capability advertises `fec: ["none"]`.
+- Tunnel record layout/AAD golden vectors and a `tunnel` capability `keyMode`
+  field in `@limccn/tokimeki-protocol`.
 - Golden vectors and protocol/capability coverage for `FRAGMENT` and
   `transports.fragmentation`.
 - 512×512 rounded PNG repository icon with transparent corners
@@ -65,8 +77,10 @@ First public release.
   release.
 
 > Post-release update (2026-11-16): strict NAT↔NAT and real Claude/pi TUI were
-> manually confirmed at the e2e layer; see `docs/deployment.md` §7.6. The 0.1.0
-> limitation above is kept as the release-time record.
+> manually confirmed at the e2e layer; see `docs/deployment.md` §7.6. v1.1
+> added DataChannel fragmentation, listener snapshot-only mode, and an opt-in
+> P2P-only AEAD/ARQ tunnel (XOR FEC deferred). The 0.1.0 limitation above is
+> kept as the release-time record.
 
 [Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

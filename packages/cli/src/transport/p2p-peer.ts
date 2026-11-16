@@ -51,6 +51,19 @@ export interface P2POpenInfo {
   readonly detail: string;
 }
 
+/**
+ * DataChannel creation options for the host side.
+ *
+ * F1's TUN profile runs over `unordered: true` with no SCTP retransmissions;
+ * the tunnel supplies its own selective-repeat ARQ. The v1 path leaves this
+ * undefined so the channel stays reliable/ordered.
+ */
+export interface P2PDataChannelConfig {
+  readonly unordered?: boolean;
+  readonly maxRetransmits?: number;
+  readonly maxPacketLifeTime?: number;
+}
+
 export interface P2PPeerOptions {
   readonly label: string;
   readonly role: "host" | "viewer";
@@ -61,6 +74,10 @@ export interface P2PPeerOptions {
   readonly onOpen: (info: P2POpenInfo) => void;
   readonly onFailed: (reason: string) => void;
   readonly onClosed: (reason: string) => void;
+  /** Host only: DataChannel reliability/delivery options. */
+  readonly dataChannelConfig?: P2PDataChannelConfig;
+  /** Host only: extra fields merged into the `offer` signal payload. */
+  readonly offerMetadata?: Record<string, unknown>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -134,7 +151,12 @@ export class P2PPeer {
   startOffer(): void {
     if (this.#options.role !== "host" || this.#dc !== null || this.#settled) return;
     try {
-      const dc = this.#pc.createDataChannel("tokimeki");
+      // The native binding requires an object when the second argument is
+      // present. Omit it entirely for the v1 reliable/ordered channel.
+      const dc =
+        this.#options.dataChannelConfig === undefined
+          ? this.#pc.createDataChannel("tokimeki")
+          : this.#pc.createDataChannel("tokimeki", this.#options.dataChannelConfig);
       this.#attachDataChannel(dc);
     } catch (error) {
       this.#fail(`failed to create data channel: ${String(error)}`);
@@ -257,6 +279,11 @@ export class P2PPeer {
     pc.onLocalDescription((sdp, type) => {
       if (this.#settled) return;
       if (type !== "offer" && type !== "answer") return;
+      if (type === "offer" && this.#options.offerMetadata !== undefined) {
+        // Metadata must never spoof the SDP fields; spread it first.
+        this.#options.sendSignal(type, { ...this.#options.offerMetadata, sdp, type });
+        return;
+      }
       this.#options.sendSignal(type, { sdp, type });
     });
     pc.onLocalCandidate((candidate, mid) => {

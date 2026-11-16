@@ -17,6 +17,7 @@ import {
   MAX_TARGET_ID_BYTES,
   MAX_TERMINAL_DIMENSION,
   MIN_TARGET_ID_BYTES,
+  MIN_TUNNEL_SECRET_BYTES,
   PROTOCOL_VERSION,
   RESERVED_ROLES,
   RESIZE_POLICIES,
@@ -24,6 +25,20 @@ import {
   SIGNAL_KINDS,
   TRANSPORT_MODES,
   TRANSPORT_STATES,
+  TUNNEL_ARQ_MODE,
+  TUNNEL_CRYPTO_MODE,
+  TUNNEL_DIRECTIONS,
+  TUNNEL_INPUT_PAYLOAD_MAX_BYTES,
+  TUNNEL_KEY_BYTES,
+  TUNNEL_KEY_MODES,
+  TUNNEL_MAX_FRAME_BYTES,
+  TUNNEL_MAX_RECORD_BYTES,
+  TUNNEL_NONCE_BYTES,
+  TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES,
+  TUNNEL_RECORD_HEADER_BYTES,
+  TUNNEL_RECORD_TYPES,
+  TUNNEL_RECORD_VERSION,
+  TUNNEL_TAG_BYTES,
 } from "./constants.js";
 import {
   type BinaryFrame,
@@ -41,6 +56,12 @@ import {
   KNOWN_CONTROL_MESSAGE_TYPES,
   parseControlMessage,
 } from "./messages.js";
+import {
+  decodeTunnelRecord,
+  encodeTunnelAad,
+  encodeTunnelRecord,
+  type TunnelRecordHeader,
+} from "./tunnel.js";
 import { U64_DECIMAL_PATTERN } from "./u64.js";
 
 interface ConstantsVector {
@@ -58,6 +79,12 @@ interface ConstantsVector {
   closeCodes: Record<string, number>;
   limits: Record<string, number>;
   patterns: Record<string, string>;
+  tunnelRecordVersion: number;
+  tunnelRecordTypes: Record<string, number>;
+  tunnelDirections: Record<string, number>;
+  tunnelKeyModes: string[];
+  tunnelArqMode: string;
+  tunnelCryptoMode: string;
 }
 
 interface FrameExpectation {
@@ -215,12 +242,27 @@ describe("constants golden vector", () => {
       maxClientIdLength: MAX_CLIENT_ID_LENGTH,
       minTargetIdBytes: MIN_TARGET_ID_BYTES,
       maxTargetIdBytes: MAX_TARGET_ID_BYTES,
+      tunnelRecordHeaderBytes: TUNNEL_RECORD_HEADER_BYTES,
+      tunnelNonceBytes: TUNNEL_NONCE_BYTES,
+      tunnelTagBytes: TUNNEL_TAG_BYTES,
+      tunnelKeyBytes: TUNNEL_KEY_BYTES,
+      minTunnelSecretBytes: MIN_TUNNEL_SECRET_BYTES,
+      tunnelMaxFrameBytes: TUNNEL_MAX_FRAME_BYTES,
+      tunnelOutputPayloadMaxBytes: TUNNEL_OUTPUT_PAYLOAD_MAX_BYTES,
+      tunnelInputPayloadMaxBytes: TUNNEL_INPUT_PAYLOAD_MAX_BYTES,
+      tunnelMaxRecordBytes: TUNNEL_MAX_RECORD_BYTES,
     });
     expect(constants.patterns).toEqual({
       sessionId: SESSION_ID_PATTERN.source,
       clientId: CLIENT_ID_PATTERN.source,
       u64Decimal: U64_DECIMAL_PATTERN.source,
     });
+    expect(constants.tunnelRecordVersion).toBe(TUNNEL_RECORD_VERSION);
+    expect(constants.tunnelRecordTypes).toEqual(TUNNEL_RECORD_TYPES);
+    expect(constants.tunnelDirections).toEqual(TUNNEL_DIRECTIONS);
+    expect(constants.tunnelKeyModes).toEqual([...TUNNEL_KEY_MODES]);
+    expect(constants.tunnelArqMode).toBe(TUNNEL_ARQ_MODE);
+    expect(constants.tunnelCryptoMode).toBe(TUNNEL_CRYPTO_MODE);
   });
 });
 
@@ -343,5 +385,107 @@ describe("handshake transcript golden vector", () => {
     for (const entry of parsed) {
       expect(parseControlMessage(encodeControlMessage(entry.message))).toEqual(entry.message);
     }
+  });
+});
+
+interface TunnelHeaderVector {
+  version: number;
+  type: string;
+  flags: number;
+  seq: number;
+  ackSeq: number;
+  ackBits: number;
+  nonceHex: string;
+}
+
+interface TunnelRecordVector {
+  name: string;
+  hex: string;
+  header: TunnelHeaderVector;
+  ciphertextHex: string;
+}
+
+interface TunnelAadVector {
+  name: string;
+  direction: 1 | 2;
+  sessionId: string;
+  header: TunnelHeaderVector;
+  aadHex: string;
+}
+
+interface InvalidTunnelRecordVector {
+  name: string;
+  hex: string;
+  error: FrameErrorCode;
+}
+
+interface TunnelRecordVectors {
+  records: TunnelRecordVector[];
+  aad: TunnelAadVector[];
+  invalid: InvalidTunnelRecordVector[];
+}
+
+function headerFromVector(vector: TunnelHeaderVector): TunnelRecordHeader {
+  return {
+    version: vector.version,
+    type: vector.type as TunnelRecordHeader["type"],
+    flags: vector.flags,
+    seq: vector.seq,
+    ackSeq: vector.ackSeq,
+    ackBits: vector.ackBits,
+    nonce: fromHex(vector.nonceHex),
+  };
+}
+
+describe("tunnel record golden vectors", () => {
+  const vectors = readVector<TunnelRecordVectors>("tunnel-records.json");
+
+  for (const vector of vectors.records) {
+    it(`encodes and decodes ${vector.name} byte-exactly`, () => {
+      const header = headerFromVector(vector.header);
+      const ciphertext = fromHex(vector.ciphertextHex);
+      expect(toHex(encodeTunnelRecord(header, ciphertext))).toBe(vector.hex);
+
+      const decoded = decodeTunnelRecord(fromHex(vector.hex));
+      expect(decoded.header).toEqual(header);
+      expect(toHex(decoded.ciphertext)).toBe(vector.ciphertextHex);
+    });
+  }
+
+  for (const vector of vectors.aad) {
+    it(`builds the ${vector.name} AEAD AAD`, () => {
+      const aad = encodeTunnelAad(
+        headerFromVector(vector.header),
+        vector.direction,
+        vector.sessionId,
+      );
+      expect(toHex(aad)).toBe(vector.aadHex);
+    });
+  }
+
+  for (const vector of vectors.invalid) {
+    it(`rejects ${vector.name} with ${vector.error}`, () => {
+      expectFrameError(() => decodeTunnelRecord(fromHex(vector.hex)), vector.error);
+    });
+  }
+
+  it("rejects a record whose plaintext exceeds the DataChannel budget", () => {
+    const header = headerFromVector(
+      vectors.records[0]?.header ?? {
+        version: 1,
+        type: "data",
+        flags: 0,
+        seq: 0,
+        ackSeq: 0,
+        ackBits: 0,
+        nonceHex: "000000000000000000000000",
+      },
+    );
+    const oversized = new Uint8Array(TUNNEL_MAX_FRAME_BYTES + TUNNEL_TAG_BYTES + 1);
+    expectFrameError(() => encodeTunnelRecord(header, oversized), "invalid_frame");
+    const wire = new Uint8Array(TUNNEL_RECORD_HEADER_BYTES + oversized.byteLength);
+    wire.set(encodeTunnelRecord(header, new Uint8Array(TUNNEL_TAG_BYTES)), 0);
+    wire.set(oversized, TUNNEL_RECORD_HEADER_BYTES);
+    expectFrameError(() => decodeTunnelRecord(wire), "invalid_frame");
   });
 });

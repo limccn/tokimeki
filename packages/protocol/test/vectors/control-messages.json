@@ -45,6 +45,39 @@
       }
     },
     {
+      "name": "hello-viewer-tunnel",
+      "message": {
+        "v": 1,
+        "type": "hello",
+        "role": "viewer",
+        "session": "demo-session",
+        "clientId": "viewer-tunnel-1",
+        "protocolVersion": 1,
+        "capabilities": {
+          "protocolVersion": 1,
+          "transports": {
+            "modes": ["p2p-direct", "p2p-turn", "relay"],
+            "fragmentation": {
+              "version": 1,
+              "maxFrameBytes": 1048576,
+              "maxMessageBytes": 16384
+            }
+          },
+          "snapshot": { "formats": ["xterm-serialize", "raw-ring"], "maxBytes": 262144 },
+          "tunnel": {
+            "version": 1,
+            "arq": "selective-repeat",
+            "fec": ["none"],
+            "crypto": "aes-256-gcm",
+            "keyMode": "shared-secret",
+            "maxFrameSize": 16339
+          }
+        },
+        "cols": 120,
+        "rows": 40
+      }
+    },
+    {
       "name": "hello-listener",
       "message": {
         "v": 1,

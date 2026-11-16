@@ -19,6 +19,10 @@
  *                            relay pause/resume; requires E2E_P2P_MODE=off
  *   E2E_LISTENER=1           add `attach --listen`, require immediate/periodic
  *                            snapshots, and prove listener input is ignored
+ *   E2E_TUNNEL=1             enable `TOKIMEKI_TUNNEL=auto` and require the TUN
+ *                            data path; requires E2E_P2P_MODE=auto
+ *   E2E_TUNNEL_SECRET        optional >=16-byte shared secret for relay-blind
+ *                            tunnel keys (host and viewers use the same value)
  *   E2E_TIMEOUT_MS           default: 45000
  *   E2E_DUMP_DIR             on failure, write each process's full output here
  *
@@ -50,6 +54,8 @@ const icePolicy = process.env.E2E_ICE_POLICY ?? "all";
 const secretCheck = process.env.E2E_SECRET_CHECK === "1";
 const flowControl = process.env.E2E_FLOW_CONTROL === "1";
 const listenerMode = process.env.E2E_LISTENER === "1";
+const tunnelMode = process.env.E2E_TUNNEL === "1";
+const tunnelSecret = process.env.E2E_TUNNEL_SECRET;
 
 if (!relayUrl || !masterToken) {
   console.error("TOKIMEKI_RELAY_URL and TOKIMEKI_MASTER_TOKEN are required");
@@ -57,6 +63,10 @@ if (!relayUrl || !masterToken) {
 }
 if (flowControl && p2pMode !== "off") {
   console.error("E2E_FLOW_CONTROL=1 requires E2E_P2P_MODE=off so output uses the relay");
+  process.exit(2);
+}
+if (tunnelMode && p2pMode === "off") {
+  console.error("E2E_TUNNEL=1 requires E2E_P2P_MODE=auto; the TUN profile is P2P-only");
   process.exit(2);
 }
 
@@ -78,6 +88,8 @@ function baseEnv() {
     TOKIMEKI_P2P: p2pMode,
     TOKIMEKI_ICE_TRANSPORT_POLICY: icePolicy,
     ...(listenerMode ? { TOKIMEKI_LISTENER_SNAPSHOT_MS: "500" } : {}),
+    ...(tunnelMode ? { TOKIMEKI_TUNNEL: "auto" } : {}),
+    ...(tunnelSecret === undefined ? {} : { TOKIMEKI_TUNNEL_SECRET: tunnelSecret }),
     TOKIMEKI_LOG_LEVEL: "debug",
   };
 }
@@ -85,8 +97,9 @@ function baseEnv() {
 function hostEnv() {
   const env = { ...baseEnv(), TOKIMEKI_LOG_LEVEL: "debug" };
   if (secretCheck) {
-    // Dummy values only; the fixture reports presence, never values.
-    env.TOKIMEKI_TUNNEL_SECRET = "e2e-dummy-tunnel-secret";
+    // Dummy values only; the fixture reports presence, never values. Keep a
+    // configured tunnel secret intact so host/viewer key modes still match.
+    if (!tunnelMode) env.TOKIMEKI_TUNNEL_SECRET = "e2e-dummy-tunnel-secret";
     env.TOKIMEKI_COTURN_SECRET = "e2e-dummy-coturn-secret";
     env.TOKIMEKI_TURN_API_TOKEN = "e2e-dummy-turn-api-token";
     env.TOKIMEKI_TURN_CREDENTIAL = "e2e-dummy-turn-credential";
@@ -344,18 +357,30 @@ async function main() {
   // before we type, otherwise attach2's input may still legitimately use relay.
   let p2pDataPath = false;
   if (p2pMode !== "off") {
+    const outputMarker = tunnelMode
+      ? "p2p output started on tunnel"
+      : "p2p output started on data channel";
     try {
-      await waitForCount(
-        host,
-        "p2p output started on data channel",
-        2,
-        20_000,
-        "p2p output on data channel",
-      );
+      await waitForCount(host, outputMarker, 2, 20_000, outputMarker);
+      if (tunnelMode) {
+        await waitForCount(host, "tunnel ready for", 2, 20_000, "tunnel ready for");
+        const expectedKeyMode = tunnelSecret ? "shared-secret" : "session-token";
+        if (!new RegExp(`tunnel ready for .*keyMode=${expectedKeyMode}`).test(host.output)) {
+          throw new Error(`tunnel did not negotiate keyMode=${expectedKeyMode}`);
+        }
+        pass(
+          tunnelSecret
+            ? "tunnel used shared-secret keyMode (relay cannot derive the keys)"
+            : "tunnel used session-token keyMode (relay can derive; not relay-blind)",
+        );
+      }
       await new Promise((r) => setTimeout(r, 300));
       attach2.child.write("p2p-live\r");
       await waitFor(host, "p2p input received over data channel", 20_000);
       await waitFor(attach2, "ECHO:p2p-live", 20_000);
+      if (tunnelMode && /tunnel unavailable for/.test(host.output)) {
+        throw new Error("the tunnel fell back to the relay during the tunnel run");
+      }
       p2pDataPath = true;
       const transports = [
         ...new Set(
@@ -367,9 +392,13 @@ async function main() {
       if (transports.length > 0) {
         console.log(`P2P transports: ${transports.join(", ")}`);
       }
-      pass("P2P data path carried host output and viewer input");
+      pass(
+        tunnelMode
+          ? "TUN data path carried host output and viewer input"
+          : "P2P data path carried host output and viewer input",
+      );
     } catch (error) {
-      if (requireP2p) throw error;
+      if (requireP2p || tunnelMode) throw error;
       console.log(`WARN ${error instanceof Error ? error.message : String(error)}`);
     }
   }
