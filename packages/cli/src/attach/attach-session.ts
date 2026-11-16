@@ -512,7 +512,7 @@ class AttachSession {
         });
       },
       onFrame: (bytes) => this.#handleDcFrame(bytes),
-      onOpen: (info) => this.#handleP2POpen(info.mode, info.detail),
+      onOpen: (info) => this.#handleP2POpen(info.mode, info.detail, info.lan),
       onFailed: (reason) => this.#handleP2PFailure(reason),
       onClosed: (reason) => this.#handleP2PFailure(reason),
     });
@@ -569,9 +569,10 @@ class AttachSession {
     this.#handleP2PFailure(`tunnel: ${reason}`);
   }
 
-  #handleP2POpen(mode: TransportMode, detail: string): void {
+  #handleP2POpen(mode: TransportMode, detail: string, lan: boolean): void {
     this.#logger.debug(
-      `p2p data channel open (${mode}, ${detail}); waiting for host snapshot+switch`,
+      `p2p data channel open (${mode}, ${detail}, lan=${lan ? "yes" : "no"}); ` +
+        "waiting for host snapshot+switch",
     );
   }
 

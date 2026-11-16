@@ -49,6 +49,8 @@ export interface P2POpenInfo {
   readonly mode: TransportMode;
   /** Human-readable candidate detail, e.g. `host->srflx`. */
   readonly detail: string;
+  /** Diagnostic hint: both selected candidates are loopback/private/link-local. */
+  readonly lan: boolean;
 }
 
 /**
@@ -371,7 +373,7 @@ export class P2PPeer {
       return;
     }
     if (attempt + 1 >= MODE_LOOKUP_ATTEMPTS) {
-      this.#options.onOpen({ mode: "p2p-direct", detail: "unknown" });
+      this.#options.onOpen({ mode: "p2p-direct", detail: "unknown", lan: false });
       return;
     }
     setTimeout(() => this.#resolveMode(attempt + 1), MODE_LOOKUP_DELAY_MS);

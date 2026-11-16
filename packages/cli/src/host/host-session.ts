@@ -680,7 +680,7 @@ class HostSession {
         });
       },
       onFrame: (bytes) => this.#handleFrame(bytes, clientId),
-      onOpen: (info) => this.#handleP2POpen(clientId, info.mode, info.detail),
+      onOpen: (info) => this.#handleP2POpen(clientId, info.mode, info.detail, info.lan),
       onFailed: (reason) => this.#handleP2PUnavailable(clientId, reason),
       onClosed: (reason) => this.#fallbackToRelay(clientId, reason),
       ...(useTunnel
@@ -742,12 +742,14 @@ class HostSession {
     );
   }
 
-  #handleP2POpen(clientId: string, mode: TransportMode, detail: string): void {
+  #handleP2POpen(clientId: string, mode: TransportMode, detail: string, lan: boolean): void {
     const link = this.#p2pLinks.get(clientId);
     if (link === undefined || this.#closing) return;
     link.mode = mode;
     this.#pendingP2PSwitches.add(clientId);
-    this.#logger.debug(`p2p data channel open for ${clientId} (${mode}, ${detail})`);
+    this.#logger.debug(
+      `p2p data channel open for ${clientId} (${mode}, ${detail}, lan=${lan ? "yes" : "no"})`,
+    );
     // The switch itself happens after a fresh snapshot has been sent over the
     // relay, so the viewer never has to apply pre-switch DC output blindly.
     this.#scheduleSnapshot(clientId);

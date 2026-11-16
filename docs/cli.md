@@ -104,6 +104,11 @@ the current snapshot, and forwards keyboard input.
 - **ICE refresh/retry:** clients refresh ICE credentials before `iceExpiresAt`.
   If a not-yet-ready P2P attempt fails (~12 s), the host refreshes to the next
   usable TURN provider once and renegotiates; a second failure stays on relay.
+- **LAN hint:** when both selected ICE candidates are loopback/private/link-local,
+  P2P debug logs include `lan=yes` (otherwise `lan=no`). The hint is diagnostic
+  only and does not change candidate selection or relay fallback.
+- **Adjacent-network optimization:** mDNS and peer fan-out are not implemented;
+  peer fan-out remains a design-only, default-off future item.
 - **TURN:** set `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` to require TURN; with no
   usable TURN the attempt times out and falls back to the relay. The CLI only
   uses TURN over UDP (libjuice).
