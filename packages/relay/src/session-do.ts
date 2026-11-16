@@ -2,7 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import {
   type AgentMessage,
   type AnyRole,
+  type Capabilities,
   CLOSE_CODES,
+  type ClientDescriptor,
   type ClientInfo,
   type ControlMessage,
   createNotImplementedErrorMessage,
@@ -126,6 +128,10 @@ interface ActiveAttachment {
   lastResyncAt?: number;
   cols?: number;
   rows?: number;
+  /** User-Agent-like identity echoed in welcome/presence (v0.1.2). */
+  client?: ClientDescriptor;
+  /** Rendering capabilities echoed in welcome/presence (v0.1.2). */
+  capabilities?: Capabilities;
 }
 
 type SocketAttachment = PendingAttachment | ActiveAttachment;
@@ -137,6 +143,46 @@ interface ActiveSocket {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Keep socket attachments small and bounded.
+ *
+ * `hello.capabilities` is a loose object and may contain arbitrary large
+ * unknown fields. The relay only needs the User-Agent-like client descriptor
+ * and the display capability for welcome/presence echo; storing anything else
+ * risks the 2 KiB attachment limit and amplifies client data to every peer.
+ */
+function boundedClientDescriptor(client: ClientDescriptor | undefined): ClientDescriptor | undefined {
+  if (client === undefined) return undefined;
+  return {
+    name: client.name.slice(0, 64),
+    version: client.version.slice(0, 64),
+    ...(client.kind === undefined ? {} : { kind: client.kind.slice(0, 32) }),
+    ...(client.platform === undefined ? {} : { platform: client.platform.slice(0, 32) }),
+    ...(client.runtime === undefined ? {} : { runtime: client.runtime.slice(0, 64) }),
+  };
+}
+
+function boundedCapabilities(
+  capabilities: Capabilities | undefined,
+): Capabilities | undefined {
+  const display = capabilities?.display;
+  if (display === undefined) return undefined;
+  return {
+    display: {
+      ...(display.modes === undefined
+        ? {}
+        : { modes: display.modes.slice(0, 16).map((mode) => mode.slice(0, 32)) }),
+      ...(display.fixed === undefined
+        ? {}
+        : { fixed: { cols: display.fixed.cols, rows: display.fixed.rows } }),
+      ...(display.logPanel === undefined ? {} : { logPanel: display.logPanel }),
+      ...(display.terminalQueries === undefined
+        ? {}
+        : { terminalQueries: display.terminalQueries.slice(0, 32) }),
+    },
+  };
 }
 
 function readAttachment(ws: WebSocket): SocketAttachment | null {
@@ -207,6 +253,10 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         ...(typeof raw.lastResyncAt === "number" ? { lastResyncAt: raw.lastResyncAt } : {}),
         ...(typeof raw.cols === "number" ? { cols: raw.cols } : {}),
         ...(typeof raw.rows === "number" ? { rows: raw.rows } : {}),
+        // Persisted only after a schema-validated hello; retain as loose objects
+        // so new display/client fields survive hibernation without a migration.
+        ...(isRecord(raw.client) ? { client: raw.client as ClientDescriptor } : {}),
+        ...(isRecord(raw.capabilities) ? { capabilities: raw.capabilities as Capabilities } : {}),
       };
     }
     return null;
@@ -645,6 +695,8 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       clearHostExit(this.ctx.storage.sql);
     }
 
+    const client = boundedClientDescriptor(hello.client);
+    const displayCapabilities = boundedCapabilities(hello.capabilities);
     const active: ActiveAttachment = {
       kind: "active",
       clientId: hello.clientId,
@@ -661,6 +713,8 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       pendingAcks: [],
       ...(hello.cols === undefined ? {} : { cols: hello.cols }),
       ...(hello.rows === undefined ? {} : { rows: hello.rows }),
+      ...(client === undefined ? {} : { client }),
+      ...(displayCapabilities === undefined ? {} : { capabilities: displayCapabilities }),
     };
     this.saveAttachment(ws, active);
     updateLastActivity(this.ctx.storage.sql, now);
@@ -1693,6 +1747,8 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         connectedAt: att.connectedAt,
         lastSeenAt: att.lastSeenAt,
         transport: { mode: att.transportMode, state: att.transportState },
+        ...(att.client === undefined ? {} : { client: att.client }),
+        ...(att.capabilities === undefined ? {} : { capabilities: att.capabilities }),
       }));
   }
 

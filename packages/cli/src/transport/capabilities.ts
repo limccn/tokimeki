@@ -8,6 +8,13 @@ import {
 
 import { buildTunnelCapability } from "./tunnel/capability.js";
 
+export interface DisplayCapabilityOptions {
+  readonly modes: readonly string[];
+  readonly fixed?: { readonly cols: number; readonly rows: number };
+  readonly logPanel?: boolean;
+  readonly terminalQueries?: "host";
+}
+
 export interface CapabilityOptions {
   /** Advertise the P2P transports this process can actually negotiate. */
   readonly p2p: boolean;
@@ -16,6 +23,8 @@ export interface CapabilityOptions {
   readonly listener?: boolean;
   /** Advertise the TUN profile only when `TOKIMEKI_TUNNEL=auto`. */
   readonly tunnelKeyMode?: TunnelKeyMode;
+  /** Fixed-grid/viewport/log-panel rendering capabilities. */
+  readonly display?: DisplayCapabilityOptions;
 }
 
 /**
@@ -30,6 +39,16 @@ export function supportsFragmentation(capabilities: Capabilities | undefined): b
     fragmentation.maxFrameBytes >= MAX_FRAME_BYTES &&
     fragmentation.maxMessageBytes === MAX_DATACHANNEL_MESSAGE_BYTES
   );
+}
+
+/** True when a peer can render the fixed logical grid in a local viewport. */
+export function supportsViewport(capabilities: Capabilities | undefined): boolean {
+  return capabilities?.display?.modes?.includes("viewport") === true;
+}
+
+/** True when a host mirror advertised that it answers terminal queries. */
+export function hostAnswersTerminalQueries(capabilities: Capabilities | undefined): boolean {
+  return capabilities?.display?.terminalQueries === "host";
 }
 
 /** Capabilities advertised in `hello`. */
@@ -56,6 +75,14 @@ export function buildCapabilities(options: CapabilityOptions): Capabilities {
       formats: ["xterm-serialize", "raw-ring"],
       ...(options.snapshotMaxBytes === undefined ? {} : { maxBytes: options.snapshotMaxBytes }),
     },
+    ...(options.display === undefined
+      ? {}
+      : {
+          display: {
+            ...options.display,
+            modes: [...options.display.modes],
+          },
+        }),
     ...(tunnelKeyMode === undefined ? {} : { tunnel: buildTunnelCapability(tunnelKeyMode) }),
     ...(options.listener === true ? { listener: { modes: ["snapshot-only"] } } : {}),
   };

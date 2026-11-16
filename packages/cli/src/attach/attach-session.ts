@@ -11,9 +11,11 @@ import { randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 
 import {
+  type ClientInfo,
   decodeFrame,
   encodeFrame,
   type IceTransportPolicy,
+  isTerminalSizeWithinLimits,
   type KnownControlMessage,
   PROTOCOL_VERSION,
   type TransportMode,
@@ -21,14 +23,26 @@ import {
   type WelcomeMessage,
 } from "@limccn/tokimeki-protocol";
 
+import { buildClientDescriptor } from "../client-info.js";
 import type { AttachConfig } from "../config.js";
 import { formatError, type Logger } from "../logger.js";
+import { TerminalMirror } from "../terminal/mirror.js";
+import { ModeTracker } from "../terminal/mode-tracker.js";
 import {
   CLEAR_SCREEN,
   ENTER_ALTERNATE_SCREEN,
   terminalRestoreSequence,
 } from "../terminal/restore.js";
-import { buildCapabilities } from "../transport/capabilities.js";
+import {
+  LocalViewport,
+  type ViewportRelayState,
+  type ViewportStatus,
+  type ViewportTransport,
+} from "../terminal/viewport/index.js";
+import {
+  buildCapabilities,
+  hostAnswersTerminalQueries,
+} from "../transport/capabilities.js";
 import { buildNodeRtcConfig, resolveIceTransportPolicy } from "../transport/ice.js";
 import { IceConfigManager } from "../transport/ice-config.js";
 import { P2PPeer } from "../transport/p2p-peer.js";
@@ -88,6 +102,8 @@ class AttachSession {
   readonly #logger: Logger;
   readonly #stdin: NodeJS.ReadStream;
   readonly #stdout: NodeJS.WriteStream;
+  readonly #stderr: NodeJS.WriteStream;
+  readonly #platform: NodeJS.Platform;
   readonly #clientId = randomUUID();
   readonly #reducer = new SeqReducer();
   /** v1.1 read-only mode: snapshots only, no input/resize/ACK/resync/P2P. */
@@ -97,6 +113,13 @@ class AttachSession {
 
   #client: RelayClient | null = null;
   #transport: Transport | null = null;
+  #mirror: TerminalMirror | null = null;
+  #viewport: LocalViewport | null = null;
+  #fixedSize: { cols: number; rows: number } | null = null;
+  #relayState: ViewportRelayState = "connecting";
+  #transportMode: ViewportTransport = "relay";
+  /** Logs captured by the viewport sink and replayed after restore. */
+  readonly #deferredLogs: string[] = [];
   readonly #iceManager: IceConfigManager;
   #iceTransportPolicy: IceTransportPolicy;
   #peer: P2PPeer | null = null;
@@ -133,6 +156,8 @@ class AttachSession {
     this.#logger = deps.logger;
     this.#stdin = deps.stdin ?? process.stdin;
     this.#stdout = deps.stdout ?? process.stdout;
+    this.#stderr = deps.stderr ?? process.stderr;
+    this.#platform = deps.platform ?? process.platform;
     this.#finishedPromise = new Promise<number>((resolve) => {
       this.#resolveFinished = resolve;
     });
@@ -166,12 +191,21 @@ class AttachSession {
       // by the relay anyway); omit them entirely.
       ...(this.#listener ? {} : { cols: localSize.cols, rows: localSize.rows }),
       heartbeatSeconds: this.#config.heartbeatSeconds,
+      client: buildClientDescriptor({ platform: this.#platform }),
       capabilities: buildCapabilities({
         p2p: this.#config.p2p === "auto" && !this.#listener,
         listener: this.#listener,
         ...(this.#config.tunnel === "auto" && !this.#listener
           ? { tunnelKeyMode: this.#config.tunnelKeyMode }
           : {}),
+        ...(this.#config.windowMode === "off"
+          ? {}
+          : {
+              display: {
+                modes: ["viewport"],
+                logPanel: true,
+              },
+            }),
       }),
       logger: this.#logger,
     };
@@ -231,23 +265,11 @@ class AttachSession {
         }
         return;
       }
-      try {
-        // Control-plane frames stay on the relay; terminal input prefers the
-        // direct path once the host has announced it ready. Tunnel input is
-        // split into records by the endpoint before encoding.
-        if (this.#p2pReady && this.#peer !== null) {
-          if (this.#tunnel !== null) {
-            if (this.#tunnel.sendTerminalInput(data)) return;
-            this.#handleP2PFailure("tunnel input send failed");
-          } else {
-            const frame = encodeFrame({ type: "input", payload: data });
-            if (this.#peer.send(frame)) return;
-          }
-        }
-        this.#transport?.send(encodeFrame({ type: "input", payload: data }));
-      } catch (error) {
-        this.#logger.debug(`failed to encode input: ${formatError(error)}`);
+      if (this.#viewport !== null) {
+        this.#viewport.handleInput(data);
+        return;
       }
+      this.#sendInput(data);
     };
     try {
       this.#stdin.resume();
@@ -256,7 +278,10 @@ class AttachSession {
       // stdin may not be readable
     }
 
-    this.#resizeHandler = () => this.#sendResize();
+    this.#resizeHandler = () => {
+      this.#viewport?.resizeLocal(this.#localSize());
+      this.#sendResize();
+    };
     process.on("SIGWINCH", this.#resizeHandler);
     try {
       (this.#stdout as SizedWriteStream).on("resize", this.#resizeHandler);
@@ -274,6 +299,11 @@ class AttachSession {
 
     this.#exitHandler = () => {
       if (!this.#screenActive) return;
+      if (this.#viewport !== null) {
+        this.#viewport.restoreSync();
+        this.#flushDeferredLogs();
+        return;
+      }
       const fd = (this.#stdout as SizedWriteStream).fd;
       if (typeof fd !== "number") return;
       try {
@@ -283,6 +313,27 @@ class AttachSession {
       }
     };
     process.once("exit", this.#exitHandler);
+  }
+
+  #sendInput(data: Uint8Array): void {
+    if (this.#closing || this.#listener || data.byteLength === 0) return;
+    try {
+      // Control-plane frames stay on the relay; terminal input prefers the
+      // direct path once the host has announced it ready. Tunnel input is
+      // split into records by the endpoint before encoding.
+      if (this.#p2pReady && this.#peer !== null) {
+        if (this.#tunnel !== null) {
+          if (this.#tunnel.sendTerminalInput(data)) return;
+          this.#handleP2PFailure("tunnel input send failed");
+        } else {
+          const frame = encodeFrame({ type: "input", payload: data });
+          if (this.#peer.send(frame)) return;
+        }
+      }
+      this.#transport?.send(encodeFrame({ type: "input", payload: data }));
+    } catch (error) {
+      this.#logger.debug(`failed to encode input: ${formatError(error)}`);
+    }
   }
 
   #handleWelcome(welcome: WelcomeMessage): void {
@@ -300,17 +351,93 @@ class AttachSession {
     }
     this.#reducer.reset();
     this.#logger.info(`attached to session ${this.#config.session}`);
+    this.#relayState = "ready";
+    this.#prepareViewport(welcome.clients);
     this.#enterScreen();
     // Tell the host our terminal size even if the relay did not synthesize a
     // resize from hello. The host ignores no-op resizes.
     this.#sendResize();
   }
 
+  #prepareViewport(clients: readonly ClientInfo[]): boolean {
+    if (!this.#interactive || this.#config.windowMode === "off") {
+      this.#disposeViewport();
+      return false;
+    }
+
+    const host = clients.find((client) => client.role === "host");
+    const display = host?.capabilities?.display;
+    const fixed = display?.fixed;
+    if (
+      host === undefined ||
+      fixed === undefined ||
+      display?.modes?.includes("fixed-grid") !== true ||
+      !isTerminalSizeWithinLimits(fixed.cols, fixed.rows)
+    ) {
+      if (this.#viewport === null) {
+        this.#logger.debug("fixed window metadata unavailable; using legacy rendering");
+      }
+      return false;
+    }
+    if (
+      this.#viewport !== null &&
+      this.#fixedSize?.cols === fixed.cols &&
+      this.#fixedSize.rows === fixed.rows
+    ) {
+      return false;
+    }
+
+    this.#disposeViewport();
+    const tracker = new ModeTracker();
+    const mirror = new TerminalMirror({
+      cols: fixed.cols,
+      rows: fixed.rows,
+      scrollback: 0,
+      // New hosts answer terminal queries themselves. Legacy hosts expect the
+      // viewer terminal (now the mirror) to answer as INPUT.
+      ...(this.#listener || hostAnswersTerminalQueries(host.capabilities)
+        ? {}
+        : { onReply: (data: string) => this.#sendInput(Buffer.from(data, "utf8")) }),
+    });
+    this.#mirror = mirror;
+    this.#fixedSize = { cols: fixed.cols, rows: fixed.rows };
+    this.#viewport = new LocalViewport({
+      mirror,
+      tracker,
+      stdout: this.#stdout,
+      logRows: this.#config.logLevel === "debug" ? this.#config.logPanelRows : 0,
+      status: this.#statusModel(),
+      onInput: (data) => this.#sendInput(data),
+    });
+    return true;
+  }
+
+  #disposeViewport(): void {
+    this.#viewport?.dispose();
+    this.#mirror?.dispose();
+    this.#viewport = null;
+    this.#mirror = null;
+    this.#fixedSize = null;
+  }
+
   #enterScreen(): void {
     this.#screenActive = true;
     if (!this.#interactive) return;
-    this.#writeRaw(ENTER_ALTERNATE_SCREEN);
-    this.#logger.setMuted(true);
+    if (this.#viewport !== null) {
+      this.#viewport.start();
+      this.#logger.setSink((line) => {
+        this.#viewport?.appendLog(line);
+        if (this.#config.logLevel !== "debug" || this.#config.logPanelRows === 0) {
+          if (this.#deferredLogs.length >= 256) this.#deferredLogs.shift();
+          this.#deferredLogs.push(line);
+        }
+      });
+      this.#logger.setMuted(false);
+      this.#updateViewportStatus();
+    } else {
+      this.#writeRaw(ENTER_ALTERNATE_SCREEN);
+      this.#logger.setMuted(true);
+    }
     try {
       this.#stdin.setRawMode(true);
       this.#rawMode = true;
@@ -323,7 +450,13 @@ class AttachSession {
     if (!this.#screenActive) return;
     this.#screenActive = false;
     if (!this.#interactive) return;
-    this.#writeRaw(terminalRestoreSequence());
+    if (this.#viewport !== null) {
+      this.#logger.setSink(null);
+      this.#disposeViewport();
+      this.#flushDeferredLogs();
+    } else {
+      this.#writeRaw(terminalRestoreSequence());
+    }
     if (this.#rawMode) {
       try {
         this.#stdin.setRawMode(false);
@@ -364,6 +497,8 @@ class AttachSession {
   }
 
   #handleState(state: RelayConnectionState): void {
+    this.#relayState = state;
+    this.#updateViewportStatus();
     this.#iceManager.onRelayState(state);
     if (state === "reconnecting") {
       this.#restoreTerminal();
@@ -373,6 +508,30 @@ class AttachSession {
       // P2P attempt down and let the host re-offer after the next hello.
       this.#disposeP2P("relay reconnecting");
     }
+  }
+
+  #statusModel(): ViewportStatus {
+    return {
+      role: this.#listener ? "listener" : "viewer",
+      session: this.#config.session,
+      relayState: this.#relayState,
+      viewers: 0,
+      transport: this.#transportMode,
+    };
+  }
+
+  #flushDeferredLogs(): void {
+    if (this.#deferredLogs.length === 0) return;
+    const lines = this.#deferredLogs.splice(0);
+    try {
+      for (const line of lines) this.#stderr.write(`${line}\n`);
+    } catch {
+      // stderr may be gone during shutdown
+    }
+  }
+
+  #updateViewportStatus(): void {
+    this.#viewport?.setStatus(this.#statusModel());
   }
 
   #handleFatal(error: RelayFatalError): void {
@@ -478,18 +637,15 @@ class AttachSession {
         }
         return;
       }
-      case "peer-joined":
-      case "peer-left":
-      case "presence":
-      case "resync":
-      case "ack":
-      case "pause":
-      case "resume":
-      case "ping":
-      case "pong":
-      case "welcome":
-      case "hello":
-      case "resize":
+      case "presence": {
+        // A viewer may attach before the host; presence is how the relay
+        // announces the host (and its display.fixed metadata) later.
+        const created = this.#prepareViewport(message.clients);
+        if (created && this.#screenActive) {
+          this.#enterScreen();
+        }
+        return;
+      }
       default:
         return;
     }
@@ -580,6 +736,8 @@ class AttachSession {
   }
 
   #handleP2POpen(mode: TransportMode, detail: string, lan: boolean): void {
+    this.#transportMode = mode;
+    this.#updateViewportStatus();
     this.#logger.debug(
       `p2p data channel open (${mode}, ${detail}, lan=${lan ? "yes" : "no"}); ` +
         "waiting for host snapshot+switch",
@@ -634,6 +792,8 @@ class AttachSession {
     this.#p2pBufferOverflow = false;
     this.#dcBuffer = [];
     this.#dcBufferBytes = 0;
+    this.#transportMode = "relay";
+    this.#updateViewportStatus();
     peer?.close(reason);
   }
 
@@ -695,11 +855,19 @@ class AttachSession {
   #applyOutput(seq: number, payload: Uint8Array, viaRelay: boolean): void {
     const decision = this.#reducer.classify(seq);
     if (decision === "apply") {
-      this.#writeRaw(payload);
+      this.#writeTerminal(payload);
       if (viaRelay) this.#sendAck(seq);
     } else if (decision === "gap") {
       this.#requestResync();
     }
+  }
+
+  #writeTerminal(data: Uint8Array): void {
+    if (this.#viewport !== null) {
+      this.#viewport.write(data);
+      return;
+    }
+    this.#writeRaw(data);
   }
 
   #handleFrame(bytes: Uint8Array): void {
@@ -768,9 +936,13 @@ class AttachSession {
       this.#logger.debug(`ignoring stale snapshot (seq=${seq}, lastSeq=${lastSeq})`);
     } else {
       this.#reducer.applySnapshot(seq);
-      this.#writeRaw(CLEAR_SCREEN);
-      if (payload.byteLength > 0) {
-        this.#writeRaw(payload);
+      if (this.#viewport !== null) {
+        this.#viewport.resetAndWriteSnapshot(payload);
+      } else {
+        this.#writeRaw(CLEAR_SCREEN);
+        if (payload.byteLength > 0) {
+          this.#writeRaw(payload);
+        }
       }
       this.#logger.debug(
         `applied snapshot (seq=${seq}, bytes=${payload.byteLength}, ` +

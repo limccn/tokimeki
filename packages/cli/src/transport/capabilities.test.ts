@@ -85,6 +85,32 @@ describe("buildCapabilities", () => {
     ).toBe(false);
   });
 
+  it("advertises display capabilities only when requested", () => {
+    expect(buildCapabilities({ p2p: true }).display).toBeUndefined();
+
+    const host = buildCapabilities({
+      p2p: true,
+      display: {
+        modes: ["fixed-grid", "viewport"],
+        fixed: { cols: 120, rows: 40 },
+        logPanel: true,
+        terminalQueries: "host",
+      },
+    });
+    expect(host.display).toEqual({
+      modes: ["fixed-grid", "viewport"],
+      fixed: { cols: 120, rows: 40 },
+      logPanel: true,
+      terminalQueries: "host",
+    });
+
+    const viewer = buildCapabilities({
+      p2p: true,
+      display: { modes: ["viewport"], logPanel: true },
+    });
+    expect(viewer.display).toEqual({ modes: ["viewport"], logPanel: true });
+  });
+
   it("advertises the tunnel dialect only when requested and P2P is enabled", () => {
     const enabled = buildCapabilities({ p2p: true, tunnelKeyMode: "shared-secret" });
     expect(enabled.tunnel).toEqual({

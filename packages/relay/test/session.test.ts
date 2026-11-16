@@ -77,6 +77,62 @@ describe("SessionDurableObject", () => {
     socket.close();
   });
 
+  it("echoes client identity and display capabilities in welcome and presence", async () => {
+    const sessionId = "client-display-echo";
+    const host = await connectWorker(sessionId, {
+      master: MASTER_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    host.send(
+      helloFor(sessionId, "host", "host-1", {
+        client: { name: "tokimeki-cli", version: "0.1.2", kind: "cli", platform: "win32" },
+        capabilities: {
+          display: {
+            modes: ["fixed-grid", "viewport"],
+            fixed: { cols: 120, rows: 40 },
+            logPanel: true,
+            terminalQueries: "host",
+          },
+        },
+      }),
+    );
+    await host.waitForType("welcome");
+
+    const viewer = await connectWorker(sessionId, { token: SESSION_TOKEN });
+    viewer.send(
+      helloFor(sessionId, "viewer", "viewer-1", {
+        client: { name: "tokimeki-cli", version: "0.1.2", kind: "cli", platform: "darwin" },
+        capabilities: { display: { modes: ["viewport"], logPanel: true } },
+      }),
+    );
+    const viewerWelcome = await viewer.waitForType("welcome");
+    const hostInfo = (viewerWelcome.clients as Array<Record<string, unknown>>).find(
+      (client) => client.clientId === "host-1",
+    );
+    expect(hostInfo?.client).toMatchObject({ name: "tokimeki-cli", kind: "cli" });
+    expect(hostInfo?.capabilities).toMatchObject({
+      display: { modes: ["fixed-grid", "viewport"], fixed: { cols: 120, rows: 40 } },
+    });
+
+    const joined = await host.waitFor((message) => message.type === "peer-joined");
+    expect(joined.capabilities).toMatchObject({
+      display: { modes: ["viewport"], logPanel: true },
+    });
+
+    const secondViewer = await connectWorker(sessionId, { token: SESSION_TOKEN });
+    secondViewer.send(helloFor(sessionId, "viewer", "viewer-2"));
+    const secondWelcome = await secondViewer.waitForType("welcome");
+    const viewerInfo = (secondWelcome.clients as Array<Record<string, unknown>>).find(
+      (client) => client.clientId === "viewer-1",
+    );
+    expect(viewerInfo?.client).toMatchObject({ name: "tokimeki-cli", kind: "cli" });
+    expect(viewerInfo?.capabilities).toMatchObject({ display: { modes: ["viewport"] } });
+
+    host.close();
+    viewer.close();
+    secondViewer.close();
+  });
+
   it("rejects duplicate client ids", async () => {
     const host = await openHost("duplicate-client");
     const viewer = await openViewer("duplicate-client", "viewer-1");

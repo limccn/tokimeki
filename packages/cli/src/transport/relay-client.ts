@@ -14,6 +14,7 @@
 import {
   type Capabilities,
   CLOSE_CODES,
+  type ClientDescriptor,
   decodeFrame,
   type ErrorMessage,
   encodeControlMessage,
@@ -42,6 +43,8 @@ export interface RelayClientOptions {
   readonly cols?: number;
   readonly rows?: number;
   readonly heartbeatSeconds: number;
+  /** User-Agent-like identity sent in `hello.client`. */
+  readonly client?: ClientDescriptor;
   readonly capabilities: Capabilities;
   readonly logger: Logger;
 }
@@ -322,6 +325,7 @@ export class RelayClient {
       session: options.session,
       clientId: options.clientId,
       protocolVersion: PROTOCOL_VERSION,
+      ...(options.client === undefined ? {} : { client: options.client }),
       capabilities: options.capabilities,
       ...(options.cols === undefined ? {} : { cols: options.cols }),
       ...(options.rows === undefined ? {} : { rows: options.rows }),

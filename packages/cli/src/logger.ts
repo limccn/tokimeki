@@ -54,18 +54,29 @@ export interface LoggerOptions {
 
 export class Logger {
   readonly #level: LogLevel;
-  readonly #write: (line: string) => void;
+  readonly #defaultWrite: (line: string) => void;
   readonly #redact: (text: string) => string;
+  #write: (line: string) => void;
   #muted = false;
 
   constructor(options: LoggerOptions) {
     this.#level = options.level;
-    this.#write = options.write ?? ((line) => void process.stderr.write(`${line}\n`));
+    this.#defaultWrite =
+      options.write ?? ((line) => void process.stderr.write(`${line}\n`));
+    this.#write = this.#defaultWrite;
     this.#redact = options.redact ?? ((text) => text);
   }
 
   get level(): LogLevel {
     return this.#level;
+  }
+
+  /**
+   * Redirect redacted log lines to a local sink (viewport log panel).
+   * Passing null restores the constructor write target.
+   */
+  setSink(sink: ((line: string) => void) | null): void {
+    this.#write = sink ?? this.#defaultWrite;
   }
 
   /** Suppress all output (used while an attach session is drawing). */

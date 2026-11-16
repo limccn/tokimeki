@@ -9,6 +9,7 @@
 import { randomBytes } from "node:crypto";
 import { hostname as defaultHostname } from "node:os";
 import {
+  isTerminalSizeWithinLimits,
   isValidSessionId,
   MAX_TERMINAL_DIMENSION,
   MIN_TUNNEL_SECRET_BYTES,
@@ -16,7 +17,14 @@ import {
   type ResizePolicy,
   type TunnelKeyMode,
 } from "@limccn/tokimeki-protocol";
+import { ConfigEnvelopeError, parseConfigEnvelope } from "./config-envelope.js";
+import { INVITE_KEYS, type InviteKey } from "./invite.js";
 import { isLogLevel, LOG_LEVELS, type LogLevel } from "./logger.js";
+import {
+  parseTuiCommandList,
+  WINDOW_MODES,
+  type WindowMode,
+} from "./window-policy.js";
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -52,6 +60,8 @@ export interface CommonConfig {
   /** Shared secret for relay-blind mode; null derives from the session token. */
   readonly tunnelSecret: string | null;
   readonly logLevel: LogLevel;
+  /** Global TUI window switch (`TOKIMEKI_WINDOW`). */
+  readonly windowMode: WindowMode;
   /** One-line warnings (for example, recognized-but-unimplemented v1.1 vars). */
   readonly warnings: readonly string[];
   /** Known secret values; the logger redacts every occurrence of these. */
@@ -67,6 +77,14 @@ export interface HostConfig extends CommonConfig {
   readonly colorterm: string;
   readonly resizePolicy: ResizePolicy;
   readonly ptySize: TerminalSize | null;
+  /** Fixed logical window when `TOKIMEKI_PTY_SIZE` is not set. */
+  readonly windowSize: TerminalSize;
+  /** Commands that opt into the fixed TUI window when `windowMode=tui`. */
+  readonly windowTuiCommands: ReadonlySet<string>;
+  /** Debug log panel rows; 0 disables the panel. */
+  readonly logPanelRows: number;
+  /** Local key that reopens the viewer-config overlay. */
+  readonly inviteKey: InviteKey;
   readonly scrollbackLines: number;
   readonly snapshotMaxBytes: number;
   readonly listenerSnapshotMs: number;
@@ -78,6 +96,8 @@ export interface AttachConfig extends CommonConfig {
   /** `listener` is the v1.1 read-only snapshot-only mode (`attach --listen`). */
   readonly role: "viewer" | "listener";
   readonly sessionToken: string;
+  /** Debug log panel rows; 0 disables the panel. */
+  readonly logPanelRows: number;
 }
 
 export interface DoctorConfig {
@@ -114,6 +134,9 @@ export const MIN_LISTENER_SNAPSHOT_MS = 250;
 export const MAX_LISTENER_SNAPSHOT_MS = 60_000;
 export const DEFAULT_TERM = "xterm-256color";
 export const DEFAULT_COLORTERM = "truecolor";
+export const DEFAULT_WINDOW_SIZE: TerminalSize = { cols: 120, rows: 40 };
+export const DEFAULT_LOG_PANEL_ROWS = 8;
+export const MAX_LOG_PANEL_ROWS = 200;
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
@@ -121,6 +144,32 @@ function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
     throw new ConfigError(`${name} is required`);
   }
   return value;
+}
+
+/**
+ * Merge a JSON config envelope underneath the explicit process environment.
+ *
+ * Empty environment strings are treated as unset so a `.env` placeholder such
+ * as `TOKIMEKI_SESSION_TOKEN=` does not erase a config-provided value.
+ */
+function applyConfigEnvelope(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const raw = env.TOKIMEKI_CONFIG;
+  if (raw === undefined || raw.trim() === "") return env;
+  let mapped: Record<string, string>;
+  try {
+    mapped = parseConfigEnvelope(raw);
+  } catch (error) {
+    const message =
+      error instanceof ConfigEnvelopeError ? error.message : "TOKIMEKI_CONFIG is invalid";
+    throw new ConfigError(message);
+  }
+  const merged: NodeJS.ProcessEnv = { ...mapped };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (value === "" && key !== "TOKIMEKI_CONFIG") continue;
+    merged[key] = value;
+  }
+  return merged;
 }
 
 function optionalEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -293,21 +342,51 @@ function parseListenerSnapshotMs(env: NodeJS.ProcessEnv, warnings: string[]): nu
   return value;
 }
 
-function parsePtySize(env: NodeJS.ProcessEnv): TerminalSize | null {
-  const raw = optionalEnv(env, "TOKIMEKI_PTY_SIZE");
-  if (raw === undefined) return null;
+function parseTerminalSize(name: string, raw: string): TerminalSize {
   const match = /^(\d+)\s*[xX]\s*(\d+)$/.exec(raw.trim());
   if (match === null) {
-    throw new ConfigError("TOKIMEKI_PTY_SIZE must use the <cols>x<rows> form");
+    throw new ConfigError(`${name} must use the <cols>x<rows> form`);
   }
   const cols = Number.parseInt(match[1] ?? "", 10);
   const rows = Number.parseInt(match[2] ?? "", 10);
   if (cols < 1 || rows < 1 || cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION) {
     throw new ConfigError(
-      `TOKIMEKI_PTY_SIZE must be between 1x1 and ${MAX_TERMINAL_DIMENSION}x${MAX_TERMINAL_DIMENSION}`,
+      `${name} must be between 1x1 and ${MAX_TERMINAL_DIMENSION}x${MAX_TERMINAL_DIMENSION}`,
     );
   }
+  if (!isTerminalSizeWithinLimits(cols, rows)) {
+    throw new ConfigError(`${name} exceeds the terminal cell limit`);
+  }
   return { cols, rows };
+}
+
+function parsePtySize(env: NodeJS.ProcessEnv): TerminalSize | null {
+  const raw = optionalEnv(env, "TOKIMEKI_PTY_SIZE");
+  if (raw === undefined) return null;
+  return parseTerminalSize("TOKIMEKI_PTY_SIZE", raw);
+}
+
+function parseWindowSize(env: NodeJS.ProcessEnv): TerminalSize {
+  const raw = optionalEnv(env, "TOKIMEKI_WINDOW_SIZE");
+  if (raw === undefined) {
+    return { cols: DEFAULT_WINDOW_SIZE.cols, rows: DEFAULT_WINDOW_SIZE.rows };
+  }
+  return parseTerminalSize("TOKIMEKI_WINDOW_SIZE", raw);
+}
+
+function parseWindowMode(env: NodeJS.ProcessEnv): WindowMode {
+  return parseEnum(
+    "TOKIMEKI_WINDOW",
+    optionalEnv(env, "TOKIMEKI_WINDOW"),
+    WINDOW_MODES,
+    "tui",
+  );
+}
+
+function parseLogPanelRows(env: NodeJS.ProcessEnv): number {
+  const raw = optionalEnv(env, "TOKIMEKI_LOG_PANEL_ROWS");
+  if (raw === undefined) return DEFAULT_LOG_PANEL_ROWS;
+  return parseInteger("TOKIMEKI_LOG_PANEL_ROWS", raw, { min: 0, max: MAX_LOG_PANEL_ROWS });
 }
 
 function parseLogLevel(env: NodeJS.ProcessEnv, warnings: string[]): LogLevel {
@@ -348,6 +427,7 @@ interface CommonConfigParts {
   readonly tunnelKeyMode: TunnelKeyMode;
   readonly tunnelSecret: string | null;
   readonly logLevel: LogLevel;
+  readonly windowMode: WindowMode;
   readonly warnings: string[];
   readonly secrets: string[];
 }
@@ -415,13 +495,14 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
     tunnelKeyMode: tunnelSecret === null ? "session-token" : "shared-secret",
     tunnelSecret,
     logLevel,
+    windowMode: parseWindowMode(env),
     warnings,
     secrets,
   };
 }
 
 export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
-  const env = inputs.env ?? process.env;
+  const env = applyConfigEnvelope(inputs.env ?? process.env);
   const cwd = inputs.cwd ?? process.cwd();
   const hostname = inputs.hostname ?? defaultHostname();
   const masterToken = requireEnv(env, "TOKIMEKI_MASTER_TOKEN");
@@ -449,6 +530,15 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
       "latest",
     ),
     ptySize: parsePtySize(env),
+    windowSize: parseWindowSize(env),
+    windowTuiCommands: parseTuiCommandList(env.TOKIMEKI_WINDOW_TUI),
+    logPanelRows: parseLogPanelRows(env),
+    inviteKey: parseEnum(
+      "TOKIMEKI_INVITE_KEY",
+      optionalEnv(env, "TOKIMEKI_INVITE_KEY"),
+      INVITE_KEYS,
+      "f12",
+    ),
     scrollbackLines: parseScrollback(env),
     snapshotMaxBytes: parseSnapshotMax(env),
     listenerSnapshotMs: parseListenerSnapshotMs(env, common.warnings),
@@ -472,6 +562,7 @@ export function loadAttachConfig(
   env: NodeJS.ProcessEnv = process.env,
   options: AttachConfigOptions = {},
 ): AttachConfig {
+  env = applyConfigEnvelope(env);
   const session = requireEnv(env, "TOKIMEKI_SESSION");
   const sessionToken = requireEnv(env, "TOKIMEKI_SESSION_TOKEN");
   const common = loadCommon(env, session);
@@ -483,6 +574,7 @@ export function loadAttachConfig(
     ...common,
     role,
     sessionToken,
+    logPanelRows: parseLogPanelRows(env),
     secrets: [...common.secrets, sessionToken],
   };
 }
@@ -496,6 +588,11 @@ export function loadAttachConfig(
  */
 export function loadDoctorConfig(env: NodeJS.ProcessEnv = process.env): DoctorConfig {
   const warnings: string[] = [...collectV11Warnings(env)];
+  try {
+    env = applyConfigEnvelope(env);
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : "TOKIMEKI_CONFIG is invalid");
+  }
   const relayRaw = optionalEnv(env, "TOKIMEKI_RELAY_URL");
   let relayUrl: string | null = null;
   if (relayRaw !== undefined) {

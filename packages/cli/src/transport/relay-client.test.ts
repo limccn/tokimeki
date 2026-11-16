@@ -22,6 +22,51 @@ describe("relayHandshakeHeaders", () => {
   });
 });
 
+describe("RelayClient hello", () => {
+  it("sends the optional client descriptor", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    const helloReceived = new Promise<Record<string, unknown>>((resolve) => {
+      server.on("connection", (socket) => {
+        socket.once("message", (data) => {
+          resolve(JSON.parse(Buffer.from(data as Buffer).toString("utf8")) as Record<string, unknown>);
+        });
+      });
+    });
+
+    const logger = new Logger({ level: "silent", write: () => {} });
+    const client = new RelayClient({
+      url: `ws://127.0.0.1:${port}/ws/sess-1`,
+      headers: { "X-Tokimeki-Session": "session-token" },
+      role: "viewer",
+      session: "sess-1",
+      clientId: "viewer-1",
+      heartbeatSeconds: 0,
+      client: { name: "tokimeki-cli", version: "0.1.2", kind: "cli", platform: "linux" },
+      capabilities: {},
+      logger,
+    });
+
+    try {
+      client.start();
+      const hello = await helloReceived;
+      expect(hello.client).toEqual({
+        name: "tokimeki-cli",
+        version: "0.1.2",
+        kind: "cli",
+        platform: "linux",
+      });
+    } finally {
+      client.stop();
+      for (const socket of server.clients) {
+        socket.terminate();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
 describe("RelayClient listener compatibility", () => {
   it("fails with an actionable error when the relay rejects listener mode", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });

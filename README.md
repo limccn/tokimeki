@@ -30,8 +30,15 @@ keyboard control.
 - **Self-hostable.** Deploy the relay to your own Cloudflare account.
 - **Reconnect-friendly.** Snapshots and sequence numbers restore the screen
   after a viewer drops.
-- **Multi-viewer.** Several viewers can attach; input is shared and resize is
-  coordinated.
+- **Multi-viewer.** Several viewers can attach; input is shared, and the host
+  keeps a fixed TUI window so a new viewer never resizes the hosted program.
+  Viewers letterbox or cursor-follow the fixed grid in their own terminal.
+- **Any TUI command.** Add its executable name to `TOKIMEKI_WINDOW_TUI` and run
+  `tokimeki <command>` (for example `TOKIMEKI_WINDOW_TUI=claude,pi,omp` then
+  `tokimeki omp`). Unknown commands are rejected unless allow-listed.
+- **Share again.** In the host viewport, press F12 to reopen the viewer config
+  after the startup banner scrolls away; `c` copies the exact JSON. The config
+  can be passed to the viewer as `TOKIMEKI_CONFIG`.
 
 ## How it works
 

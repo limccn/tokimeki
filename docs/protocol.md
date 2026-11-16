@@ -113,7 +113,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 
 | 消息 | 方向 | 必填字段 | 可选/默认字段 |
 |---|---|---|---|
-| `hello` | client → DO | `role`, `session`, `clientId` | `protocolVersion`（默认 1）、`capabilities`（默认 `{}`）、`cols`, `rows` |
+| `hello` | client → DO | `role`, `session`, `clientId` | `protocolVersion`（默认 1）、`client`、`capabilities`（默认 `{}`）、`cols`, `rows` |
 | `welcome` | DO → client | `session`, `hostOnline`, `iceProvider`, `sessionTtlSeconds` | `protocolVersion`（默认 1）、`clients`（默认 `[]`）、`iceServers`（默认 `[]`）、`iceExpiresAt`、`transportPolicy`（默认 `all`）、`capabilities` |
 | `ice-refresh` | client → DO | 无 | `provider` |
 | `ice` | DO → client | `iceServers`, `iceProvider` | `iceExpiresAt` |
@@ -140,6 +140,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
   `not_implemented`，不授予任何终端路由。`listener` 的 `cols`/`rows` 不参与 PTY 尺寸协商。
 - `peer-joined.role`：v1.1 relay 填 `host`/`viewer`/`observer`/`agent`/`listener`；
   pre-v1.1 relay 不带该字段，host 必须按 viewer 处理（向后兼容）。
+- `hello.client`：可选、User-Agent 式客户端描述：`{ name, version, kind?, platform?, runtime? }`；`name`/`version` 1..64 字符，其余为可选短字符串。不得包含 token、TURN 凭据或终端内容。未知字段必须保留/忽略。
 - `hello.cols` / `hello.rows` / `resize.cols` / `resize.rows`：整数，范围 `1..10000`，且 `cols * rows <= 4_000_000`。
 - `capabilities`：见 §4.4。
 - `welcome.iceProvider`：`coturn`、`static`、`cloudflare`、`stun`。
@@ -168,6 +169,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | Key | 字段 | 状态 |
 |---|---|---|
 | `protocolVersion` | number | 可选 |
+| `display` | `modes: string[]`, `fixed?: {cols,rows}`, `logPanel?`, `terminalQueries?` | v0.1.2 固定窗口/视口能力。host 声明 `modes:["fixed-grid"]`（本地渲染时加 `"viewport"`）与 `fixed`；viewer 声明 `modes:["viewport"]`。`fixed` 受单轴 10000 / 4M cell 限制；`terminalQueries:"host"` 表示 host mirror 负责回答终端查询 |
 | `transports` | `modes: string[]`, `fragmentation?` | v1 使用 `modes`；v1.1 F0 使用 `fragmentation: {version, maxFrameBytes, maxMessageBytes}` |
 | `snapshot` | `formats: string[]`, `maxBytes` | v1 使用；预期格式含 `xterm-serialize`、`raw-ring` |
 | `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `keyMode`, `maxFrameSize` | v1.1 F1 使用 `version:1`、`arq:"selective-repeat"`、`crypto:"aes-256-gcm"`、`keyMode:"session-token"\|"shared-secret"`、`maxFrameSize:16339`；v1.1 F1.1 的 `fec:["none","xor"]`（XOR 单丢包 parity） |
@@ -175,6 +177,15 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `peerRelay` | `version`, `roles: string[]` | v1.1 预留 |
 
 所有 capability 的已知字段都是可选的，未知字段/未知值不得导致连接失败。v1 relay 不协商未知 capability，也不得据此改变行为。
+
+`display` 是 v0.1.2 的可选扩展，不提升 `v`：host 在 `hello.capabilities.display.fixed`
+中声明会话级固定逻辑窗口；viewer 通过 relay 在 `welcome.clients[]` / `presence.clients[]`
+回显的 `capabilities.display.fixed` 发现它。旧 relay 不回显 capabilities 时，viewer
+必须退回 legacy 直通渲染。旧 viewer 收到 `display` 字段必须忽略。
+
+`display.terminalQueries:"host"` 表示由 host mirror 回答终端查询。新 viewer 看到该
+字段时不得把本地 mirror 生成的查询回复发给 host；旧 host 没有该字段时，viewer 可
+把 mirror 回复作为 `INPUT` 发送，等价于真实终端行为。
 
 F0 仅在 `transports.fragmentation` 满足 `version === 1`、`maxFrameBytes >= 1 MiB`、
 `maxMessageBytes === 16384` 时视为支持；不匹配按“不支持分片”处理，回退 relay
@@ -196,11 +207,15 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
   "connectedAt": 1760000000000,
   "lastSeenAt": 1760000000000,
   "transport": { "mode": "p2p-direct", "state": "ready", "via": "host" },
-  "capabilities": {}
+  "client": { "name": "tokimeki-cli", "version": "0.1.2", "kind": "cli" },
+  "capabilities": { "display": { "modes": ["viewport"] } }
 }
 ```
 
-`clientId`、`role`、`connectedAt`、`lastSeenAt`、`transport`、`capabilities` 均可选，时间均为 epoch 毫秒。`transport` 的 `mode`/`state` 同 `transport` 消息。
+`clientId`、`role`、`connectedAt`、`lastSeenAt`、`transport`、`client`、`capabilities`
+均可选，时间均为 epoch 毫秒。relay 只回显有界的 `client` 描述与
+`capabilities.display` 子集（不存储未知 capability 大字段），不解释其内容。
+`transport` 的 `mode`/`state` 同 `transport` 消息。
 
 `IceServerConfig`：
 

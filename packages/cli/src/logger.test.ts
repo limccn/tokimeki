@@ -64,4 +64,28 @@ describe("Logger", () => {
     logger.raw("session: sess-1");
     expect(lines).toEqual(["session: sess-1"]);
   });
+
+  it("redirects redacted lines to a sink and restores the default target", () => {
+    const { logger, lines } = captureLogger("debug");
+    const sink: string[] = [];
+    logger.setSink((line) => sink.push(line));
+    logger.info("panel message");
+    logger.setSink(null);
+    logger.info("stderr message");
+
+    expect(sink).toEqual(["[tokimeki] info: panel message"]);
+    expect(lines).toEqual(["[tokimeki] info: stderr message"]);
+  });
+
+  it("redacts before writing to a sink", () => {
+    const sink: string[] = [];
+    const logger = new Logger({
+      level: "debug",
+      write: () => {},
+      redact: createRedactor(["session-token-9876"]),
+    });
+    logger.setSink((line) => sink.push(line));
+    logger.info("token=session-token-9876");
+    expect(sink.join("\n")).not.toContain("session-token-9876");
+  });
 });

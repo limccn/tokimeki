@@ -23,12 +23,15 @@ export interface TerminalMirrorOptions {
   readonly scrollback: number;
   /** Receives terminal query replies generated while parsing PTY output. */
   readonly onReply?: (data: string) => void;
+  /** Called after each queued chunk has been parsed (viewport invalidation). */
+  readonly onParsed?: () => void;
 }
 
 export class TerminalMirror {
   readonly term: HeadlessTerminal;
   readonly #serializer = new SerializeAddon();
   readonly #replySubscription: IDisposable | null;
+  #onParsed: (() => void) | null;
   #tail: Promise<void> = Promise.resolve();
   #disposed = false;
   #scrollback: number;
@@ -47,6 +50,7 @@ export class TerminalMirror {
     this.term.loadAddon(this.#serializer);
     this.#replySubscription =
       options.onReply === undefined ? null : this.term.onData(options.onReply);
+    this.#onParsed = options.onParsed ?? null;
   }
 
   get cols(): number {
@@ -61,10 +65,34 @@ export class TerminalMirror {
     return this.#scrollback;
   }
 
+  /** Replace the parsed-chunk callback (viewport attaches after construction). */
+  setOnParsed(onParsed: (() => void) | null): void {
+    this.#onParsed = onParsed;
+  }
+
   /** Enqueue a PTY chunk for parsing. The buffer is copied. */
   write(chunk: Uint8Array): void {
     const copy = Uint8Array.from(chunk);
     this.#tail = this.#tail.then(() => this.#writeNow(copy));
+  }
+
+  /**
+   * Reset the mirror, then parse a snapshot payload.
+   *
+   * Both operations are chained behind any previously queued writes, so a
+   * snapshot boundary always wins over pre-snapshot output.
+   */
+  resetAndWrite(chunk: Uint8Array): void {
+    const copy = Uint8Array.from(chunk);
+    this.#tail = this.#tail.then(() => {
+      if (this.#disposed) return;
+      try {
+        this.term.reset();
+      } catch {
+        // A disposed terminal is not fatal for snapshot recovery.
+      }
+      return this.#writeNow(copy);
+    });
   }
 
   #writeNow(chunk: Uint8Array): Promise<void> {
@@ -74,7 +102,10 @@ export class TerminalMirror {
         return;
       }
       try {
-        this.term.write(chunk, () => resolve());
+        this.term.write(chunk, () => {
+          this.#onParsed?.();
+          resolve();
+        });
       } catch {
         resolve();
       }

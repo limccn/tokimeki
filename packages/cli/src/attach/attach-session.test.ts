@@ -164,10 +164,12 @@ function attachConfig(
     tunnelKeyMode: "session-token",
     tunnelSecret: null,
     logLevel: "silent",
+    windowMode: "tui",
     warnings: [],
     secrets: [],
     role,
     sessionToken: "session-token-9876",
+    logPanelRows: 8,
     ...overrides,
   };
 }
@@ -224,6 +226,107 @@ function makeSession(
   });
   return { client, transport, stdin, stdout, done };
 }
+
+describe("attach fixed viewport", () => {
+  it("discovers the host fixed geometry and renders through the mirror", async () => {
+    const { client, transport, stdout, done } = makeSession("viewer");
+    await waitFor(() => client.options.role !== undefined && client.started);
+
+    const welcome = welcomeMessage();
+    welcome.clients = [
+      {
+        clientId: "host-1",
+        role: "host",
+        capabilities: {
+          display: {
+            modes: ["fixed-grid", "viewport"],
+            fixed: { cols: 120, rows: 40 },
+            terminalQueries: "host",
+          },
+        },
+      },
+    ];
+    client.emitWelcome(welcome);
+    const targetId = client.options.clientId;
+    transport.emitFrame(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId,
+        seq: 4,
+        payload: new TextEncoder().encode("viewport screen"),
+      }),
+    );
+
+    await waitFor(() => stdout.text.includes("viewport screen"));
+    expect(stdout.text).toContain("tokimeki");
+    expect(stdout.text).toContain("viewer");
+    expect(stdout.text).toContain("view:");
+
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+
+  it("switches to the viewport when the host appears after attach", async () => {
+    const { client, transport, stdout, done } = makeSession("viewer");
+    await waitFor(() => client.options.role !== undefined && client.started);
+
+    client.emitWelcome(welcomeMessage());
+    client.emitMessage({
+      v: PROTOCOL_VERSION,
+      type: "presence",
+      clients: [
+        {
+          clientId: "host-1",
+          role: "host",
+          capabilities: {
+            display: {
+              modes: ["fixed-grid", "viewport"],
+              fixed: { cols: 120, rows: 40 },
+              terminalQueries: "host",
+            },
+          },
+        },
+      ],
+    });
+
+    const targetId = client.options.clientId;
+    transport.emitFrame(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId,
+        seq: 5,
+        payload: new TextEncoder().encode("late host screen"),
+      }),
+    );
+    await waitFor(() => stdout.text.includes("late host screen"));
+    expect(stdout.text).toContain("view:");
+
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+
+  it("falls back to legacy rendering when the host has no fixed metadata", async () => {
+    const { client, transport, stdout, done } = makeSession("viewer");
+    await waitFor(() => client.options.role !== undefined && client.started);
+
+    client.emitWelcome(welcomeMessage());
+    const targetId = client.options.clientId;
+    transport.emitFrame(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId,
+        seq: 1,
+        payload: new TextEncoder().encode("legacy screen"),
+      }),
+    );
+
+    await waitFor(() => stdout.text.includes("legacy screen"));
+    expect(stdout.text).not.toContain("tokimeki  viewer");
+
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+});
 
 describe("attach listener mode", () => {
   it("negotiates listener capabilities and never sends input, resize, ACK, or resync", async () => {

@@ -20,6 +20,7 @@ import {
   ControlMessageSchema,
   createNotImplementedErrorMessage,
   encodeControlMessage,
+  type HelloMessage,
   HelloMessageSchema,
   isAgentMessage,
   KNOWN_CONTROL_MESSAGE_TYPES,
@@ -197,6 +198,104 @@ describe("hello and welcome", () => {
       }),
     ).toThrow();
     expect(() => HelloMessageSchema.parse({ ...minimalHello, cols: 1.5 })).toThrow();
+  });
+
+  it("roundtrips client identity and display capabilities", () => {
+    const parsed = parseControlMessage({
+      ...minimalHello,
+      client: {
+        name: "tokimeki-cli",
+        version: "0.1.2",
+        kind: "cli",
+        platform: "win32",
+        runtime: "node/22.12.0",
+        futureField: "kept",
+      },
+      capabilities: {
+        display: {
+          modes: ["viewport", "future-mode"],
+          fixed: { cols: 120, rows: 40 },
+          logPanel: true,
+          terminalQueries: "host",
+          futureField: 1,
+        },
+      },
+    });
+    expect(parsed.type).toBe("hello");
+    if (parsed.type !== "hello") throw new Error("expected hello");
+    expect(parsed.client).toMatchObject({
+      name: "tokimeki-cli",
+      version: "0.1.2",
+      kind: "cli",
+    });
+    const hello = parsed as HelloMessage;
+    expect(hello.capabilities.display).toMatchObject({
+      modes: ["viewport", "future-mode"],
+      fixed: { cols: 120, rows: 40 },
+      logPanel: true,
+      terminalQueries: "host",
+    });
+
+    const encoded = JSON.parse(encodeControlMessage(parsed)) as Record<string, unknown>;
+    expect(encoded.client).toMatchObject({ name: "tokimeki-cli", futureField: "kept" });
+    expect(encoded.capabilities).toMatchObject({
+      display: { fixed: { cols: 120, rows: 40 }, futureField: 1 },
+    });
+  });
+
+  it("validates client identity and fixed display size", () => {
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        client: { name: "tokimeki-cli" },
+      }),
+    ).toThrow();
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        client: { name: "", version: "0.1.2" },
+      }),
+    ).toThrow();
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        capabilities: { display: { fixed: { cols: 0, rows: 40 } } },
+      }),
+    ).toThrow();
+    expect(() =>
+      HelloMessageSchema.parse({
+        ...minimalHello,
+        capabilities: { display: { fixed: { cols: 5000, rows: 5000 } } },
+      }),
+    ).toThrow();
+  });
+
+  it("carries client identity and capabilities in welcome clients", () => {
+    const parsed = WelcomeMessageSchema.parse({
+      v: 1,
+      type: "welcome",
+      session: "demo-session",
+      hostOnline: true,
+      iceProvider: "stun",
+      sessionTtlSeconds: 60,
+      clients: [
+        {
+          clientId: "host-1",
+          role: "host",
+          client: { name: "tokimeki-cli", version: "0.1.2", kind: "cli" },
+          capabilities: {
+            display: {
+              modes: ["fixed-grid", "viewport"],
+              fixed: { cols: 120, rows: 40 },
+              logPanel: true,
+              terminalQueries: "host",
+            },
+          },
+        },
+      ],
+    });
+    expect(parsed.clients[0]?.client?.name).toBe("tokimeki-cli");
+    expect(parsed.clients[0]?.capabilities?.display?.fixed).toEqual({ cols: 120, rows: 40 });
   });
 
   it("applies welcome defaults and validates providers", () => {

@@ -43,6 +43,8 @@ const HOST_SECRET_ENV_VARS = [
   "TOKIMEKI_COTURN_SECRET",
   "TOKIMEKI_TURN_API_TOKEN",
   "TOKIMEKI_TURN_CREDENTIAL",
+  // The envelope may contain the tokens above; never expose it to the PTY.
+  "TOKIMEKI_CONFIG",
 ] as const;
 
 /**

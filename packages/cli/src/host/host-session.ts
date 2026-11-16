@@ -25,19 +25,31 @@ import {
   type WelcomeMessage,
 } from "@limccn/tokimeki-protocol";
 
+import { buildClientDescriptor, buildInviteOverlayLines, formatViewerConfigJson } from "../client-info.js";
 import type { HostConfig } from "../config.js";
+import { inviteKeyLabel } from "../invite.js";
 import { formatError, type Logger } from "../logger.js";
 import { TerminalMirror } from "../terminal/mirror.js";
 import { ModeTracker } from "../terminal/mode-tracker.js";
 import { ByteRing } from "../terminal/ring-buffer.js";
-import { buildCapabilities, supportsFragmentation } from "../transport/capabilities.js";
+import {
+  LocalViewport,
+  type ViewportRelayState,
+  type ViewportStatus,
+  type ViewportTransport,
+} from "../terminal/viewport/index.js";
+import {
+  buildCapabilities,
+  supportsFragmentation,
+  supportsViewport,
+} from "../transport/capabilities.js";
 import { buildNodeRtcConfig, resolveIceTransportPolicy } from "../transport/ice.js";
 import { type IceConfig, IceConfigManager } from "../transport/ice-config.js";
 import { P2PPeer } from "../transport/p2p-peer.js";
 import { canRetryP2P, P2P_RETRY_DELAY_MS } from "../transport/p2p-retry.js";
 import { RelayClient } from "../transport/relay-client.js";
 import { RelayTransport } from "../transport/relay-transport.js";
-import type { RelayFatalError } from "../transport/relay-types.js";
+import type { RelayConnectionState, RelayFatalError } from "../transport/relay-types.js";
 import { RouteSelector } from "../transport/route-selector.js";
 import {
   buildTunnelOffer,
@@ -49,6 +61,7 @@ import {
 import { TUNNEL_FEC_OUTPUT_PAYLOAD_MAX_BYTES } from "../transport/tunnel/fec.js";
 import { TunnelTransport } from "../transport/tunnel/tunnel-transport.js";
 import type { Transport } from "../transport/types.js";
+import { resolveWindowMode } from "../window-policy.js";
 import { HostPty, type PtyExitInfo } from "./host-pty.js";
 import { buildPtyCommand } from "./pty-command.js";
 import {
@@ -58,7 +71,7 @@ import {
   type TerminalSize,
 } from "./resize-policy.js";
 
-export type HostCommandKind = "claude" | "pi" | "run";
+export type HostCommandKind = "claude" | "pi" | "run" | "custom";
 
 export interface HostSessionDeps {
   readonly logger: Logger;
@@ -151,17 +164,18 @@ function truncateUtf8Tail(data: Buffer, maxBytes: number): string {
   return slice.subarray(offset).toString("utf8");
 }
 
-/** Session banner lines (never includes a token unless it was generated). */
+/** Session banner lines (never includes the relay master token). */
 export function formatSessionInfo(config: HostConfig, viewerCount: number): string[] {
+  const window = config.ptySize ?? config.windowSize;
   const lines = [
     `session: ${config.session}`,
     `relay: ${config.relayUrl}`,
     `viewers: ${viewerCount}`,
+    `window: ${window.cols}x${window.rows}`,
+    `viewer config (secret, copy as one line): ${formatViewerConfigJson(config)}`,
   ];
-  if (config.sessionTokenGenerated) {
-    lines.push(`session token (generated, save it): ${config.sessionToken}`);
-  } else {
-    lines.push("session token: provided via TOKIMEKI_SESSION_TOKEN");
+  if (config.inviteKey !== "off") {
+    lines.push(`hint: press ${inviteKeyLabel(config.inviteKey)} to show this again`);
   }
   return lines.map((line) => `[tokimeki] ${line}`);
 }
@@ -193,8 +207,12 @@ class HostSession {
 
   #pty: HostPty | null = null;
   #mirror: TerminalMirror | null = null;
+  #viewport: LocalViewport | null = null;
   #client: RelayClient | null = null;
   #transport: Transport | null = null;
+  #relayState: ViewportRelayState = "connecting";
+  /** Logs captured by the viewport sink and replayed after restore. */
+  readonly #deferredLogs: string[] = [];
 
   readonly #tracker = new ModeTracker();
   readonly #ring = new ByteRing(RING_BYTES);
@@ -202,6 +220,13 @@ class HostSession {
   #startupSize: TerminalSize = { cols: 80, rows: 24 };
   #localSize: TerminalSize = { cols: 80, rows: 24 };
   #latestSize: TerminalSize = { cols: 80, rows: 24 };
+  /**
+   * Fixed TUI window gate. When true, viewer/local resizes never reach the PTY;
+   * `#viewportEnabled` (local TTY only) additionally renders it locally.
+   */
+  readonly #fixedGeometryEnabled: boolean;
+  readonly #fixedSize: TerminalSize;
+  readonly #viewportEnabled: boolean;
 
   readonly #viewers = new Set<string>();
   /**
@@ -213,6 +238,8 @@ class HostSession {
   #listenerTimer: NodeJS.Timeout | null = null;
   #listenerSnapshotInFlight = false;
   readonly #viewerSizes = new Map<string, TerminalSize>();
+  /** Viewers that cannot render the fixed grid locally (query responders). */
+  readonly #nonViewportViewers = new Set<string>();
   readonly #pendingSnapshots = new Set<string>();
   readonly #resyncAt = new Map<string, number>();
   #pendingSnapshotSince = 0;
@@ -272,6 +299,15 @@ class HostSession {
     this.#platform = deps.platform ?? process.platform;
     this.#cwd = deps.cwd ?? process.cwd();
     this.#env = deps.env ?? process.env;
+    this.#fixedSize = config.ptySize ?? config.windowSize;
+    this.#fixedGeometryEnabled =
+      resolveWindowMode({
+        mode: config.windowMode,
+        tuiCommands: config.windowTuiCommands,
+        command,
+        platform: this.#platform,
+      }) === "on";
+    this.#viewportEnabled = this.#fixedGeometryEnabled && this.#stdout.isTTY === true;
     this.#finishedPromise = new Promise<number>((resolve) => {
       this.#resolveFinished = resolve;
     });
@@ -300,6 +336,7 @@ class HostSession {
     }
 
     this.#writeSessionInfo();
+    this.#startViewport();
     this.#installLocalTerminal();
     this.#connectRelay();
 
@@ -318,6 +355,63 @@ class HostSession {
     }
   }
 
+  #startViewport(): void {
+    if (this.#viewport === null) return;
+    this.#viewport.start();
+    this.#logger.setSink((line) => {
+      this.#viewport?.appendLog(line);
+      if (this.#config.logLevel !== "debug" || this.#config.logPanelRows === 0) {
+        if (this.#deferredLogs.length >= 256) this.#deferredLogs.shift();
+        this.#deferredLogs.push(line);
+      }
+    });
+    this.#updateViewportStatus();
+  }
+
+  #flushDeferredLogs(): void {
+    if (this.#deferredLogs.length === 0) return;
+    const lines = this.#deferredLogs.splice(0);
+    try {
+      for (const line of lines) this.#stderr.write(`${line}\n`);
+    } catch {
+      // stderr may be gone during shutdown
+    }
+  }
+
+  #statusModel(): ViewportStatus {
+    return {
+      role: "host",
+      session: this.#config.session,
+      relayState: this.#relayState,
+      viewers: this.#viewers.size,
+      transport: this.#transportLabel(),
+      ...(this.#config.inviteKey === "off"
+        ? {}
+        : { inviteHint: `${inviteKeyLabel(this.#config.inviteKey).toLowerCase()}:invite` }),
+    };
+  }
+
+  #transportLabel(): ViewportTransport {
+    for (const link of this.#p2pLinks.values()) {
+      if (link.ready && link.mode !== null) return link.mode;
+    }
+    return "relay";
+  }
+
+  #shouldAnswerTerminalQueries(): boolean {
+    // Without a fixed window the host keeps the legacy rule: with any viewer,
+    // the viewer's real terminal answers.
+    if (!this.#fixedGeometryEnabled) return this.#viewers.size === 0;
+    if (this.#viewers.size === 0) return true;
+    // New viewers suppress their mirror replies; legacy viewers answer through
+    // their real terminal, so the host must not answer as well.
+    return this.#nonViewportViewers.size === 0;
+  }
+
+  #updateViewportStatus(): void {
+    this.#viewport?.setStatus(this.#statusModel());
+  }
+
   #createPty(): void {
     const spec = buildPtyCommand(this.#command, this.#args, {
       env: this.#env,
@@ -328,14 +422,16 @@ class HostSession {
       isClaude: this.#kind === "claude",
       isPi: this.#kind === "pi",
     });
-    const initial = resolveResize({
-      policy: this.#config.resizePolicy,
-      local: this.#startupSize,
-      startup: this.#startupSize,
-      pinned: this.#config.ptySize,
-      viewers: [],
-      latest: this.#latestSize,
-    });
+    const initial = this.#fixedGeometryEnabled
+      ? this.#fixedSize
+      : resolveResize({
+          policy: this.#config.resizePolicy,
+          local: this.#startupSize,
+          startup: this.#startupSize,
+          pinned: this.#config.ptySize,
+          viewers: [],
+          latest: this.#latestSize,
+        });
     this.#latestSize = initial;
     this.#pty = new HostPty(
       {
@@ -356,14 +452,33 @@ class HostSession {
       rows: this.#pty.rows,
       scrollback: this.#config.scrollbackLines,
       onReply: (data) => {
-        // With at least one viewer the real viewer terminal answers queries;
-        // otherwise the host's headless mirror must answer so the TUI does not
-        // hang. Never both.
-        if (this.#viewers.size === 0) {
+        // With a local viewport the host mirror must answer unless a legacy
+        // viewer's real terminal is still responsible for replies.
+        if (this.#shouldAnswerTerminalQueries()) {
           this.#pty?.write(data);
         }
       },
     });
+    if (this.#viewportEnabled) {
+      const inviteKey = this.#config.inviteKey;
+      this.#viewport = new LocalViewport({
+        mirror: this.#mirror,
+        tracker: this.#tracker,
+        stdout: this.#stdout,
+        logRows: this.#config.logLevel === "debug" ? this.#config.logPanelRows : 0,
+        status: this.#statusModel(),
+        onInput: (data) => this.#pty?.write(data),
+        ...(inviteKey === "off"
+          ? {}
+          : {
+              invite: {
+                key: inviteKey,
+                lines: buildInviteOverlayLines(this.#config, inviteKey),
+                copyText: formatViewerConfigJson(this.#config),
+              },
+            }),
+      });
+    }
     this.#logger.info(`PTY started: ${spec.display}`);
   }
 
@@ -373,6 +488,10 @@ class HostSession {
       // ignored; only the local terminal shares control with the viewers.
       if (this.#stdin.isTTY !== true) return;
       const data = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      if (this.#viewport !== null) {
+        this.#viewport.handleInput(data);
+        return;
+      }
       this.#pty?.write(data);
     };
     if (this.#stdin.isTTY === true) {
@@ -412,6 +531,8 @@ class HostSession {
 
     this.#exitHandler = () => {
       // Synchronous best effort: restore the local terminal and kill the tree.
+      this.#viewport?.restoreSync();
+      this.#flushDeferredLogs();
       if (this.#rawMode) {
         try {
           this.#stdin.setRawMode(false);
@@ -438,17 +559,34 @@ class HostSession {
       cols: this.#pty?.cols ?? this.#startupSize.cols,
       rows: this.#pty?.rows ?? this.#startupSize.rows,
       heartbeatSeconds: this.#config.heartbeatSeconds,
+      client: buildClientDescriptor({ platform: this.#platform }),
       capabilities: buildCapabilities({
         p2p: this.#config.p2p === "auto",
         snapshotMaxBytes: this.#config.snapshotMaxBytes,
         ...(this.#config.tunnel === "auto" ? { tunnelKeyMode: this.#config.tunnelKeyMode } : {}),
+        ...(this.#fixedGeometryEnabled
+          ? {
+              display: {
+                modes: this.#viewportEnabled
+                  ? ["fixed-grid", "viewport"]
+                  : ["fixed-grid"],
+                fixed: this.#fixedSize,
+                logPanel: true,
+                terminalQueries: "host",
+              },
+            }
+          : {}),
       }),
       logger: this.#logger,
     });
     this.#client = client;
     client.onWelcome((welcome) => this.#handleWelcome(welcome));
     client.onMessage((message) => this.#handleControl(message));
-    client.onState((state) => this.#iceManager.onRelayState(state));
+    client.onState((state) => {
+      this.#relayState = state;
+      this.#updateViewportStatus();
+      this.#iceManager.onRelayState(state);
+    });
     client.onFatal((error) => this.#handleFatal(error));
 
     const selector = new RouteSelector({
@@ -486,6 +624,7 @@ class HostSession {
     // listeners that left while the host was disconnected before re-adding the
     // currently connected set below.
     this.#listeners.clear();
+    this.#nonViewportViewers.clear();
     this.#stopListenerTimer();
     for (const client of welcome.clients) {
       if (client.role === "listener") {
@@ -494,6 +633,11 @@ class HostSession {
       }
       if (client.role !== undefined && client.role !== "viewer") continue;
       this.#viewers.add(client.clientId);
+      if (supportsViewport(client.capabilities)) {
+        this.#nonViewportViewers.delete(client.clientId);
+      } else {
+        this.#nonViewportViewers.add(client.clientId);
+      }
       this.#updateTunnelViewer(client.clientId, client.capabilities);
       this.#scheduleSnapshot(client.clientId);
       const link = this.#p2pLinks.get(client.clientId);
@@ -516,6 +660,7 @@ class HostSession {
     if (this.#listeners.size > 0) {
       this.#logger.info(`listeners: ${this.#listeners.size}`);
     }
+    this.#updateViewportStatus();
   }
 
   #handleControl(message: KnownControlMessage): void {
@@ -533,6 +678,11 @@ class HostSession {
           return;
         }
         this.#viewers.add(message.clientId);
+        if (supportsViewport(message.capabilities)) {
+          this.#nonViewportViewers.delete(message.clientId);
+        } else {
+          this.#nonViewportViewers.add(message.clientId);
+        }
         const fragments = supportsFragmentation(message.capabilities);
         if (fragments) {
           this.#fragmentationViewers.add(message.clientId);
@@ -545,6 +695,7 @@ class HostSession {
           existingLink.supportsFragmentation = fragments;
         }
         this.#logger.info(`viewer joined: ${message.clientId} (viewers=${this.#viewers.size})`);
+        this.#updateViewportStatus();
         this.#scheduleSnapshot(message.clientId);
         this.#startP2P(message.clientId);
         return;
@@ -562,12 +713,14 @@ class HostSession {
         this.#closeP2PLink(message.clientId, "viewer left");
         this.#viewers.delete(message.clientId);
         this.#viewerSizes.delete(message.clientId);
+        this.#nonViewportViewers.delete(message.clientId);
         this.#pendingSnapshots.delete(message.clientId);
         this.#resyncAt.delete(message.clientId);
         this.#fragmentationViewers.delete(message.clientId);
         this.#tunnelViewers.delete(message.clientId);
         this.#clearP2PRetry(message.clientId);
         this.#logger.info(`viewer left: ${message.clientId} (viewers=${this.#viewers.size})`);
+        this.#updateViewportStatus();
         this.#applyResize();
         return;
       case "resize": {
@@ -582,9 +735,21 @@ class HostSession {
         }
         if (!this.#viewers.has(message.clientId)) {
           this.#viewers.add(message.clientId);
+          // Capability is unknown until peer-joined; be conservative so the
+          // host does not race a legacy viewer's terminal query replies.
+          this.#nonViewportViewers.add(message.clientId);
         }
         const size: TerminalSize = { cols: message.cols, rows: message.rows };
         this.#viewerSizes.set(message.clientId, size);
+        if (this.#fixedGeometryEnabled) {
+          // Fixed TUI window: viewer dimensions are diagnostics only. Never
+          // rewrite #latestSize or resize the PTY.
+          this.#logger.debug(
+            `viewer ${message.clientId} reported ${size.cols}x${size.rows}; ` +
+              `fixed window ${this.#fixedSize.cols}x${this.#fixedSize.rows}`,
+          );
+          return;
+        }
         this.#latestSize = size;
         this.#applyResize();
         this.#scheduleSnapshot(message.clientId);
@@ -774,6 +939,7 @@ class HostSession {
       return;
     }
     link.ready = true;
+    this.#updateViewportStatus();
     this.#client?.sendControl({
       v: PROTOCOL_VERSION,
       type: "transport",
@@ -802,6 +968,7 @@ class HostSession {
     link.peer.close(reason);
     this.#pty?.resume(`p2p:${clientId}`);
     this.#pty?.resume(`tunnel:${clientId}`);
+    this.#updateViewportStatus();
     if (this.#closing) return;
     this.#logger.warn(`p2p unavailable for ${clientId} (${reason}); using relay`);
     this.#client?.sendControl({
@@ -902,6 +1069,7 @@ class HostSession {
     link.peer.close(reason);
     this.#pty?.resume(`p2p:${clientId}`);
     this.#pty?.resume(`tunnel:${clientId}`);
+    this.#updateViewportStatus();
   }
 
   #isP2PReady(clientId: string): boolean {
@@ -1062,6 +1230,7 @@ class HostSession {
   }
 
   #writeLocal(chunk: Buffer): void {
+    if (this.#viewportEnabled) return;
     if (this.#stdout.isTTY !== true) return;
     try {
       const flushed = this.#stdout.write(chunk);
@@ -1093,6 +1262,15 @@ class HostSession {
     const size = readTerminalSize(this.#stdout, this.#startupSize);
     if (sizesEqual(size, this.#localSize)) return;
     this.#localSize = size;
+    if (this.#fixedGeometryEnabled) {
+      // The local viewport (when present) is relaid out from this size; the
+      // hosted PTY keeps its session-level fixed geometry.
+      this.#viewport?.resizeLocal(size);
+      this.#logger.debug(
+        `local terminal resized to ${size.cols}x${size.rows}; fixed window unchanged`,
+      );
+      return;
+    }
     this.#latestSize = size;
     this.#applyResize();
   }
@@ -1100,14 +1278,16 @@ class HostSession {
   #applyResize(): void {
     const pty = this.#pty;
     if (pty === null) return;
-    const next = resolveResize({
-      policy: this.#config.resizePolicy,
-      local: this.#localSize,
-      startup: this.#startupSize,
-      pinned: this.#config.ptySize,
-      viewers: this.#viewerSizes.values(),
-      latest: this.#latestSize,
-    });
+    const next = this.#fixedGeometryEnabled
+      ? this.#fixedSize
+      : resolveResize({
+          policy: this.#config.resizePolicy,
+          local: this.#localSize,
+          startup: this.#startupSize,
+          pinned: this.#config.ptySize,
+          viewers: this.#viewerSizes.values(),
+          latest: this.#latestSize,
+        });
     const current: TerminalSize = { cols: pty.cols, rows: pty.rows };
     if (!isTerminalSizeWithinLimits(next.cols, next.rows)) {
       this.#logger.warn(`ignoring resize outside the cell limit: ${next.cols}x${next.rows}`);
@@ -1400,6 +1580,7 @@ class HostSession {
     this.#pendingP2PSwitches.clear();
     this.#fragmentationViewers.clear();
     this.#tunnelViewers.clear();
+    this.#nonViewportViewers.clear();
     for (const timer of this.#p2pRetryTimers.values()) {
       clearTimeout(timer);
     }
@@ -1453,6 +1634,10 @@ class HostSession {
     this.#client = null;
     this.#iceManager.dispose();
     this.#transport = null;
+    this.#logger.setSink(null);
+    this.#viewport?.dispose();
+    this.#viewport = null;
+    this.#flushDeferredLogs();
     this.#pty?.kill();
     this.#pty = null;
     this.#mirror?.dispose();

@@ -6,8 +6,10 @@ import {
   collectV11Warnings,
   DEFAULT_HEARTBEAT_SECONDS,
   DEFAULT_LISTENER_SNAPSHOT_MS,
+  DEFAULT_LOG_PANEL_ROWS,
   DEFAULT_SCROLLBACK_LINES,
   DEFAULT_SNAPSHOT_MAX_BYTES,
+  DEFAULT_WINDOW_SIZE,
   loadAttachConfig,
   loadDoctorConfig,
   loadHostConfig,
@@ -117,6 +119,11 @@ describe("loadHostConfig", () => {
     expect(config.tunnelSecret).toBeNull();
     expect(config.piTuiMode).toBe("fullscreen");
     expect(config.ptySize).toBeNull();
+    expect(config.windowMode).toBe("tui");
+    expect(config.windowSize).toEqual(DEFAULT_WINDOW_SIZE);
+    expect([...config.windowTuiCommands]).toEqual(["claude", "pi"]);
+    expect(config.logPanelRows).toBe(DEFAULT_LOG_PANEL_ROWS);
+    expect(config.inviteKey).toBe("f12");
     expect(config.claudeBg).toBe(false);
   });
 
@@ -196,6 +203,56 @@ describe("loadHostConfig", () => {
     expect(() =>
       loadHostConfig({ env: baseHostEnv({ TOKIMEKI_RESIZE_POLICY: "everyone" }) }),
     ).toThrow(ConfigError);
+  });
+
+  it("parses TUI window mode, command list, size, and log panel rows", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_WINDOW: "on",
+        TOKIMEKI_WINDOW_TUI: " omp, OMP ,, pi.exe ",
+        TOKIMEKI_WINDOW_SIZE: "200x50",
+        TOKIMEKI_LOG_PANEL_ROWS: "4",
+        TOKIMEKI_INVITE_KEY: "ctrl-]",
+      }),
+    });
+    expect(config.windowMode).toBe("on");
+    expect([...config.windowTuiCommands]).toEqual(["omp", "pi"]);
+    expect(config.windowSize).toEqual({ cols: 200, rows: 50 });
+    expect(config.logPanelRows).toBe(4);
+    expect(config.inviteKey).toBe("ctrl-]");
+
+    const empty = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_WINDOW: "off", TOKIMEKI_WINDOW_TUI: "" }),
+    });
+    expect(empty.windowMode).toBe("off");
+    expect([...empty.windowTuiCommands]).toEqual([]);
+
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW: "auto" }) }),
+    ).toThrow(ConfigError);
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW_SIZE: "100 30" }) }),
+    ).toThrow(ConfigError);
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_WINDOW_SIZE: "5000x5000" }) }),
+    ).toThrow(ConfigError);
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_LOG_PANEL_ROWS: "-1" }) }),
+    ).toThrow(ConfigError);
+    expect(() =>
+      loadHostConfig({ env: baseHostEnv({ TOKIMEKI_INVITE_KEY: "esc" }) }),
+    ).toThrow(ConfigError);
+  });
+
+  it("keeps PTY_SIZE and WINDOW_SIZE independent for host precedence", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_PTY_SIZE: "100x30",
+        TOKIMEKI_WINDOW_SIZE: "120x40",
+      }),
+    });
+    expect(config.ptySize).toEqual({ cols: 100, rows: 30 });
+    expect(config.windowSize).toEqual({ cols: 120, rows: 40 });
   });
 
   it("rejects an out-of-range snapshot budget", () => {

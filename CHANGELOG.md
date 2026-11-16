@@ -6,6 +6,53 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Fixed TUI window and full-screen viewport: commands listed in
+  `TOKIMEKI_WINDOW_TUI` (default `claude,pi`) get a session-level logical grid
+  (`TOKIMEKI_WINDOW_SIZE`, default `120x40`). Viewer `resize` and local terminal
+  resizes no longer change the hosted PTY, so attaching never re-lays out the
+  TUI. Local terminals letterbox the grid when larger and crop with cursor
+  following when smaller.
+- Dynamic TUI subcommands: `TOKIMEKI_WINDOW_TUI` is also the allow-list, so
+  `TOKIMEKI_WINDOW_TUI=claude,pi,omp` enables `tokimeki omp` without a code
+  change. Known commands keep precedence; unlisted unknown commands are
+  rejected with an actionable usage error.
+- Bottom status bar (`tokimeki  host  session=...  relay:ready  viewers:2
+  relay  120x40  view:fit`), mouse coordinate translation into the logical
+  grid, and a debug log panel above the status bar (`TOKIMEKI_LOG_PANEL_ROWS`,
+  default 8; debug only).
+- Protocol `hello.client` (User-Agent-like identity) and
+  `capabilities.display` (`fixed-grid`, `viewport`, `fixed`, `logPanel`,
+  `terminalQueries`); the relay echoes both in `welcome.clients` /
+  `presence.clients`. The wire version stays `v: 1`; older peers/relays ignore
+  the optional fields.
+- F12 viewer-config overlay in the host viewport: after the startup banner
+  scrolls away, press `F12` (configurable `TOKIMEKI_INVITE_KEY=f12|ctrl-]|off`)
+  to show the session, relay, token, and copyable viewer config JSON; `c` copies
+  the exact JSON through OSC 52. The overlay is local, host-side only, and never
+  writes a file.
+- `TOKIMEKI_CONFIG` JSON config envelope: fields map onto existing
+  `TOKIMEKI_*` variables, explicit env vars win, JSON only, and the envelope is
+  scrubbed from the hosted PTY environment. No YAML and no CLI-owned files.
+
+### Changed
+
+- `TOKIMEKI_WINDOW` defaults to `tui` and selects commands from
+  `TOKIMEKI_WINDOW_TUI`; `on` enables every host command and `off` restores the
+  legacy raw/resize path. `TOKIMEKI_PTY_SIZE` still overrides
+  `TOKIMEKI_WINDOW_SIZE`.
+- Debug CLI logs no longer write directly over the TUI: while a viewport owns
+  the screen they go to the log panel (debug) or an exit-time stderr replay
+  (non-debug).
+
+### Fixed
+
+- Attaching a viewer no longer resizes the host PTY or redraws Claude/pi; all
+  viewers share the same fixed logical grid.
+- Terminal query responses are answered exactly once: by the host mirror when
+  all viewers support the viewport, otherwise by a legacy viewer terminal.
+
 ## [0.1.1] - 2026-11-16
 
 ### Added
