@@ -150,6 +150,20 @@ export const MAX_SIGNAL_PAYLOAD_BYTES = 65_536;
  */
 export const MAX_DATACHANNEL_MESSAGE_BYTES = 16_384;
 
+/**
+ * Fixed header size of the v1.1 `FRAGMENT` frame (0x08).
+ *
+ * Layout: type(1) + messageId u32BE(4) + fragmentIndex u16BE(2) +
+ * fragmentCount u16BE(2) + totalBytes u32BE(4) = 13 bytes.
+ */
+export const FRAGMENT_HEADER_BYTES = 13;
+
+/** Largest chunk carried by one DataChannel fragment message. */
+export const MAX_FRAGMENT_CHUNK_BYTES = MAX_DATACHANNEL_MESSAGE_BYTES - FRAGMENT_HEADER_BYTES;
+
+/** Maximum fragments for a 1 MiB frame using canonical chunk sizes. */
+export const MAX_FRAGMENT_COUNT = Math.ceil(MAX_FRAME_BYTES / MAX_FRAGMENT_CHUNK_BYTES);
+
 /** Upper bound for terminal `cols` / `rows` values in control messages. */
 export const MAX_TERMINAL_DIMENSION = 10_000;
 

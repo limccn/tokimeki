@@ -1,5 +1,5 @@
 {
-  "description": "Language-neutral protocol constants and enums for tokimeki v1.",
+  "description": "Language-neutral protocol constants and enums for tokimeki v1/v1.1.",
   "protocolVersion": 1,
   "frameTypes": {
     "INPUT": 1,
@@ -8,7 +8,8 @@
     "RESYNC_REQ": 4,
     "SNAPSHOT_TO": 5,
     "TUNNEL": 6,
-    "TUNNEL_TO": 7
+    "TUNNEL_TO": 7,
+    "FRAGMENT": 8
   },
   "roles": ["host", "viewer", "observer", "agent"],
   "reservedRoles": ["listener"],
@@ -61,6 +62,8 @@
   "limits": {
     "maxFrameBytes": 1048576,
     "maxDatachannelMessageBytes": 16384,
+    "fragmentHeaderBytes": 13,
+    "maxFragmentCount": 65,
     "maxTerminalDimension": 10000,
     "maxSessionIdLength": 64,
     "maxClientIdLength": 64,

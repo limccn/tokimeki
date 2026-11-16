@@ -3,7 +3,7 @@
 > 本文件区分 v1 交付、v1.1 增强与 v2 兼容性工作。
 > **v1.1 与 v2 不属于当前 v1 验收（AC1–AC10）**，未完成不会阻塞 v1 归档。
 
-## v1（当前任务）
+## v1（已交付基线）
 
 TypeScript/Node + npm workspaces：
 
@@ -18,19 +18,38 @@ TypeScript/Node + npm workspaces：
   预留项在 v1 只返回 `not_implemented`，不实现行为。
 - Agent 协调只建 SQLite schema 与 `agent.*` 协议扩展点，不实现 runner。
 
-当前状态：**v1 实现完成（Phase 6）**。relay、PTY/TUI、共享控制、快照重连与
-P2P/TURN/relay 回退已落地，本机 live e2e 三组场景通过。生产 Worker 部署、跨 NAT、
-真实 coturn/Cloudflare TURN 与同 LAN host candidate 验证仍待环境/授权，详见
-`docs/deployment.md` §7。
+当前状态：**v1 实现完成（Phase 6）；v1.1 已立项并进入规划（2026-11-16）**。
+relay、PTY/TUI、共享控制、快照重连与 P2P/TURN/relay 回退已落地；本机 live e2e
+1–5 组场景通过（第 5 组为 host 1006 重连，见 `docs/deployment.md` §7.2）。生产
+Worker 已部署，2026-11-13 已完成本机 NAT ↔ 日本/美国 VPS 的跨机器 relay、直连
+P2P、coturn TURN、Cloudflare TURN 与 TURN 不可达回退验收（§7.3/§7.4）。
+
+2026-11-16 维护者人工确认**严格 NAT↔NAT**（含 P2P 尝试与 relay 回退）与
+**真实 Claude/pi TUI 交互**已通过 e2e 层面验收（`docs/deployment.md` §7.6）；
+该确认不等同于长期运行、直连成功率、生产边缘休眠或全路径验收。
+
+仍待环境/授权验证：Cloudflare 边缘 hibernation/TTL alarm 长跑、同 LAN host
+candidate、跨公网 3-viewer、跨机器 1006 复测、P2P 直连成功率/长期稳定性，以及
+稳定链路上的生产流控；详见 `docs/deployment.md` §7.5。
 
 已知 v1 限制（不阻塞 AC，但进入 v1.1 待办）：P2P 切换不实现 DataChannel 分片，
 快照统一走 relay `SNAPSHOT_TO`；P2P 失败后直接回退 relay，不做 ICE provider
-轮换重试；客户端没有 ICE 到期自动刷新定时器。
+轮换重试；客户端没有 ICE 到期自动刷新定时器。F0 将逐项解决这些限制。
 
 ## v1.1（独立任务，不阻塞 v1）
 
-- **F0 P2P 传输增强**：DataChannel 分片/重组与 P2P 直发快照（含 golden vectors 或
-  传输层兼容说明）；ICE 到期自动 `ice-refresh`；P2P 失败后按 provider 顺序重试一次。
+状态（2026-11-16）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建；首个子
+任务 F0 `.trellis/tasks/11-15-v1-1-f0-p2p-transport` **已实现并通过本地验证**
+（typecheck/lint/276 tests/75 relay tests/build、P2P 快照 e2e、live-e2e 1–4、
+host 重连）。F0 新能力的真实跨公网 NAT/TURN 复测与生产部署尚未执行；
+F1/F2/F3 在 F0 验收后按交付顺序拆子任务。
+
+- **F0 P2P 传输增强**：新增 capability-gated `FRAGMENT` 帧（0x08）实现
+  DataChannel 分片/重组；P2P 直发 `SNAPSHOT`（peer 不支持或发送失败时回退
+  relay `SNAPSHOT_TO`）；ICE 到期自动 `ice-refresh`；P2P 协商失败后按 provider
+  顺序重试一次，再回退 relay。设计已覆盖 viewer 先失败重试、旧快照 stale guard、
+  ICE refresh 串行/quiet 等失败路径。协议新增项需同步 golden vectors 与
+  `docs/protocol.md`；relay/DO 不改路由行为。
 - **F1 应用层可靠隧道（TUN profile）**：只封装 tokimeki 终端字节流，不做 OS TUN/VPN。
   在 WebRTC unreliable/unordered DataChannel 上做 selective-repeat ARQ（KCP 风格）+
   可选 XOR/RS FEC + AES-256-GCM；WS relay 上只保留加密封装，不叠加 ARQ/FEC

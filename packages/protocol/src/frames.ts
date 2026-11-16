@@ -1,4 +1,12 @@
-import { MAX_FRAME_BYTES, MAX_TARGET_ID_BYTES, MIN_TARGET_ID_BYTES } from "./constants.js";
+import {
+  FRAGMENT_HEADER_BYTES,
+  MAX_DATACHANNEL_MESSAGE_BYTES,
+  MAX_FRAGMENT_CHUNK_BYTES,
+  MAX_FRAGMENT_COUNT,
+  MAX_FRAME_BYTES,
+  MAX_TARGET_ID_BYTES,
+  MIN_TARGET_ID_BYTES,
+} from "./constants.js";
 
 /**
  * Binary frame type bytes shared by the WebSocket relay and WebRTC
@@ -16,6 +24,8 @@ export const FRAME_TYPES = {
   SNAPSHOT_TO: 0x05,
   TUNNEL: 0x06,
   TUNNEL_TO: 0x07,
+  /** v1.1 optional, capability-gated P2P fragmentation envelope. */
+  FRAGMENT: 0x08,
 } as const;
 
 export type FrameTypeCode = (typeof FRAME_TYPES)[keyof typeof FRAME_TYPES];
@@ -28,6 +38,7 @@ export const FRAME_TYPE_NAMES: Readonly<Record<FrameTypeCode, string>> = {
   [FRAME_TYPES.SNAPSHOT_TO]: "SNAPSHOT_TO",
   [FRAME_TYPES.TUNNEL]: "TUNNEL",
   [FRAME_TYPES.TUNNEL_TO]: "TUNNEL_TO",
+  [FRAME_TYPES.FRAGMENT]: "FRAGMENT",
 };
 
 /** Binary frame: viewer/attach -> host raw terminal input bytes. */
@@ -63,6 +74,22 @@ export interface SnapshotToFrame {
   readonly payload: Uint8Array;
 }
 
+/**
+ * v1.1 optional frame: one chunk of a larger frame split for a DataChannel.
+ *
+ * `totalBytes` is the full original frame length (including its type byte).
+ * Chunks use canonical sizes: every chunk except the last is
+ * `MAX_FRAGMENT_CHUNK_BYTES`; the last carries the remainder.
+ */
+export interface FragmentFrame {
+  readonly type: "fragment";
+  readonly messageId: number;
+  readonly fragmentIndex: number;
+  readonly fragmentCount: number;
+  readonly totalBytes: number;
+  readonly payload: Uint8Array;
+}
+
 /** Reserved v1.1 frame: application-layer tunnel payload (broadcast form). */
 export interface TunnelFrame {
   readonly type: "tunnel";
@@ -82,11 +109,17 @@ export type BinaryFrame =
   | SnapshotFrame
   | ResyncRequestFrame
   | SnapshotToFrame
+  | FragmentFrame
   | TunnelFrame
   | TunnelToFrame;
 
-/** Every frame the v1 relay/CLI is allowed to act on. */
-export type V1Frame = Exclude<BinaryFrame, TunnelFrame | TunnelToFrame>;
+/**
+ * Every frame the v1 relay/CLI acts on directly.
+ *
+ * `TUNNEL`/`TUNNEL_TO` are reserved for v1.1; `FRAGMENT` is a capability-gated
+ * P2P-only extension. Relay routing never acts on either.
+ */
+export type V1Frame = Exclude<BinaryFrame, FragmentFrame | TunnelFrame | TunnelToFrame>;
 
 /** Frames reserved for v1.1 (`TUNNEL` / `TUNNEL_TO`). */
 export type ReservedFrame = TunnelFrame | TunnelToFrame;
@@ -231,6 +264,11 @@ export function isReservedFrameType(type: number): boolean {
   return type === FRAME_TYPES.TUNNEL || type === FRAME_TYPES.TUNNEL_TO;
 }
 
+/** True for the v1.1 optional P2P `FRAGMENT` frame type. */
+export function isFragmentFrameType(type: number): boolean {
+  return type === FRAME_TYPES.FRAGMENT;
+}
+
 /** True when a decoded frame belongs to the reserved v1.1 tunnel range. */
 export function isReservedFrame(frame: BinaryFrame): frame is ReservedFrame {
   return frame.type === "tunnel" || frame.type === "tunnel_to";
@@ -242,6 +280,71 @@ export function detectFrameType(data: Uint8Array): number | null {
     return null;
   }
   return data[0] ?? null;
+}
+
+function fragmentCountFor(totalBytes: number): number {
+  return Math.ceil(totalBytes / MAX_FRAGMENT_CHUNK_BYTES);
+}
+
+function fragmentChunkLength(
+  fragmentIndex: number,
+  fragmentCount: number,
+  totalBytes: number,
+): number {
+  if (fragmentIndex < fragmentCount - 1) {
+    return MAX_FRAGMENT_CHUNK_BYTES;
+  }
+  return totalBytes - (fragmentCount - 1) * MAX_FRAGMENT_CHUNK_BYTES;
+}
+
+/**
+ * Validate the canonical fragment envelope shared by encode and decode.
+ *
+ * Rejecting non-canonical chunks here keeps the wire format deterministic and
+ * gives the CLI reassembler a fixed offset for every fragment index.
+ */
+function validateFragmentFields(frame: FragmentFrame): void {
+  const { messageId, fragmentIndex, fragmentCount, totalBytes, payload } = frame;
+  if (!Number.isInteger(messageId) || messageId <= 0 || messageId > 0xffff_ffff) {
+    throw new ProtocolFrameError("invalid_frame", "fragment messageId must be a non-zero u32");
+  }
+  if (!Number.isInteger(fragmentCount) || fragmentCount < 1 || fragmentCount > MAX_FRAGMENT_COUNT) {
+    throw new ProtocolFrameError(
+      "invalid_frame",
+      `fragment count must be 1..${MAX_FRAGMENT_COUNT}`,
+    );
+  }
+  if (!Number.isInteger(fragmentIndex) || fragmentIndex < 0 || fragmentIndex >= fragmentCount) {
+    throw new ProtocolFrameError("invalid_frame", "fragment index must be within fragment count");
+  }
+  if (!Number.isInteger(totalBytes) || totalBytes < 1) {
+    throw new ProtocolFrameError("invalid_frame", "fragment totalBytes must be positive");
+  }
+  if (totalBytes > MAX_FRAME_BYTES) {
+    throw new ProtocolFrameError(
+      "frame_too_large",
+      `fragment totalBytes exceeds the ${MAX_FRAME_BYTES}-byte frame limit`,
+    );
+  }
+  if (fragmentCount !== fragmentCountFor(totalBytes)) {
+    throw new ProtocolFrameError(
+      "invalid_frame",
+      "fragment count does not match the canonical totalBytes split",
+    );
+  }
+  const expectedChunk = fragmentChunkLength(fragmentIndex, fragmentCount, totalBytes);
+  if (payload.byteLength !== expectedChunk) {
+    throw new ProtocolFrameError(
+      "invalid_frame",
+      `fragment chunk must be ${expectedChunk} bytes for index ${fragmentIndex}`,
+    );
+  }
+  if (FRAGMENT_HEADER_BYTES + payload.byteLength > MAX_DATACHANNEL_MESSAGE_BYTES) {
+    throw new ProtocolFrameError(
+      "frame_too_large",
+      `fragment message exceeds the ${MAX_DATACHANNEL_MESSAGE_BYTES}-byte DataChannel budget`,
+    );
+  }
 }
 
 /** Encode a binary frame into its wire bytes. */
@@ -285,6 +388,19 @@ export function encodeFrame(frame: BinaryFrame): Uint8Array {
       const seqOffset = 2 + target.byteLength;
       writeU64BE(dataViewOf(encoded), seqOffset, frame.seq);
       encoded.set(payload, seqOffset + 8);
+      return encoded;
+    }
+    case "fragment": {
+      const payload = ensureUint8Array(frame.payload, "fragment payload");
+      validateFragmentFields({ ...frame, payload });
+      const encoded = allocateFrame(FRAGMENT_HEADER_BYTES + payload.byteLength);
+      const view = dataViewOf(encoded);
+      encoded[0] = FRAME_TYPES.FRAGMENT;
+      view.setUint32(1, frame.messageId, false);
+      view.setUint16(5, frame.fragmentIndex, false);
+      view.setUint16(7, frame.fragmentCount, false);
+      view.setUint32(9, frame.totalBytes, false);
+      encoded.set(payload, FRAGMENT_HEADER_BYTES);
       return encoded;
     }
     case "tunnel": {
@@ -384,6 +500,31 @@ export function decodeFrame(data: Uint8Array): BinaryFrame {
         seq: readU64BE(dataViewOf(bytes), nextOffset),
         payload: bytes.slice(nextOffset + 8),
       };
+    }
+    case FRAME_TYPES.FRAGMENT: {
+      if (bytes.byteLength < FRAGMENT_HEADER_BYTES) {
+        throw new ProtocolFrameError(
+          "frame_truncated",
+          `FRAGMENT frame requires a ${FRAGMENT_HEADER_BYTES}-byte header`,
+        );
+      }
+      if (bytes.byteLength > MAX_DATACHANNEL_MESSAGE_BYTES) {
+        throw new ProtocolFrameError(
+          "frame_too_large",
+          `FRAGMENT message exceeds the ${MAX_DATACHANNEL_MESSAGE_BYTES}-byte DataChannel budget`,
+        );
+      }
+      const view = dataViewOf(bytes);
+      const frame: FragmentFrame = {
+        type: "fragment",
+        messageId: view.getUint32(1, false),
+        fragmentIndex: view.getUint16(5, false),
+        fragmentCount: view.getUint16(7, false),
+        totalBytes: view.getUint32(9, false),
+        payload: bytes.slice(FRAGMENT_HEADER_BYTES),
+      };
+      validateFragmentFields(frame);
+      return frame;
     }
     case FRAME_TYPES.TUNNEL:
       return { type: "tunnel", payload: bytes.slice(1) };

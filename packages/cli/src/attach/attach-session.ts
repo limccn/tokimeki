@@ -13,7 +13,6 @@ import { writeSync } from "node:fs";
 import {
   decodeFrame,
   encodeFrame,
-  type IceServerConfig,
   type IceTransportPolicy,
   type KnownControlMessage,
   PROTOCOL_VERSION,
@@ -31,13 +30,14 @@ import {
 } from "../terminal/restore.js";
 import { buildCapabilities } from "../transport/capabilities.js";
 import { buildNodeRtcConfig, resolveIceTransportPolicy } from "../transport/ice.js";
+import { IceConfigManager } from "../transport/ice-config.js";
 import { P2PPeer } from "../transport/p2p-peer.js";
 import { RelayClient } from "../transport/relay-client.js";
 import { RelayTransport } from "../transport/relay-transport.js";
 import type { RelayConnectionState, RelayFatalError } from "../transport/relay-types.js";
 import { RouteSelector } from "../transport/route-selector.js";
 import type { Transport } from "../transport/types.js";
-import { SeqReducer } from "./seq-reducer.js";
+import { isStaleSnapshot, SeqReducer } from "./seq-reducer.js";
 
 export interface AttachSessionDeps {
   readonly logger: Logger;
@@ -76,7 +76,7 @@ class AttachSession {
 
   #client: RelayClient | null = null;
   #transport: Transport | null = null;
-  #iceServers: readonly IceServerConfig[] = [];
+  readonly #iceManager: IceConfigManager;
   #iceTransportPolicy: IceTransportPolicy;
   #peer: P2PPeer | null = null;
   #p2pReady = false;
@@ -109,6 +109,16 @@ class AttachSession {
     this.#stdout = deps.stdout ?? process.stdout;
     this.#finishedPromise = new Promise<number>((resolve) => {
       this.#resolveFinished = resolve;
+    });
+    this.#iceManager = new IceConfigManager({
+      logger: this.#logger,
+      sendIceRefresh: (provider) => {
+        this.#client?.sendControl({
+          v: PROTOCOL_VERSION,
+          type: "ice-refresh",
+          ...(provider === undefined ? {} : { provider }),
+        });
+      },
     });
   }
 
@@ -220,7 +230,7 @@ class AttachSession {
   }
 
   #handleWelcome(welcome: WelcomeMessage): void {
-    this.#iceServers = welcome.iceServers;
+    this.#iceManager.updateFromWelcome(welcome);
     this.#iceTransportPolicy = resolveIceTransportPolicy(
       this.#config.iceTransportPolicy,
       welcome.transportPolicy,
@@ -298,6 +308,7 @@ class AttachSession {
   }
 
   #handleState(state: RelayConnectionState): void {
+    this.#iceManager.onRelayState(state);
     if (state === "reconnecting") {
       this.#restoreTerminal();
       this.#logger.info("relay disconnected; reconnecting");
@@ -355,6 +366,12 @@ class AttachSession {
         return;
       case "signal": {
         if (message.kind === "offer") {
+          // A new offer means the host started a new P2P attempt (initial
+          // switch or the one-shot retry). Silently drop any old peer so a
+          // lost relay-failure control message cannot strand the viewer.
+          if (this.#peer !== null) {
+            this.#disposeP2P("host restarted p2p negotiation");
+          }
           this.#startViewerPeer(message.from);
         }
         this.#peer?.handleSignal({ kind: message.kind, payload: message.payload });
@@ -365,12 +382,16 @@ class AttachSession {
         this.#handleTransportUpdate(message.mode, message.state, message.reason);
         return;
       }
+      case "ice":
+        this.#iceManager.updateFromIce(message);
+        return;
+      case "ice-refresh":
+        this.#logger.debug("ice refresh requested");
+        return;
       case "peer-joined":
       case "peer-left":
       case "host":
       case "presence":
-      case "ice":
-      case "ice-refresh":
       case "resync":
       case "ack":
       case "pause":
@@ -391,7 +412,7 @@ class AttachSession {
     const peer = new P2PPeer({
       label: `viewer:${hostClientId}`,
       role: "viewer",
-      rtcConfig: buildNodeRtcConfig(this.#iceServers, this.#iceTransportPolicy),
+      rtcConfig: buildNodeRtcConfig(this.#iceManager.current.servers, this.#iceTransportPolicy),
       logger: this.#logger,
       sendSignal: (kind, payload) => {
         this.#client?.sendControl({
@@ -534,7 +555,9 @@ class AttachSession {
         return;
       case "snapshot":
         // Relay-targeted snapshots are delivered as SNAPSHOT_TO; the untargeted
-        // variant belongs to the P2P path (Phase 4).
+        // variant is only valid on the direct P2P DataChannel.
+        if (viaRelay) return;
+        this.#applySnapshot(frame.seq, frame.payload, false);
         return;
       case "output":
         this.#applyOutput(frame.seq, frame.payload, viaRelay);
@@ -564,22 +587,33 @@ class AttachSession {
   }
 
   #applySnapshot(seq: number, payload: Uint8Array, viaRelay: boolean): void {
-    this.#reducer.applySnapshot(seq);
-    this.#writeRaw(CLEAR_SCREEN);
-    if (payload.byteLength > 0) {
-      this.#writeRaw(payload);
+    const lastSeq = this.#reducer.lastSeq;
+    if (isStaleSnapshot(lastSeq, seq)) {
+      // A fallback/retry race can deliver an old DataChannel snapshot after a
+      // newer relay snapshot; never clear the screen or move the reducer back.
+      this.#logger.debug(`ignoring stale snapshot (seq=${seq}, lastSeq=${lastSeq})`);
+    } else {
+      this.#reducer.applySnapshot(seq);
+      this.#writeRaw(CLEAR_SCREEN);
+      if (payload.byteLength > 0) {
+        this.#writeRaw(payload);
+      }
+      this.#logger.debug(
+        `applied snapshot (seq=${seq}, bytes=${payload.byteLength}, ` +
+          `via=${viaRelay ? "relay" : "p2p"})`,
+      );
     }
-    this.#logger.debug(`applied snapshot (seq=${seq}, bytes=${payload.byteLength})`);
+
     if (viaRelay) {
-      // The snapshot supersedes every earlier relay byte for this viewer.
+      // The snapshot supersedes every earlier relay byte for this viewer, even
+      // when a stale snapshot payload was skipped.
       this.#sendAck(seq);
     }
 
     if (this.#peer !== null) {
-      // The host sends this snapshot over the relay immediately before
-      // announcing the P2P switch, so buffered DataChannel frames can now be
-      // applied in order after the snapshot boundary. If the switch control
-      // has not arrived yet, `#flushDcBuffer` waits for it.
+      // The switch snapshot is a boundary for buffered DataChannel frames even
+      // when the viewer already has newer state; `#flushDcBuffer` still waits
+      // for the host's `transport ready` if it has not arrived yet.
       this.#p2pSnapshotSeen = true;
       this.#flushDcBuffer();
     }
@@ -645,6 +679,7 @@ class AttachSession {
     this.#disposeP2P("session closing");
     this.#client?.stop();
     this.#client = null;
+    this.#iceManager.dispose();
     this.#transport = null;
   }
 }

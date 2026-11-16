@@ -6,10 +6,12 @@ import {
   ALL_ROLES,
   CLOSE_CODES,
   ERROR_CODES,
+  FRAGMENT_HEADER_BYTES,
   ICE_PROVIDERS,
   ICE_TRANSPORT_POLICIES,
   MAX_CLIENT_ID_LENGTH,
   MAX_DATACHANNEL_MESSAGE_BYTES,
+  MAX_FRAGMENT_COUNT,
   MAX_FRAME_BYTES,
   MAX_SESSION_ID_LENGTH,
   MAX_TARGET_ID_BYTES,
@@ -62,6 +64,10 @@ interface FrameExpectation {
   type: string;
   seq?: number;
   targetId?: string;
+  messageId?: number;
+  fragmentIndex?: number;
+  fragmentCount?: number;
+  totalBytes?: number;
   payloadHex?: string;
 }
 
@@ -153,6 +159,23 @@ function expectToFrame(expectation: FrameExpectation): BinaryFrame {
         seq: expectation.seq,
         payload,
       };
+    case "fragment":
+      if (
+        expectation.messageId === undefined ||
+        expectation.fragmentIndex === undefined ||
+        expectation.fragmentCount === undefined ||
+        expectation.totalBytes === undefined
+      ) {
+        throw new Error("fragment fixture is missing expect fragment metadata");
+      }
+      return {
+        type: "fragment",
+        messageId: expectation.messageId,
+        fragmentIndex: expectation.fragmentIndex,
+        fragmentCount: expectation.fragmentCount,
+        totalBytes: expectation.totalBytes,
+        payload,
+      };
     case "tunnel":
       return { type: "tunnel", payload };
     case "tunnel_to":
@@ -185,6 +208,8 @@ describe("constants golden vector", () => {
     expect(constants.limits).toEqual({
       maxFrameBytes: MAX_FRAME_BYTES,
       maxDatachannelMessageBytes: MAX_DATACHANNEL_MESSAGE_BYTES,
+      fragmentHeaderBytes: FRAGMENT_HEADER_BYTES,
+      maxFragmentCount: MAX_FRAGMENT_COUNT,
       maxTerminalDimension: MAX_TERMINAL_DIMENSION,
       maxSessionIdLength: MAX_SESSION_ID_LENGTH,
       maxClientIdLength: MAX_CLIENT_ID_LENGTH,
@@ -202,10 +227,19 @@ describe("constants golden vector", () => {
 describe("binary frame golden vectors", () => {
   const vectors = readVector<FrameVectors>("frames.json");
 
-  it("covers every v1 and reserved frame type", () => {
+  it("covers every v1, v1.1 fragment, and reserved frame type", () => {
     const seen = new Set(vectors.valid.map((vector) => vector.expect.type));
     expect([...seen].sort()).toEqual(
-      ["input", "output", "resync_req", "snapshot", "snapshot_to", "tunnel", "tunnel_to"].sort(),
+      [
+        "fragment",
+        "input",
+        "output",
+        "resync_req",
+        "snapshot",
+        "snapshot_to",
+        "tunnel",
+        "tunnel_to",
+      ].sort(),
     );
   });
 

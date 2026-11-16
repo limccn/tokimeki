@@ -8,6 +8,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- v1.1 F0 P2P transport enhancements: capability-gated `FRAGMENT 0x08`
+  DataChannel fragmentation/reassembly, P2P-direct `SNAPSHOT`, automatic ICE
+  credential refresh, and one bounded TURN-provider retry before relay fallback.
+- Golden vectors and protocol/capability coverage for `FRAGMENT` and
+  `transports.fragmentation`.
 - 512×512 rounded PNG repository icon with transparent corners
   (`assets/icon.png`), generated from the new mascot artwork.
 
@@ -15,6 +20,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - English and Chinese READMEs now reference `assets/icon.png` instead of the
   legacy `assets/icon.svg` header icon.
+- Acceptance records now note that strict NAT↔NAT (including P2P attempts and
+  relay fallback) and real Claude/pi TUI interaction were manually confirmed at
+  the e2e layer on 2026-11-16. This is not a production, long-run,
+  direct-path-success-rate, or exhaustive interaction acceptance claim.
 
 ## [0.1.0] - 2026-11-14
 
@@ -39,13 +48,18 @@ First public release.
 ### Known limitations
 
 - P2P direct is best-effort; TURN or the Worker relay is the reliable path.
-- Strict NAT↔NAT validation, production edge hibernation/TTL long-run, and
-  real Claude/pi TUI manual acceptance remain environment-dependent.
+- At release time, strict NAT↔NAT validation, production edge hibernation/TTL
+  long-run, and real Claude/pi TUI manual acceptance remained
+  environment-dependent.
 - v1 has no DataChannel fragmentation, automatic TURN provider refresh, or
   listener/tunnel runtime.
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
   tests; link-quality work (selective-repeat/ARQ) is planned for a later
   release.
+
+> Post-release update (2026-11-16): strict NAT↔NAT and real Claude/pi TUI were
+> manually confirmed at the e2e layer; see `docs/deployment.md` §7.6. The 0.1.0
+> limitation above is kept as the release-time record.
 
 [Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

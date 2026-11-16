@@ -14,8 +14,9 @@
 > 2026-11-13 完成 coturn secret 轮换；两台 coturn 均通过 relay-pair 门禁，
 > `stun.tokiapi.app` 的 `external-ip` 已修复（见 §4.1）。
 > Worker `/healthz`、`/ws/<session>`、SessionDO（SQLite + Hibernation）、TURN 凭据签发、
-> PTY/TUI 托管、共享控制、快照重连与 P2P 路径均已落地；本机 live e2e 四组场景通过，
-> 生产 TURN-only e2e（coturn UDP）与 Cloudflare TURN TURN-only e2e 通过。生产 P2P
+> PTY/TUI 托管、共享控制、快照重连与 P2P 路径均已落地；本机 live e2e 1–5 组通过
+> （第 5 组为独立的 host 1006 重连脚本），生产 TURN-only e2e（coturn UDP）与
+> Cloudflare TURN TURN-only e2e 通过。生产 P2P
 > live e2e 曾在 `d28ef19e` 完整通过；2026-11-13 在 `ee53cf15` 复跑两次均因跨境 relay
 > 心跳中断停在不同断言，P2P 直连路径本身已建立（见 §7.3）。2026-11-13 完成本机
 > NAT ↔ 日本/美国 VPS 的跨机器 relay、直连 P2P、
@@ -23,6 +24,8 @@
 > 缺陷已在源码修复，通过本机真实 TCP 断线复测，并已随 `293d1eba` 部署到生产；
 > 生产环境另以同 clientId 双 host 冒烟验证了鉴权后替换路径（旧 socket 4003，新 socket
 > welcome）。跨境链路仍有间歇性停顿；生产 hibernation/TTL alarm 仍需环境验证，见 §7。
+> 2026-11-16 维护者人工确认严格 NAT↔NAT 与真实 Claude/pi TUI 交互已通过 **e2e 层面**
+> 验收（§7.6）；该确认不等同于长期运行、生产边缘休眠或全路径验收。
 > 当前 CLI 的 libjuice 不支持 TURN over TCP/TLS，CLI 只能走 UDP；`turns:` 5349 供
 > 浏览器等客户端使用。
 
@@ -653,10 +656,13 @@ Worker `wss://relay.tokiapi.app`，coturn `turn:stun.tokiapi.app:3478`（REST �
 | host relay 1006 后重连 | 原始验收**失败**：`duplicate_client_id` → `HOST_EXIT=1`；源码已修复并通过本机确定性复测（§7.2 第 5 组），2026-11-13 已部署到生产（`293d1eba`），生产 host 替换冒烟通过（§7.3）；跨机器 1006 复测因测试 VPS 已销毁未重做 |
 
 限制：美国 VPS 到 coturn 的 3478/5349/443 均不可达（环境限制，正好验证回退）；
-严格 NAT↔NAT 拓扑和跨公网 3-viewer 未执行；Cloudflare TURN 已于同日单独验证
-（§7.3）。生产流控断言仍受跨境链路影响，见上文。
+跨公网 3-viewer 未执行；严格 NAT↔NAT 已于 2026-11-16 由维护者人工 e2e 确认
+（见 §7.6）；Cloudflare TURN 已于同日单独验证（§7.3）。生产流控断言仍受跨境
+链路影响，见上文。
 
 ### 7.5 未验证项
+
+> 已由维护者人工 e2e 确认的项见 §7.6；本节保留仍未验证或仅部分验证的项。
 
 - **Cloudflare 边缘 hibernation/TTL alarm**：本地 `wrangler dev` 不模拟真实休眠；
   生产部署已运行，但尚未做长时间休眠/驱逐观测。
@@ -671,14 +677,27 @@ Worker `wss://relay.tokiapi.app`，coturn `turn:stun.tokiapi.app:3478`（REST �
   验证后生产已切回 coturn，Cloudflare 配置保留但未启用。大陆流量按官方说明走境外
   节点，跨境时延/丢包仍是风险；CLI 仍只支持 UDP（`turns:` 仅供浏览器等客户端）。
 - **跨 NAT/跨机器**：2026-11-13 已完成本机 NAT ↔ 日本/美国公网 VPS 的 relay、
-  直连 P2P、coturn TURN 与 TURN 不可达回退验收（见 §7.4）。严格 NAT↔NAT 与第二台
-  真正位于 NAT/CGNAT 后的客户端仍未具备；host 瞬时断线重连已在源码修复、通过本机
-  真实 TCP 断线复测（§7.2 第 5 组）并部署到生产（`293d1eba`），生产 host 替换冒烟
-  通过（§7.3）；跨机器 1006 复测因测试 VPS 已销毁仍未重做。生产流控场景仍受跨境
-  链路影响未通过，需在稳定链路或双机环境补测。生产 viewer 断开重连场景中，重连
-  数据面与 Ctrl-C 传播通过，但 `host exited` 回放因跨境握手停顿未在断言窗口内到达
-  （§7.3）。
-- **真实 Claude/pi TUI 交互**：本机 live e2e 使用 fake TUI；真实 TUI 的打字、斜杠菜单、
-  alternate screen/鼠标模式恢复仍需手工验收（命令见 §6）。
+  直连 P2P、coturn TURN 与 TURN 不可达回退验收（见 §7.4）。严格 NAT↔NAT 已于
+  2026-11-16 由维护者人工 e2e 确认（见 §7.6）；跨公网 3-viewer 仍未执行。host
+  瞬时断线重连已在源码修复、通过本机真实 TCP 断线复测（§7.2 第 5 组）并部署到
+  生产（`293d1eba`），生产 host 替换冒烟通过（§7.3）；跨机器 1006 复测因测试
+  VPS 已销毁仍未重做。生产流控场景仍受跨境链路影响未通过，需在稳定链路或双机
+  环境补测。生产 viewer 断开重连场景中，重连数据面与 Ctrl-C 传播通过，但
+  `host exited` 回放因跨境握手停顿未在断言窗口内到达（§7.3）。
+- **P2P 直连成功率/长期稳定性**：2026-11-16 的人工 e2e 只确认严格 NAT↔NAT
+  场景可达（含 P2P 尝试与 relay 回退），未建立直连成功率或长时间稳定性基线。
 - **同 LAN host candidate 直连**：需要两台同 LAN 机器，未在本机验证。
 - **Linux/ConPTY 差异**：本机仅 Windows ConPTY；Linux 手动验证未执行。
+
+### 7.6 人工 e2e 确认（2026-11-16）
+
+维护者人工确认以下场景已通过 **e2e 层面** 验收；本仓库未保存对应的环境、命令或
+原始日志：
+
+- **严格 NAT↔NAT**：两端均位于 NAT/CGNAT 后的连接场景（含 P2P 尝试与 relay
+  回退）；未单独拆出 P2P 直连成功率和长期稳定性。
+- **真实 Claude/pi TUI**：真实 TUI 通过 tokimeki 托管与 attach 交互。
+
+范围说明：这是 e2e 层面的人工确认，不等同于长期运行、生产边缘 hibernation/TTL、
+P2P 直连成功率、所有 TUI 交互路径、跨平台或性能验收。自动化 live e2e 仍使用
+fake TUI；上述确认不改变 §7.5 中仍未验证的项。

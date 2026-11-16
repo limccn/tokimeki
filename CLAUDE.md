@@ -75,8 +75,9 @@ assets/              README icon
   resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup.
 - `attach/`: raw terminal, alternate screen, snapshot apply, seq reducer,
   reconnect/resync, terminal restore.
-- `transport/`: relay client, P2P peer (node-datachannel), route selector,
-  ICE/TURN config, signal limits.
+- `transport/`: relay client, P2P peer (node-datachannel), fragmentation,
+  ICE config/refresh, P2P retry policy, route selector, ICE/TURN config, signal
+  limits.
 - Exit codes: `0` success, `1` runtime/connection (including a failed
   `doctor` check and Commander usage errors), `2` invalid `TOKIMEKI_*`
   configuration at host/attach startup.
@@ -126,11 +127,14 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 
 ## Known limitations (0.1)
 
-- Strict NAT↔NAT validation, production edge hibernation/TTL long-run, and
-  real Claude/pi TUI manual acceptance remain environment-dependent.
-- v1 has no DataChannel fragmentation (messages ≤16 KiB), no automatic TURN
-  provider refresh/retry, and no listener/tunnel runtime; these are v1.1+
-  roadmap items.
+- Strict NAT↔NAT (including P2P attempts and relay fallback) and real Claude/pi
+  TUI interaction were manually confirmed at the e2e layer on 2026-11-16; this
+  is not long-run/production, direct-path success-rate, or exhaustive
+  interaction acceptance. Production edge hibernation/TTL long-run remains
+  environment-dependent.
+- v1.1 F0 adds capability-gated `FRAGMENT 0x08` DataChannel fragmentation,
+  P2P direct snapshots, automatic ICE refresh, and one provider retry. There is
+  still no listener/tunnel runtime; those remain later v1.1 roadmap items.
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
   tests (delivery worked); link-quality work (selective-repeat/ARQ) is future.
 

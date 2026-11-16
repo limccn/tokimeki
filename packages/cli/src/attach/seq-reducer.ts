@@ -7,6 +7,17 @@
  */
 export type OutputDecision = "apply" | "ignore" | "gap";
 
+/**
+ * True when a snapshot would move the viewer backwards.
+ *
+ * A snapshot with `seq === lastSeq` is still applied (idempotent); only a
+ * strictly older snapshot is stale. This protects the fallback/retry race
+ * where an old DataChannel snapshot arrives after a newer relay snapshot.
+ */
+export function isStaleSnapshot(lastSeq: number | null, seq: number): boolean {
+  return lastSeq !== null && seq < lastSeq;
+}
+
 export class SeqReducer {
   #lastSeq: number | null = null;
 

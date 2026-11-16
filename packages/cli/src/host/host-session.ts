@@ -11,11 +11,11 @@ import { randomUUID } from "node:crypto";
 import {
   decodeFrame,
   encodeFrame,
-  type IceServerConfig,
   type IceTransportPolicy,
   isTerminalSizeWithinLimits,
   type KnownControlMessage,
   MAX_DATACHANNEL_MESSAGE_BYTES,
+  MAX_FRAGMENT_CHUNK_BYTES,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
   type TransportMode,
@@ -27,9 +27,11 @@ import { formatError, type Logger } from "../logger.js";
 import { TerminalMirror } from "../terminal/mirror.js";
 import { ModeTracker } from "../terminal/mode-tracker.js";
 import { ByteRing } from "../terminal/ring-buffer.js";
-import { buildCapabilities } from "../transport/capabilities.js";
+import { buildCapabilities, supportsFragmentation } from "../transport/capabilities.js";
 import { buildNodeRtcConfig, resolveIceTransportPolicy } from "../transport/ice.js";
+import { type IceConfig, IceConfigManager } from "../transport/ice-config.js";
 import { P2PPeer } from "../transport/p2p-peer.js";
+import { canRetryP2P, P2P_RETRY_DELAY_MS } from "../transport/p2p-retry.js";
 import { RelayClient } from "../transport/relay-client.js";
 import { RelayTransport } from "../transport/relay-transport.js";
 import type { RelayFatalError } from "../transport/relay-types.js";
@@ -80,6 +82,7 @@ interface HostP2PLink {
   ready: boolean;
   sentFrames: number;
   inputSeen: boolean;
+  supportsFragmentation: boolean;
 }
 
 interface HeldOutput {
@@ -185,10 +188,14 @@ class HostSession {
   #holdQueue: HeldOutput[] = [];
   #lastOutputAt = Date.now();
 
-  #iceServers: readonly IceServerConfig[] = [];
+  readonly #iceManager: IceConfigManager;
   #iceTransportPolicy: IceTransportPolicy;
   readonly #p2pLinks = new Map<string, HostP2PLink>();
   readonly #pendingP2PSwitches = new Set<string>();
+  readonly #fragmentationViewers = new Set<string>();
+  readonly #p2pRetryUsed = new Set<string>();
+  readonly #p2pRetryTimers = new Map<string, NodeJS.Timeout>();
+  #p2pRetriesInFlight = 0;
 
   #relayBackpressureTimer: NodeJS.Timeout | null = null;
 
@@ -224,6 +231,16 @@ class HostSession {
     this.#env = deps.env ?? process.env;
     this.#finishedPromise = new Promise<number>((resolve) => {
       this.#resolveFinished = resolve;
+    });
+    this.#iceManager = new IceConfigManager({
+      logger: this.#logger,
+      sendIceRefresh: (provider) => {
+        this.#client?.sendControl({
+          v: PROTOCOL_VERSION,
+          type: "ice-refresh",
+          ...(provider === undefined ? {} : { provider }),
+        });
+      },
     });
   }
 
@@ -387,6 +404,7 @@ class HostSession {
     this.#client = client;
     client.onWelcome((welcome) => this.#handleWelcome(welcome));
     client.onMessage((message) => this.#handleControl(message));
+    client.onState((state) => this.#iceManager.onRelayState(state));
     client.onFatal((error) => this.#handleFatal(error));
 
     const selector = new RouteSelector({
@@ -411,7 +429,7 @@ class HostSession {
     if (!welcome.hostOnline) {
       this.#logger.warn("relay reports host offline while this host is connected");
     }
-    this.#iceServers = welcome.iceServers;
+    this.#iceManager.updateFromWelcome(welcome);
     this.#iceTransportPolicy = resolveIceTransportPolicy(
       this.#config.iceTransportPolicy,
       welcome.transportPolicy,
@@ -439,18 +457,31 @@ class HostSession {
 
   #handleControl(message: KnownControlMessage): void {
     switch (message.type) {
-      case "peer-joined":
+      case "peer-joined": {
         this.#viewers.add(message.clientId);
+        const fragments = supportsFragmentation(message.capabilities);
+        if (fragments) {
+          this.#fragmentationViewers.add(message.clientId);
+        } else {
+          this.#fragmentationViewers.delete(message.clientId);
+        }
+        const existingLink = this.#p2pLinks.get(message.clientId);
+        if (existingLink !== undefined) {
+          existingLink.supportsFragmentation = fragments;
+        }
         this.#logger.info(`viewer joined: ${message.clientId} (viewers=${this.#viewers.size})`);
         this.#scheduleSnapshot(message.clientId);
         this.#startP2P(message.clientId);
         return;
+      }
       case "peer-left":
         this.#closeP2PLink(message.clientId, "viewer left");
         this.#viewers.delete(message.clientId);
         this.#viewerSizes.delete(message.clientId);
         this.#pendingSnapshots.delete(message.clientId);
         this.#resyncAt.delete(message.clientId);
+        this.#fragmentationViewers.delete(message.clientId);
+        this.#clearP2PRetry(message.clientId);
         this.#logger.info(`viewer left: ${message.clientId} (viewers=${this.#viewers.size})`);
         this.#applyResize();
         return;
@@ -488,15 +519,16 @@ class HostSession {
         this.#pty?.resume(`relay:${message.clientId}`);
         return;
       case "ice":
+        this.#iceManager.updateFromIce(message);
+        this.#logger.debug(`ice provider: ${message.iceProvider}`);
+        return;
       case "ice-refresh":
-        this.#logger.debug(
-          `ice provider: ${message.type === "ice" ? message.iceProvider : "refresh"}`,
-        );
+        this.#logger.debug("ice refresh requested");
         return;
       case "transport":
         this.#logger.debug(`transport ${message.clientId}: ${message.mode}/${message.state}`);
-        if (message.mode === "relay") {
-          this.#fallbackToRelay(
+        if (message.mode === "relay" && message.state === "failed") {
+          this.#handleP2PUnavailable(
             message.clientId,
             message.reason ?? "viewer reported a relay transport",
           );
@@ -522,13 +554,16 @@ class HostSession {
     }
   }
 
-  #startP2P(clientId: string): void {
+  #startP2P(clientId: string, iceConfig?: IceConfig): void {
     if (this.#config.p2p === "off" || this.#closing) return;
     if (this.#p2pLinks.has(clientId)) return;
     const peer = new P2PPeer({
       label: `host:${clientId}`,
       role: "host",
-      rtcConfig: buildNodeRtcConfig(this.#iceServers, this.#iceTransportPolicy),
+      rtcConfig: buildNodeRtcConfig(
+        (iceConfig ?? this.#iceManager.current).servers,
+        this.#iceTransportPolicy,
+      ),
       logger: this.#logger,
       sendSignal: (kind, payload) => {
         this.#client?.sendControl({
@@ -542,7 +577,7 @@ class HostSession {
       },
       onFrame: (bytes) => this.#handleFrame(bytes, clientId),
       onOpen: (info) => this.#handleP2POpen(clientId, info.mode, info.detail),
-      onFailed: (reason) => this.#fallbackToRelay(clientId, reason),
+      onFailed: (reason) => this.#handleP2PUnavailable(clientId, reason),
       onClosed: (reason) => this.#fallbackToRelay(clientId, reason),
     });
     this.#p2pLinks.set(clientId, {
@@ -551,6 +586,7 @@ class HostSession {
       ready: false,
       sentFrames: 0,
       inputSeen: false,
+      supportsFragmentation: this.#fragmentationViewers.has(clientId),
     });
     peer.onDrain(() => this.#pty?.resume(`p2p:${clientId}`));
     peer.startOffer();
@@ -588,7 +624,7 @@ class HostSession {
     );
   }
 
-  #fallbackToRelay(clientId: string, reason: string): void {
+  #fallbackToRelay(clientId: string, reason: string, scheduleSnapshot = true): void {
     const link = this.#p2pLinks.get(clientId);
     if (link === undefined) return;
     this.#p2pLinks.delete(clientId);
@@ -605,8 +641,71 @@ class HostSession {
       state: "failed",
       reason: reason.slice(0, 512),
     });
-    // Resume relay delivery with a known-good screen boundary.
-    this.#scheduleSnapshot(clientId);
+    if (scheduleSnapshot) {
+      // Resume relay delivery with a known-good screen boundary.
+      this.#scheduleSnapshot(clientId);
+    }
+  }
+
+  #handleP2PUnavailable(
+    clientId: string,
+    reason: string,
+    options?: { readonly scheduleSnapshot?: boolean },
+  ): void {
+    const link = this.#p2pLinks.get(clientId);
+    const retryable = canRetryP2P({
+      hasLink: link !== undefined,
+      linkReady: link?.ready ?? false,
+      p2pEnabled: this.#config.p2p === "auto",
+      closing: this.#closing,
+      alreadyUsed: this.#p2pRetryUsed.has(clientId),
+      inFlight: this.#p2pRetriesInFlight,
+    });
+
+    this.#fallbackToRelay(clientId, reason, options?.scheduleSnapshot ?? true);
+    if (!retryable || this.#closing) return;
+
+    this.#p2pRetryUsed.add(clientId);
+    this.#p2pRetriesInFlight += 1;
+    this.#logger.info(`p2p retry scheduled for ${clientId} (${reason})`);
+    const timer = setTimeout(() => {
+      this.#p2pRetryTimers.delete(clientId);
+      void this.#retryP2P(clientId);
+    }, P2P_RETRY_DELAY_MS);
+    timer.unref?.();
+    this.#p2pRetryTimers.set(clientId, timer);
+  }
+
+  async #retryP2P(clientId: string): Promise<void> {
+    try {
+      if (this.#closing || !this.#viewers.has(clientId) || this.#p2pLinks.has(clientId)) {
+        return;
+      }
+      const config = await this.#iceManager.refreshForRetry();
+      if (config === null) {
+        this.#logger.debug(`p2p retry skipped for ${clientId}: no alternate ICE config`);
+        return;
+      }
+      if (this.#closing || !this.#viewers.has(clientId) || this.#p2pLinks.has(clientId)) {
+        return;
+      }
+      this.#logger.info(`p2p retry starting for ${clientId} (provider=${config.provider})`);
+      this.#startP2P(clientId, config);
+    } catch (error) {
+      this.#logger.warn(`p2p retry failed for ${clientId}: ${formatError(error)}`);
+    } finally {
+      this.#p2pRetriesInFlight = Math.max(0, this.#p2pRetriesInFlight - 1);
+    }
+  }
+
+  #clearP2PRetry(clientId: string): void {
+    const timer = this.#p2pRetryTimers.get(clientId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#p2pRetryTimers.delete(clientId);
+      this.#p2pRetriesInFlight = Math.max(0, this.#p2pRetriesInFlight - 1);
+    }
+    this.#p2pRetryUsed.delete(clientId);
   }
 
   #closeP2PLink(clientId: string, reason: string): void {
@@ -863,7 +962,39 @@ class HostSession {
         snapshotSeq = 0;
         if (this.#nextSeq === 0) this.#nextSeq = 1;
       }
+      let directFrame: Uint8Array | null = null;
       for (const target of targets) {
+        const link = this.#p2pLinks.get(target);
+        const canSendDirect = link !== undefined && link.peer.isOpen && link.supportsFragmentation;
+        if (canSendDirect) {
+          try {
+            directFrame ??= encodeFrame({
+              type: "snapshot",
+              seq: snapshotSeq,
+              payload,
+            });
+            if (link.peer.sendFragmentableFrame(directFrame)) {
+              const fragments =
+                directFrame.byteLength <= MAX_DATACHANNEL_MESSAGE_BYTES
+                  ? 1
+                  : Math.ceil(directFrame.byteLength / MAX_FRAGMENT_CHUNK_BYTES);
+              this.#logger.debug(
+                `p2p snapshot sent (target=${target}, seq=${snapshotSeq}, ` +
+                  `bytes=${payload.byteLength}, fragments=${fragments})`,
+              );
+              if (this.#pendingP2PSwitches.delete(target)) {
+                this.#activateP2P(target, snapshotSeq);
+              }
+              continue;
+            }
+          } catch (error) {
+            this.#logger.warn(`failed to encode p2p snapshot for ${target}: ${formatError(error)}`);
+          }
+          // The DataChannel is not usable for this snapshot; fall back without
+          // scheduling a second snapshot (the relay frame below is sent now).
+          this.#fallbackToRelay(target, "p2p snapshot send failed", false);
+        }
+
         try {
           const frame = encodeFrame({
             type: "snapshot_to",
@@ -872,6 +1003,10 @@ class HostSession {
             payload,
           });
           this.#transport?.send(frame);
+          this.#logger.debug(
+            `relay snapshot sent (target=${target}, seq=${snapshotSeq}, ` +
+              `bytes=${payload.byteLength})`,
+          );
           if (this.#pendingP2PSwitches.delete(target)) {
             this.#activateP2P(target, snapshotSeq);
           }
@@ -880,7 +1015,8 @@ class HostSession {
         }
       }
       this.#logger.debug(
-        `sent snapshot (seq=${snapshotSeq}, bytes=${payload.byteLength}, viewers=${targets.length})`,
+        `snapshot pass complete (seq=${snapshotSeq}, bytes=${payload.byteLength}, ` +
+          `viewers=${targets.length})`,
       );
     } finally {
       this.#holdDepth = Math.max(0, this.#holdDepth - 1);
@@ -964,6 +1100,13 @@ class HostSession {
       this.#closeP2PLink(clientId, "host session closing");
     }
     this.#pendingP2PSwitches.clear();
+    this.#fragmentationViewers.clear();
+    for (const timer of this.#p2pRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#p2pRetryTimers.clear();
+    this.#p2pRetryUsed.clear();
+    this.#p2pRetriesInFlight = 0;
     if (this.#snapshotTimer !== null) {
       clearTimeout(this.#snapshotTimer);
       this.#snapshotTimer = null;
@@ -1007,6 +1150,7 @@ class HostSession {
     }
     this.#client?.stop();
     this.#client = null;
+    this.#iceManager.dispose();
     this.#transport = null;
     this.#pty?.kill();
     this.#pty = null;

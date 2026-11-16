@@ -93,7 +93,12 @@ the current snapshot, and forwards keyboard input.
 - **Exit:** Ctrl-C is forwarded to the hosted program; quitting the viewer
   restores the local terminal.
 - **P2P:** with `TOKIMEKI_P2P=auto` the viewer may switch to a WebRTC
-  DataChannel. If ICE fails (~12 s), it falls back to the relay.
+  DataChannel. Large P2P switch/resync snapshots use the DataChannel when both
+  peers advertise `transports.fragmentation`; otherwise they stay on the relay
+  `SNAPSHOT_TO` path.
+- **ICE refresh/retry:** clients refresh ICE credentials before `iceExpiresAt`.
+  If a not-yet-ready P2P attempt fails (~12 s), the host refreshes to the next
+  usable TURN provider once and renegotiates; a second failure stays on relay.
 - **TURN:** set `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` to require TURN; with no
   usable TURN the attempt times out and falls back to the relay. The CLI only
   uses TURN over UDP (libjuice).
@@ -120,8 +125,9 @@ configuration. It prints actionable warnings for missing/conflicting values.
 ## P2P / TURN / relay selection
 
 1. `TOKIMEKI_P2P=off` — Worker relay only.
-2. `auto` — attempt WebRTC per viewer; if ICE cannot connect within ~12 s,
-   resume relay output and request a fresh snapshot.
+2. `auto` — attempt WebRTC per viewer; if a not-yet-ready attempt fails within
+   ~12 s, refresh to the next usable TURN provider once and retry, then resume
+   relay output and request a fresh snapshot.
 3. `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` — force TURN candidates for testing;
    no usable TURN means timeout + relay fallback.
 4. Relay fallback is always available; control/signaling always use the relay.

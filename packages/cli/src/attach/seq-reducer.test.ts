@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SeqReducer } from "./seq-reducer.js";
+import { isStaleSnapshot, SeqReducer } from "./seq-reducer.js";
 
 describe("SeqReducer", () => {
   it("ignores output until a snapshot binds the sequence", () => {
@@ -37,5 +37,14 @@ describe("SeqReducer", () => {
     expect(reducer.classify(4)).toBe("ignore");
     reducer.applySnapshot(20);
     expect(reducer.classify(21)).toBe("apply");
+  });
+});
+
+describe("isStaleSnapshot", () => {
+  it("only rejects snapshots strictly older than the reducer cursor", () => {
+    expect(isStaleSnapshot(null, 0)).toBe(false);
+    expect(isStaleSnapshot(5, 4)).toBe(true);
+    expect(isStaleSnapshot(5, 5)).toBe(false);
+    expect(isStaleSnapshot(5, 6)).toBe(false);
   });
 });

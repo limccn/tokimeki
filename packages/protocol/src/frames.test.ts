@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  FRAGMENT_HEADER_BYTES,
   MAX_DATACHANNEL_MESSAGE_BYTES,
+  MAX_FRAGMENT_CHUNK_BYTES,
+  MAX_FRAGMENT_COUNT,
   MAX_FRAME_BYTES,
   MAX_TARGET_ID_BYTES,
   PROTOCOL_VERSION,
@@ -15,6 +18,7 @@ import {
   FRAME_TYPE_NAMES,
   FRAME_TYPES,
   type FrameErrorCode,
+  isFragmentFrameType,
   isKnownFrameType,
   isReservedFrame,
   isReservedFrameType,
@@ -41,7 +45,7 @@ function expectFrameError(fn: () => unknown, code: FrameErrorCode): void {
 }
 
 describe("frame constants", () => {
-  it("defines the seven v1 frame bytes and the 1 MiB frame limit", () => {
+  it("defines the eight frame bytes and the 1 MiB frame limit", () => {
     expect(FRAME_TYPES).toEqual({
       INPUT: 0x01,
       OUTPUT: 0x02,
@@ -50,25 +54,33 @@ describe("frame constants", () => {
       SNAPSHOT_TO: 0x05,
       TUNNEL: 0x06,
       TUNNEL_TO: 0x07,
+      FRAGMENT: 0x08,
     });
     expect(PROTOCOL_VERSION).toBe(1);
     expect(MAX_FRAME_BYTES).toBe(1_048_576);
     expect(MAX_DATACHANNEL_MESSAGE_BYTES).toBe(16_384);
+    expect(FRAGMENT_HEADER_BYTES).toBe(13);
+    expect(MAX_FRAGMENT_CHUNK_BYTES).toBe(16_371);
+    expect(MAX_FRAGMENT_COUNT).toBe(65);
     expect(FRAME_ERROR_CODES).toHaveLength(6);
   });
 
   it("names every known frame type and classifies reserved frames", () => {
     expect(FRAME_TYPE_NAMES[FRAME_TYPES.INPUT]).toBe("INPUT");
     expect(FRAME_TYPE_NAMES[FRAME_TYPES.SNAPSHOT_TO]).toBe("SNAPSHOT_TO");
+    expect(FRAME_TYPE_NAMES[FRAME_TYPES.FRAGMENT]).toBe("FRAGMENT");
     for (const type of Object.values(FRAME_TYPES)) {
       expect(isKnownFrameType(type)).toBe(true);
     }
     expect(isKnownFrameType(0x00)).toBe(false);
-    expect(isKnownFrameType(0x08)).toBe(false);
+    expect(isKnownFrameType(0x09)).toBe(false);
     expect(isKnownFrameType(0x7f)).toBe(false);
+    expect(isFragmentFrameType(FRAME_TYPES.FRAGMENT)).toBe(true);
+    expect(isFragmentFrameType(FRAME_TYPES.OUTPUT)).toBe(false);
     expect(isReservedFrameType(FRAME_TYPES.TUNNEL)).toBe(true);
     expect(isReservedFrameType(FRAME_TYPES.TUNNEL_TO)).toBe(true);
     expect(isReservedFrameType(FRAME_TYPES.OUTPUT)).toBe(false);
+    expect(isReservedFrameType(FRAME_TYPES.FRAGMENT)).toBe(false);
   });
 
   it("detects a type byte without decoding the frame", () => {
@@ -94,6 +106,30 @@ describe("frame roundtrips", () => {
       targetId: "é".repeat(32),
       seq: Number.MAX_SAFE_INTEGER,
       payload: Uint8Array.of(0x00, 0xff),
+    },
+    {
+      type: "fragment",
+      messageId: 1,
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      totalBytes: 5,
+      payload: fromHex("0102030405"),
+    },
+    {
+      type: "fragment",
+      messageId: 2,
+      fragmentIndex: 0,
+      fragmentCount: 2,
+      totalBytes: MAX_FRAGMENT_CHUNK_BYTES + 1,
+      payload: new Uint8Array(MAX_FRAGMENT_CHUNK_BYTES).fill(0x41),
+    },
+    {
+      type: "fragment",
+      messageId: 2,
+      fragmentIndex: 1,
+      fragmentCount: 2,
+      totalBytes: MAX_FRAGMENT_CHUNK_BYTES + 1,
+      payload: Uint8Array.of(0x42),
     },
     { type: "tunnel", payload: fromHex("deadbeef") },
     { type: "tunnel_to", targetId: "viewer-1", payload: Uint8Array.of(1, 2) },
@@ -128,6 +164,18 @@ describe("frame roundtrips", () => {
 
     const input = decodeFrame(encodeFrame({ type: "input", payload: new Uint8Array() }));
     expect(isReservedFrame(input)).toBe(false);
+
+    const fragment = decodeFrame(
+      encodeFrame({
+        type: "fragment",
+        messageId: 1,
+        fragmentIndex: 0,
+        fragmentCount: 1,
+        totalBytes: 1,
+        payload: Uint8Array.of(0x42),
+      }),
+    );
+    expect(isReservedFrame(fragment)).toBe(false);
   });
 
   it("copies payloads instead of aliasing caller or wire buffers", () => {
@@ -231,8 +279,48 @@ describe("frame limits and malformed input", () => {
 
   it("rejects unknown frame type bytes", () => {
     expectFrameError(() => decodeFrame(fromHex("00")), "unknown_frame_type");
-    expectFrameError(() => decodeFrame(fromHex("08")), "unknown_frame_type");
+    expectFrameError(() => decodeFrame(fromHex("09")), "unknown_frame_type");
     expectFrameError(() => decodeFrame(fromHex("7f00")), "unknown_frame_type");
+  });
+
+  it("validates canonical fragment envelopes", () => {
+    const base = {
+      type: "fragment" as const,
+      messageId: 1,
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      totalBytes: 5,
+      payload: fromHex("0102030405"),
+    };
+
+    expectFrameError(() => encodeFrame({ ...base, messageId: 0 }), "invalid_frame");
+    expectFrameError(() => encodeFrame({ ...base, messageId: 0x1_0000_0000 }), "invalid_frame");
+    expectFrameError(() => encodeFrame({ ...base, fragmentCount: 0 }), "invalid_frame");
+    expectFrameError(() => encodeFrame({ ...base, fragmentCount: 2 }), "invalid_frame");
+    expectFrameError(() => encodeFrame({ ...base, fragmentIndex: 1 }), "invalid_frame");
+    expectFrameError(() => encodeFrame({ ...base, totalBytes: 0 }), "invalid_frame");
+    expectFrameError(
+      () => encodeFrame({ ...base, totalBytes: MAX_FRAME_BYTES + 1 }),
+      "frame_too_large",
+    );
+    expectFrameError(
+      () => encodeFrame({ ...base, payload: Uint8Array.of(1, 2, 3, 4) }),
+      "invalid_frame",
+    );
+
+    expectFrameError(() => decodeFrame(fromHex("0800000001")), "frame_truncated");
+    expectFrameError(
+      () => decodeFrame(fromHex("080000000000000001000000050102030405")),
+      "invalid_frame",
+    );
+    expectFrameError(
+      () => decodeFrame(fromHex("0800000001000000010000000501020304")),
+      "invalid_frame",
+    );
+
+    const oversized = new Uint8Array(MAX_DATACHANNEL_MESSAGE_BYTES + 1);
+    oversized[0] = FRAME_TYPES.FRAGMENT;
+    expectFrameError(() => decodeFrame(oversized), "frame_too_large");
   });
 
   it("accepts exactly 1 MiB and rejects anything larger", () => {

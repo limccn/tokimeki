@@ -249,6 +249,32 @@ describe("SessionDurableObject", () => {
     viewer.close();
   });
 
+  it("rejects FRAGMENT frames instead of forwarding them", async () => {
+    const host = await openHost("fragment-frame");
+    const viewer = await openViewer("fragment-frame", "viewer-1");
+    const fragment = encodeFrame({
+      type: "fragment",
+      messageId: 1,
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      totalBytes: 5,
+      payload: new TextEncoder().encode("hello"),
+    });
+
+    host.sendBinary(fragment);
+    const hostError = await host.waitForType("error");
+    expect(hostError.code).toBe("invalid_frame");
+    expect(viewer.binary).toHaveLength(0);
+
+    viewer.sendBinary(fragment);
+    const viewerError = await viewer.waitForType("error");
+    expect(viewerError.code).toBe("invalid_frame");
+    expect(host.binary).toHaveLength(0);
+
+    host.close();
+    viewer.close();
+  });
+
   it("answers reserved TUNNEL frames with not_implemented", async () => {
     const host = await openHost("tunnel-frame");
     const viewer = await openViewer("tunnel-frame", "viewer-1");

@@ -1,7 +1,9 @@
 # Tokimeki Wire Protocol v1
 
-> 状态：v1 实现完成（Phase 6）。relay、PTY/TUI、快照重连与 P2P/TURN 路径已通过本机 live e2e；
-> 生产 Cloudflare 部署、跨 NAT 与真实 coturn/Cloudflare TURN 互通尚待环境与授权验证。
+> 状态：v1 实现完成（Phase 6）；v1.1 F0 已在 v1 基线上实现（`FRAGMENT 0x08`、
+> P2P 直发快照、ICE 到期自动刷新、provider 重试一次），单测与 relay 测试通过。
+> 生产部署、跨 NAT/TURN 与真实 TUI 的验收记录见 `docs/deployment.md` §7；wire
+> `v` 仍为 1，F0 新增项是 capability-gated 可选扩展。
 > 规范性实现：`packages/protocol`；语言无关向量：`packages/protocol/test/vectors/`。
 > 本文描述的是线上格式，不是 Node/TypeScript 实现细节。v2 Go/Rust 实现必须能仅凭本文与 golden vectors 互通。
 
@@ -9,6 +11,7 @@
 
 - 当前协议版本：`PROTOCOL_VERSION = 1`，JSON 控制消息使用顶层 `"v": 1`。
 - v1 提供：JSON 控制消息、二进制终端帧、WebSocket 中继与 WebRTC DataChannel 共用的字节格式、会话握手、ICE 配置下发、输出序号与快照恢复、错误/关闭码。
+- v1.1 F0 可选扩展：`FRAGMENT`（0x08）、`transports.fragmentation` capability、P2P 直发 `SNAPSHOT`。这些只在双方声明/协商后使用；未协商时保持 v1 行为。
 - v1 只定义、不实现：`TUNNEL`/`TUNNEL_TO` 应用层隧道、`listener` 角色、`tunnel`/`listener`/`peerRelay` capabilities、Agent 运行时。收到这些预留项时返回 `not_implemented`。
 - 破坏性变更必须提升 `v`。向后兼容的新增字段可以保留 `v: 1`；旧实现必须忽略未知字段。
 - 线上格式只使用：字节、UTF-8、大端 `u64`、JSON。不得出现 Node `Buffer`、TypeScript 特有类型或平台相关序列化。
@@ -27,7 +30,9 @@
 - 所有 JSON 文本必须是 UTF-8 合法 JSON 对象；数组、标量、空串、非法 JSON 一律拒绝。
 - 二进制帧总长度（含首字节）上限 `MAX_FRAME_BYTES = 1_048_576`（1 MiB），超限返回 `frame_too_large`。
 - 原始控制消息 UTF-8 上限 `MAX_CONTROL_MESSAGE_BYTES = 131_072`（128 KiB）；`signal.payload` 序列化后上限 `MAX_SIGNAL_PAYLOAD_BYTES = 65_536`（64 KiB）。超限返回 `invalid_message`；深层/递归 JSON 必须被转换为 `invalid_message`，不得把 `RangeError` 抛给调用方。
-- WebRTC DataChannel 单条消息上限 `MAX_DATACHANNEL_MESSAGE_BYTES = 16384`。v1 的每个二进制帧必须能装入单条 DataChannel 消息；host 把 `OUTPUT` 的 payload 切分到 `16384 - 16` 字节以内。v1 不实现 DataChannel 分片/重组，P2P 切换所需的快照始终通过 relay `SNAPSHOT_TO` 发送，`SNAPSHOT` 帧与分片信封保留给后续版本。
+- WebRTC DataChannel 单条消息上限 `MAX_DATACHANNEL_MESSAGE_BYTES = 16384`。host 仍把 `OUTPUT` 的 payload 切分到 `16384 - 16` 字节以内。
+- v1.1 F0 在双方声明 `transports.fragmentation` 后，允许用 `FRAGMENT`（0x08）把 1..`MAX_FRAME_BYTES` 的完整帧拆成多条 DataChannel 消息；单条 fragment 消息（含 13 字节 header）≤16384。未协商时不得发送 fragment 或 P2P `SNAPSHOT`。
+- P2P 切换与 P2P 活动期间的 resync 快照优先通过 DataChannel `SNAPSHOT` 发送；peer 不支持分片、发送失败或 capability 未知时回退 relay `SNAPSHOT_TO`。relay 路径仍拒绝裸 `SNAPSHOT`。
 - 二进制帧编码是确定性的；不压缩、不填充、不做字节序转换以外的处理。
 - 中继在 Worker/DO 中收到的二进制消息总是 `ArrayBuffer`；实现必须按 `Uint8Array` 视图处理并尊重 `byteOffset`。
 
@@ -42,6 +47,7 @@
 | `SNAPSHOT_TO` | `0x05` | host → relay → 指定 viewer | `[0x05][targetLen:u8][targetId UTF-8][seq:u64BE][ANSI snapshot...]` |
 | `TUNNEL` | `0x06` | 预留 v1.1 | `[0x06][opaque tunnel record...]` |
 | `TUNNEL_TO` | `0x07` | 预留 v1.1 | `[0x07][targetLen:u8][targetId UTF-8][opaque tunnel record...]` |
+| `FRAGMENT` | `0x08` | P2P 双向（F0 仅 host → viewer） | `[0x08][messageId:u32BE][fragIndex:u16BE][fragCount:u16BE][totalBytes:u32BE][chunk...]` |
 
 ### 3.1 字段规则
 
@@ -50,9 +56,11 @@
 - `targetLen`：`targetId` 的 UTF-8 字节数，`u8`，v1 要求 `1..64`。`0` 或 `65+` 返回 `invalid_target_id`。
 - `targetId`：UTF-8 字符串，必须是合法 Unicode/UTF-8。v1 的目标是客户端 ID，形状见 §5 的 ID 正则，因此总是 ASCII 且 ≤64 字节。
 - `RESYNC_REQ` 必须恰好 1 字节；带任何 payload 都是 `invalid_frame`。
-- `SNAPSHOT` 保留给未来的 P2P 直发快照（含分片）；v1 传输切换统一使用 relay `SNAPSHOT_TO`，不发送 `SNAPSHOT`。relay 路径仍拒绝裸 `SNAPSHOT`。
+- `SNAPSHOT` 仅用于 P2P DataChannel 直发；v1.1 F0 在 `transports.fragmentation` 协商成功后用它承载切换/resync 快照。relay 路径仍拒绝裸 `SNAPSHOT`。
+- `FRAGMENT` header 固定 13 字节：`messageId` 为非 0 u32；`fragIndex` 从 0 开始；`fragCount` 为 1..65 且必须等于 `ceil(totalBytes / 16371)`；`totalBytes` 是原始完整帧长度（包含原帧 type byte），范围 1..1 MiB；除最后一片外每片 payload 恰好 16371 字节，最后一片为余数。重组后的帧不得仍是 `FRAGMENT`（禁止嵌套）。
+- `FRAGMENT` 只允许在已协商分片的 P2P DataChannel 上发送；relay 收到时返回 `invalid_frame`，不得转发。
 - `TUNNEL`/`TUNNEL_TO` 在 v1 必须能被识别和路由，但不得执行任何隧道行为；收到时返回 `error{code:"not_implemented"}`，不得静默丢弃或转发。
-- `0x08..0xFF` 在 v1 未定义。实现返回 `unknown_frame_type`；relay 可映射为 `error{code:"invalid_frame"}` 并按策略关闭连接。
+- `0x09..0xFF` 在 v1 未定义。实现返回 `unknown_frame_type`；relay 可映射为 `error{code:"invalid_frame"}` 并按策略关闭连接。
 
 ### 3.2 边界行为
 
@@ -144,13 +152,17 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | Key | 字段 | 状态 |
 |---|---|---|
 | `protocolVersion` | number | 可选 |
-| `transports` | `modes: string[]` | v1 使用；预期值 `p2p-direct`、`p2p-turn`、`relay` |
+| `transports` | `modes: string[]`, `fragmentation?` | v1 使用 `modes`；v1.1 F0 使用 `fragmentation: {version, maxFrameBytes, maxMessageBytes}` |
 | `snapshot` | `formats: string[]`, `maxBytes` | v1 使用；预期格式含 `xterm-serialize`、`raw-ring` |
 | `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `maxFrameSize` | v1.1 预留，v1 只透传/忽略 |
 | `listener` | `modes: string[]` | v1.1 预留，预期含 `snapshot-only`、`safe-boundary` |
 | `peerRelay` | `version`, `roles: string[]` | v1.1 预留 |
 
 所有 capability 的已知字段都是可选的，未知字段/未知值不得导致连接失败。v1 relay 不协商未知 capability，也不得据此改变行为。
+
+F0 仅在 `transports.fragmentation` 满足 `version === 1`、`maxFrameBytes >= 1 MiB`、
+`maxMessageBytes === 16384` 时视为支持；不匹配按“不支持分片”处理，回退 relay
+快照。
 
 ### 4.5 结构类型
 
@@ -255,7 +267,11 @@ viewer                     relay / DO                         host
 1. viewer 在 `hello` 中携带 `cols`/`rows`。
 2. host 先按 resize 策略应用尺寸，再等待终端输出静默（或 50–150ms），避免在同步输出块中间快照。
 3. 在输出序号 `seq = N` 处暂停该 viewer 的增量发送。
-4. 生成 ANSI 快照，v1 统一以 `SNAPSHOT_TO`（relay，指定 targetId）发送并绑定 `seq = N`，即使该 viewer 即将切换到 DataChannel；`SNAPSHOT` 预留给后续 P2P 直发/分片实现。
+4. 生成 ANSI 快照并绑定 `seq = N`。若双方已协商 `transports.fragmentation` 且
+   DataChannel 已打开，host 以 DC `SNAPSHOT` 发送（必要时用 `FRAGMENT` 分片），
+   成功排队后再发送 `transport{state:"ready"}`；否则以 relay `SNAPSHOT_TO` 发送。
+   DC 快照不产生 relay ACK；relay 快照仍按 §6.3 ACK。viewer 必须忽略 `seq <
+   lastSeq` 的旧快照，避免 fallback/retry 时旧快照晚到导致屏幕回退。
 5. 恢复 `> N` 的增量。超过 `MAX_FRAME_BYTES` 或客户端配置的快照上限时，host 必须降级（截断 scrollback/回退 ring）而不是发送损坏的 ANSI。
 6. 终端尺寸单轴 `1..10000`，且 `cols * rows <= MAX_TERMINAL_CELLS = 4_000_000`；relay 对每个 viewer 的 resize 做 250ms 节流并保留 trailing 最新尺寸，host 在应用前再做一次乘积 guard。
 
@@ -263,7 +279,8 @@ viewer                     relay / DO                         host
 
 - `pause`/`resume` 由 relay 发往 host，携带落后 viewer 的 `clientId`。host 用 `relay:<clientId>` 作为 PTY 暂停标记；共享 PTY 在任一暂停标记存在时停止产生输出。
 - relay 对暂停中的 viewer 丢弃后续 `OUTPUT` 帧并计入 `droppedBytes`；`droppedBytes + unackedBytes` 达到 8 MiB 上限时以 `slow_consumer` 关闭该 viewer（关闭码 `4000`）。
-- `SNAPSHOT_TO` 是 viewer 从丢帧 gap 恢复的唯一边界，**必须穿透暂停状态送达**。否则当 host 在暂停期间结束输出时，viewer 的 `resync` 快照会被丢弃，且之后没有新 `OUTPUT` 再次触发 `resync`，viewer 将永久卡在 gap。快照仍计入未确认字节数与硬上限；其 `ack` 通过正常低水位路径解除暂停。
+- `SNAPSHOT_TO` 是 viewer 从 relay 丢帧 gap 恢复的唯一边界，**必须穿透暂停状态送达**。否则当 host 在暂停期间结束输出时，viewer 的 `resync` 快照会被丢弃，且之后没有新 `OUTPUT` 再次触发 `resync`，viewer 将永久卡在 gap。快照仍计入未确认字节数与硬上限；其 `ack` 通过正常低水位路径解除暂停。
+- P2P 切换的 DC `SNAPSHOT` 不产生 relay ACK；relay 的 pause 由 host 的 `transport{state:"ready"}` 清除（SessionDO 已有行为）。若之后回退 relay，host 发送的 `SNAPSHOT_TO` 仍按上一条 ACK 并清除之前的未确认字节。
 - `ack` 是应用层流控；WebSocket 层还可以使用文本 `ping`/`pong` 自动响应。
 - `error{code:"slow_consumer"}` 表示客户端长期不确认，relay 可关闭该连接；关闭码 `4000`。
 
@@ -286,18 +303,18 @@ viewer                     relay / DO                         host
 - `welcome.iceServers` 是 WebRTC `RTCIceServer` 形状；`iceProvider` 说明来源。
 - `coturn` 优先使用 TURN REST 临时凭据（`username = <expiry>:<clientId>`，`credential = base64(HMAC-SHA1(secret, username))`）。`static` 使用预配置凭据。
 - Cloudflare TURN 使用短期凭据；TTL 上限 48 小时。provider 为 `stun` 表示未配置 TURN，只尝试直连。
-- `iceExpiresAt` 是 epoch 毫秒。relay 支持 `ice-refresh` 与 `ice`，但 v1 CLI 没有自动到期刷新定时器；host 长时间在线后，新建 P2P 可能因旧凭据失败而回退 relay。重新连接会获得新的 `welcome`/ICE 配置。
-- `ice-refresh.provider` 受 `TOKIMEKI_TURN_PROVIDER` 约束：`none` 只允许 `stun`；`coturn` 只允许 `coturn`/`static`/`stun`；`cloudflare` 只允许 `cloudflare`/`stun`；`auto` 允许任意已配置 provider。越权覆盖回退到 mode 默认，不报错。
-- v1 在 P2P 失败/关闭时直接发送 `transport{mode:"relay", state:"failed"}` 并回退 relay，不自动切换 ICE provider 重试；provider 轮换/失败重试在 v1.1 补齐。relay 路径不受 ICE 凭据过期影响。
+- `iceExpiresAt` 是 epoch 毫秒。v1.1 F0 的 host/viewer 在到期前自动发送 `ice-refresh`，收到 `ice` 后更新配置并重排；刷新严格串行，超时有退避，relay 未 ready 时不发请求。重新连接会获得新的 `welcome`/ICE 配置并重置定时器。
+- `ice-refresh.provider` 受 `TOKIMEKI_TURN_PROVIDER` 约束：`none` 只允许 `stun`；`coturn` 只允许 `coturn`/`static`/`stun`；`cloudflare` 只允许 `cloudflare`/`stun`；`auto` 允许任意已配置 provider。越权覆盖回退到 mode 默认，不报错。客户端以实际返回的 `iceProvider` 为准。
+- v1.1 F0 在 P2P link 尚未 ready 时失败，最多重试一次：先按 `coturn → static → cloudflare` 刷新到可用 TURN 配置（或刷新临期凭据），再重新协商；无可用配置或第二次失败则发送 `transport{mode:"relay", state:"failed"}` 并保持 relay。已 ready 后的关闭、DataChannel 发送失败不触发重试。relay 路径不受 ICE 凭据过期影响。
 - TURN 凭据、secret、credential 不得写入日志、URL 或 `hello`。
 
 ### 7.3 传输切换（v1 实际行为）
 
 1. host 为每个 viewer 创建独立的 PeerConnection 与 DataChannel，经 DO 的 `signal` 交换 offer/answer/ICE；host 发起 offer，viewer 应答。
-2. DataChannel 打开后，host 暂停该 viewer 的增量发送并生成最新 ANSI 快照；快照在 `seq = N` 处捕获，经 relay 以 `SNAPSHOT_TO` 定向发送给该 viewer，不经过 DataChannel。
+2. DataChannel 打开后，host 暂停该 viewer 的增量发送并生成最新 ANSI 快照；快照在 `seq = N` 处捕获。若双方已协商分片，host 经 DataChannel 发送 `SNAPSHOT`（必要时 `FRAGMENT` 分片），成功排队后再发 `transport ready`；否则经 relay 以 `SNAPSHOT_TO` 定向发送。
 3. 快照发出后，host 发送 `transport{clientId, mode, state:"ready"}`，并停止向该 viewer 发送 relay `OUTPUT`；后续输出改走 DataChannel，单帧不超过 16 KiB。
 4. viewer 收到 `transport ready` 后将 `INPUT` 切到 DataChannel。快照应用前收到的 DataChannel `OUTPUT` 会先缓冲（上限 4 MiB）；快照应用后再按 seq 过滤重复/旧帧。缓冲溢出或快照缺失时 viewer 发送 `RESYNC_REQ`/`resync`，由 host 重新快照。
-5. 失败、12 秒 ICE 超时或 DataChannel 关闭时，host 或 viewer 发送 `transport{mode:"relay", state:"failed", reason}`；host 关闭 PeerConnection、恢复 relay 输出并重新发送快照，viewer 恢复 relay 输入。relay 对已 `p2p ready` 的 viewer 抑制 `OUTPUT`，避免双路径重复。
+5. 失败、12 秒 ICE 超时或 DataChannel 关闭时，host 或 viewer 发送 `transport{mode:"relay", state:"failed", reason}`；host 关闭 PeerConnection、恢复 relay 输出并重新发送快照，viewer 恢复 relay 输入。若 host 侧 link 尚未 ready，v1.1 F0 最多再用下一个可用 ICE provider 重试一次；无可用配置或再次失败则保持 relay。relay 对已 `p2p ready` 的 viewer 抑制 `OUTPUT`，避免双路径重复。
 6. 控制信令、presence、ICE 配置与快照始终走 DO WebSocket，确保 P2P 失败时可立即降级。
 
 ## 8. 错误码与关闭码
@@ -395,9 +412,9 @@ Envelope：
 
 以下内容在 v1 只保留名称/号码，不实现行为：
 
-1. **应用层隧道**：`TUNNEL 0x06`、`TUNNEL_TO 0x07` 以及 `0x06..0x7F` 扩展区间。v1 relay 对 0x06/0x07 返回 `not_implemented`；其他未知字节按 `unknown_frame_type` 处理。v1.1 才会冻结 ARQ/FEC/AEAD 布局、`txSeq`/`streamSeq` 与密钥威胁模型。
+1. **应用层隧道**：`TUNNEL 0x06`、`TUNNEL_TO 0x07` 以及 `0x09..0x7F` 扩展区间。`0x08` 已在 v1.1 F0 分配给 `FRAGMENT`（capability-gated P2P 分片，relay 拒绝）。v1 relay 对 0x06/0x07 返回 `not_implemented`；其他未知字节按 `unknown_frame_type` 处理。v1.1 才会冻结 ARQ/FEC/AEAD 布局、`txSeq`/`streamSeq` 与密钥威胁模型。
 2. **listener 角色**：`hello.role = "listener"`。v1 返回 `not_implemented`；v1.1 才实现只读、snapshot-only、不参与 resize/输入/ack 的语义。
-3. **Capabilities**：`tunnel`、`listener`、`peerRelay` 预留；`transports`、`snapshot` 在 v1 可用。未知 capability 必须忽略，不能拒绝连接。
+3. **Capabilities**：`tunnel`、`listener`、`peerRelay` 预留；`transports`、`snapshot` 在 v1 可用；`transports.fragmentation` 在 v1.1 F0 可用（仅 P2P 大帧分片/直发快照）。未知 capability 必须忽略，不能拒绝连接。
 4. **transport.via**：`host`、`peer:<id>`、`relay` 预留，v1 可忽略。
 5. v1.1 新增控制消息（如 `tunnel.*`、`listener.*`）时，v1 relay 应识别预留命名空间并返回 `not_implemented`，而不是静默丢弃。
 
@@ -408,7 +425,7 @@ Envelope：
 | 文件 | 内容 |
 |---|---|
 | `constants.json` | 版本、帧类型值、角色、传输模式、provider、resize policy、错误码、关闭码、限制、正则 |
-| `frames.json` | 每种二进制帧至少一个合法 hex；含空 payload、u64 最大安全值、64 字节 target 等边界；`invalid` 数组给出错误码 |
+| `frames.json` | 每种二进制帧至少一个合法 hex（含 v1.1 `FRAGMENT`）；含空 payload、u64 最大安全值、64 字节 target、非法 fragment header 等边界；`invalid` 数组给出错误码 |
 | `control-messages.json` | 全部 19 种 v1 控制消息 + 未知 `agent.*` + `not_implemented` 回复 |
 | `handshake.json` | hello → welcome → ice-refresh → ice 的完整 transcript |
 
@@ -434,6 +451,6 @@ npm test -- packages/protocol
 - v1 的 JSON schema 对已知字段严格校验；对未知字段宽松。
 - 终端 payload 不得被 JSON 化、按行拆分或做文本转码；必须原样传递字节。
 - 终端数据依赖传输层加密（WSS/WebRTC DTLS）；v1 不提供应用层 E2E 加密。v1.1 隧道密钥模型未定，默认不得宣称 relay-blind。
-- v1 P2P 切换不实现 DataChannel 分片：单帧上限 16 KiB，快照走 relay。v1.1 若改为 P2P 直发快照，必须先把分片信封纳入 golden vectors 并说明兼容性。
+- v1.1 F0 使用 capability-gated `FRAGMENT 0x08` 与 P2P `SNAPSHOT`；未声明分片的 v1 peer 仍走 relay 快照，不会收到 fragment。新增帧类型/可选字段保持 `v: 1`；删除字段、改变既有帧布局或语义才提升主版本。
 - token、TURN secret、credential、终端内容不得进入日志、错误消息、URL 或 `hello`。
 - 所有长度限制以字节计（UTF-8），除非明确写为字符。

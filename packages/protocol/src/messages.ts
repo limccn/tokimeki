@@ -61,6 +61,17 @@ export const SnapshotCapabilitySchema = z.looseObject({
 export const TransportsCapabilitySchema = z.looseObject({
   /** Expected v1 values: `p2p-direct`, `p2p-turn`, `relay`. */
   modes: z.array(z.string().min(1)).optional(),
+  /**
+   * v1.1 optional P2P fragmentation envelope. Values must match the protocol
+   * constants; peers with a different version/limit are treated as unsupported.
+   */
+  fragmentation: z
+    .looseObject({
+      version: z.number().int().positive().optional(),
+      maxFrameBytes: z.number().int().positive().optional(),
+      maxMessageBytes: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 
 export const CapabilitiesSchema = z.looseObject({
