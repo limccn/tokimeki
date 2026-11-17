@@ -512,6 +512,27 @@ host 退出链路由 relay 接受 host 发来的 `host-exited`，持久化到 `s
 允许半开连接在心跳超时后重连并在 60 秒内收到退出事件。attach 在 P2P 活动时延迟 300 ms
 退出，给 DataChannel 上最后一段 PTY 输出留出排空时间。
 
+2026-11-17 v0.1.2 本地 e2e 扩展（`scripts/e2e/live-e2e.mjs`）：
+
+- `E2E_WINDOW=1`：host 使用 `TOKIMEKI_WINDOW=on` +
+  `TOKIMEKI_WINDOW_SIZE=100x30`，两个不同尺寸 viewer（80x24 / 120x40）。
+  断言 host PTY 始终为 100x30、viewer resize 不触发 host resize、viewer 状态栏
+  `view:80x15@...` / `view:fit`、debug 日志面板、光标跟随裁剪、鼠标坐标映射
+  到逻辑网格、F12 overlay（打开、`c` 走 OSC 52、按键被消费、Esc 关闭）以及
+  断线重连快照。`E2E_INVITE=0` 跳过 overlay。
+- `E2E_CONFIG=1`（可与 `E2E_WINDOW=1` 组合）：host 仅从 `TOKIMEKI_CONFIG`
+  JSON 读取 relay/session/token/window；显式 `TOKIMEKI_SESSION` 覆盖 JSON；
+  断言 hosted PTY 看不到 `TOKIMEKI_CONFIG` 与 secret，viewer 连到显式 session。
+- `E2E_TUNNEL_BURST=1`：TUN 数据面 4 MiB burst，两个 viewer 均收到
+  `BURST_DONE=4194304`。
+- `E2E_TUNNEL_MISMATCH=1` 配合 `E2E_TUNNEL_SECRET_HOST` /
+  `E2E_TUNNEL_SECRET_VIEWER`：host/viewer 密钥不一致，要求 fallback 到 relay
+  且输入仍回显。
+- 回归：legacy relay-only、P2P required、listener、flow-control + secret
+  check、tunnel session-token / XOR / shared-secret 全部 `E2E PASS`。
+- 失败诊断现在会脱敏 session/master token 与 viewer-config base64；F12/config
+  用例不会把 token 写入日志。
+
 ### 7.3 生产 live e2e（`wss://relay.tokiapi.app`）
 
 在最终版本 `d28ef19e-b213-4474-8d3f-d32f67a4ff55` 上执行：

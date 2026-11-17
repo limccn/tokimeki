@@ -26,6 +26,20 @@
  *   E2E_TUNNEL_FEC           "xor" enables XOR parity for the tunnel; requires
  *                            E2E_TUNNEL=1. Without injected packet loss this
  *                            only asserts negotiation, not recovery.
+ *   E2E_TUNNEL_BURST=1       run a 4 MiB PTY burst over the tunnel and require
+ *                            BURST_DONE on both viewers; requires E2E_TUNNEL=1
+ *   E2E_TUNNEL_MISMATCH=1    give the host and viewers different tunnel secrets
+ *                            and require relay fallback; requires E2E_TUNNEL=1
+ *                            and E2E_TUNNEL_SECRET_HOST/_VIEWER
+ *   E2E_WINDOW=1             fixed TUI window (`TOKIMEKI_WINDOW=on`,
+ *                            `TOKIMEKI_WINDOW_SIZE=100x30`): require the host PTY
+ *                            to stay fixed across viewer attach/resize, assert
+ *                            viewer status bars, cursor-following crops, mouse
+ *                            translation, and the debug log panel. Also runs the
+ *                            F12 overlay checks unless E2E_INVITE=0.
+ *   E2E_INVITE=0             skip the F12 viewer-config overlay checks
+ *   E2E_CONFIG=1             start the host from TOKIMEKI_CONFIG JSON only
+ *                            (explicit env still wins) and assert PTY scrub
  *   E2E_TIMEOUT_MS           default: 45000
  *   E2E_DUMP_DIR             on failure, write each process's full output here
  *   E2E_CLI_ENTRY            CLI entry to run (default: local
@@ -34,7 +48,8 @@
  *
  * The test starts a host CLI in a PTY and two attach CLIs, then checks:
  * snapshot restore, bidirectional input, broadcast, resize, reconnect, and
- * Ctrl-C propagation. It never writes tokens to stdout.
+ * Ctrl-C propagation. It never writes tokens to stdout; failure diagnostics
+ * redact the session/master tokens and the viewer-config base64 payload.
  */
 
 import { randomBytes } from "node:crypto";
@@ -69,6 +84,53 @@ const listenerMode = process.env.E2E_LISTENER === "1";
 const tunnelMode = process.env.E2E_TUNNEL === "1";
 const tunnelSecret = process.env.E2E_TUNNEL_SECRET;
 const tunnelFec = process.env.E2E_TUNNEL_FEC;
+const tunnelSecretHost = process.env.E2E_TUNNEL_SECRET_HOST ?? tunnelSecret;
+const tunnelSecretViewer = process.env.E2E_TUNNEL_SECRET_VIEWER ?? tunnelSecret;
+const tunnelBurst = process.env.E2E_TUNNEL_BURST === "1";
+const tunnelMismatch = process.env.E2E_TUNNEL_MISMATCH === "1";
+const windowMode = process.env.E2E_WINDOW === "1";
+const inviteCheck = windowMode && process.env.E2E_INVITE !== "0";
+const configEnvelope = process.env.E2E_CONFIG === "1";
+const windowSize = parseSize(process.env.E2E_WINDOW_SIZE ?? "100x30");
+const hostCols = windowMode ? 140 : 90;
+const hostRows = windowMode ? 40 : 28;
+
+function viewerConfigJson(cols, rows) {
+  return JSON.stringify({
+    version: 1,
+    relayUrl,
+    session,
+    sessionToken,
+    window: { cols, rows },
+  });
+}
+
+const redactionValues = new Set([masterToken, sessionToken]);
+for (const size of [windowSize, { cols: 120, rows: 40 }, { cols: 100, rows: 30 }]) {
+  redactionValues.add(
+    Buffer.from(viewerConfigJson(size.cols, size.rows), "utf8").toString("base64"),
+  );
+}
+redactionValues.add(Buffer.from(sessionToken, "utf8").toString("base64"));
+
+function redactText(text) {
+  let result = text;
+  for (const value of redactionValues) {
+    if (typeof value === "string" && value.length >= 8) {
+      result = result.split(value).join("<redacted>");
+    }
+  }
+  return result;
+}
+
+function parseSize(raw) {
+  const match = /^(\d+)x(\d+)$/.exec(raw.trim());
+  if (match === null) {
+    console.error("E2E_WINDOW_SIZE must be <cols>x<rows>");
+    process.exit(2);
+  }
+  return { cols: Number(match[1]), rows: Number(match[2]) };
+}
 
 if (!relayUrl || !masterToken) {
   console.error("TOKIMEKI_RELAY_URL and TOKIMEKI_MASTER_TOKEN are required");
@@ -90,13 +152,75 @@ if (tunnelFec === "xor" && !tunnelMode) {
   console.error("E2E_TUNNEL_FEC=xor requires E2E_TUNNEL=1");
   process.exit(2);
 }
+if (tunnelBurst && !tunnelMode) {
+  console.error("E2E_TUNNEL_BURST=1 requires E2E_TUNNEL=1");
+  process.exit(2);
+}
+if (tunnelMismatch && !tunnelMode) {
+  console.error("E2E_TUNNEL_MISMATCH=1 requires E2E_TUNNEL=1");
+  process.exit(2);
+}
+if (tunnelMismatch && p2pMode === "off") {
+  console.error("E2E_TUNNEL_MISMATCH=1 requires E2E_P2P_MODE=auto");
+  process.exit(2);
+}
+if (tunnelMismatch) {
+  for (const [name, value] of [
+    ["E2E_TUNNEL_SECRET_HOST", tunnelSecretHost],
+    ["E2E_TUNNEL_SECRET_VIEWER", tunnelSecretViewer],
+  ]) {
+    if (typeof value !== "string" || Buffer.byteLength(value, "utf8") < 16) {
+      console.error(`${name} must be a >=16-byte secret for E2E_TUNNEL_MISMATCH=1`);
+      process.exit(2);
+    }
+  }
+  if (tunnelSecretHost === tunnelSecretViewer) {
+    console.error("E2E_TUNNEL_MISMATCH=1 requires different host/viewer tunnel secrets");
+    process.exit(2);
+  }
+}
+if (flowControl && windowMode) {
+  console.error("E2E_FLOW_CONTROL=1 and E2E_WINDOW=1 are separate scenarios");
+  process.exit(2);
+}
+if (flowControl && (tunnelBurst || tunnelMismatch)) {
+  console.error("E2E_FLOW_CONTROL=1 cannot be combined with tunnel burst/mismatch");
+  process.exit(2);
+}
+if (tunnelBurst && tunnelMismatch) {
+  console.error("E2E_TUNNEL_BURST=1 and E2E_TUNNEL_MISMATCH=1 are separate scenarios");
+  process.exit(2);
+}
 
 const processes = [];
 let failed = false;
 
-function baseEnv() {
+function commonEnv() {
+  const env = { ...process.env };
+  // Do not inherit host/viewer overrides from the caller's shell; the test
+  // matrix sets every knob explicitly so runs stay reproducible.
+  for (const key of [
+    "TOKIMEKI_RELAY_URL",
+    "TOKIMEKI_MASTER_TOKEN",
+    "TOKIMEKI_SESSION",
+    "TOKIMEKI_SESSION_TOKEN",
+    "TOKIMEKI_P2P",
+    "TOKIMEKI_ICE_TRANSPORT_POLICY",
+    "TOKIMEKI_TUNNEL",
+    "TOKIMEKI_TUNNEL_FEC",
+    "TOKIMEKI_TUNNEL_SECRET",
+    "TOKIMEKI_WINDOW",
+    "TOKIMEKI_WINDOW_SIZE",
+    "TOKIMEKI_WINDOW_TUI",
+    "TOKIMEKI_LOG_PANEL_ROWS",
+    "TOKIMEKI_INVITE_KEY",
+    "TOKIMEKI_CONFIG",
+    "TOKIMEKI_LOG_LEVEL",
+  ]) {
+    delete env[key];
+  }
   return {
-    ...process.env,
+    ...env,
     TOKIMEKI_RELAY_URL: relayUrl,
     TOKIMEKI_MASTER_TOKEN: masterToken,
     TOKIMEKI_SESSION: session,
@@ -108,16 +232,71 @@ function baseEnv() {
     TOKIMEKI_SNAPSHOT_MAX_BYTES: "262144",
     TOKIMEKI_P2P: p2pMode,
     TOKIMEKI_ICE_TRANSPORT_POLICY: icePolicy,
-    ...(listenerMode ? { TOKIMEKI_LISTENER_SNAPSHOT_MS: "500" } : {}),
+    ...(windowMode
+      ? {
+          TOKIMEKI_WINDOW: "on",
+          TOKIMEKI_WINDOW_SIZE: `${windowSize.cols}x${windowSize.rows}`,
+          TOKIMEKI_LOG_PANEL_ROWS: "8",
+          TOKIMEKI_INVITE_KEY: "f12",
+        }
+      : {}),
     ...(tunnelMode ? { TOKIMEKI_TUNNEL: "auto" } : {}),
     ...(tunnelMode && tunnelFec !== undefined ? { TOKIMEKI_TUNNEL_FEC: tunnelFec } : {}),
-    ...(tunnelSecret === undefined ? {} : { TOKIMEKI_TUNNEL_SECRET: tunnelSecret }),
     TOKIMEKI_LOG_LEVEL: "debug",
   };
 }
 
+function viewerEnv() {
+  const env = { ...commonEnv() };
+  if (listenerMode) env.TOKIMEKI_LISTENER_SNAPSHOT_MS = "500";
+  if (tunnelSecretViewer !== undefined) env.TOKIMEKI_TUNNEL_SECRET = tunnelSecretViewer;
+  return env;
+}
+
+function configHostEnv() {
+  const env = { ...commonEnv() };
+  for (const key of [
+    "TOKIMEKI_RELAY_URL",
+    "TOKIMEKI_SESSION",
+    "TOKIMEKI_SESSION_TOKEN",
+    "TOKIMEKI_P2P",
+    "TOKIMEKI_ICE_TRANSPORT_POLICY",
+    "TOKIMEKI_WINDOW",
+    "TOKIMEKI_WINDOW_SIZE",
+    "TOKIMEKI_WINDOW_TUI",
+    "TOKIMEKI_LOG_PANEL_ROWS",
+    "TOKIMEKI_INVITE_KEY",
+    "TOKIMEKI_TUNNEL",
+    "TOKIMEKI_TUNNEL_FEC",
+    "TOKIMEKI_TUNNEL_SECRET",
+  ]) {
+    delete env[key];
+  }
+  // Explicit env wins over the envelope; the wrong JSON session proves it.
+  env.TOKIMEKI_MASTER_TOKEN = masterToken;
+  env.TOKIMEKI_SESSION = session;
+  env.TOKIMEKI_LOG_LEVEL = "debug";
+  env.TOKIMEKI_CONFIG = JSON.stringify({
+    v: 1,
+    relayUrl,
+    session: "json-session-should-lose",
+    sessionToken,
+    window: { cols: windowSize.cols, rows: windowSize.rows },
+    windowMode: windowMode ? "on" : "off",
+    logLevel: "debug",
+    p2p: p2pMode,
+    iceTransportPolicy: icePolicy,
+    ...(tunnelMode ? { tunnel: "auto" } : {}),
+    ...(tunnelMode && tunnelFec !== undefined ? { tunnelFec } : {}),
+    ...(tunnelMode && tunnelSecretHost !== undefined ? { tunnelSecret: tunnelSecretHost } : {}),
+  });
+  return env;
+}
+
 function hostEnv() {
-  const env = { ...baseEnv(), TOKIMEKI_LOG_LEVEL: "debug" };
+  if (configEnvelope) return configHostEnv();
+  const env = { ...commonEnv() };
+  if (tunnelSecretHost !== undefined) env.TOKIMEKI_TUNNEL_SECRET = tunnelSecretHost;
   if (secretCheck) {
     // Dummy values only; the fixture reports presence, never values. Keep a
     // configured tunnel secret intact so host/viewer key modes still match.
@@ -176,7 +355,7 @@ function waitForCheck(state, check, timeout, label) {
       rejectPromise(
         new Error(
           `[${state.name}] timed out waiting for ${JSON.stringify(label)}; tail=${JSON.stringify(
-            state.output.slice(-1500),
+            redactText(state.output.slice(-1500)),
           )}`,
         ),
       );
@@ -242,7 +421,7 @@ function waitForCount(state, needle, count, timeout = timeoutMs, label = needle)
       rejectPromise(
         new Error(
           `[${state.name}] timed out waiting for ${count}x ${JSON.stringify(label)}; tail=${JSON.stringify(
-            state.output.slice(-1500),
+            redactText(state.output.slice(-1500)),
           )}`,
         ),
       );
@@ -278,10 +457,37 @@ function pass(message) {
   console.log(`PASS ${message}`);
 }
 
+function lastNormalizedMatch(state, pattern) {
+  const matches = [...normalizeLog(state.output).matchAll(pattern)];
+  return matches.length === 0 ? null : matches[matches.length - 1];
+}
+
+function assertFixedHost(host, baseline, label) {
+  if (baseline === null) return;
+  const resizeCount = countOccurrences(host.output, "REASON=resize");
+  if (resizeCount !== baseline.resize) {
+    throw new Error(`${label}: host PTY received a resize (${baseline.resize} -> ${resizeCount})`);
+  }
+  const ptyCount = countOccurrences(host.output, "PTY resized to");
+  if (ptyCount !== baseline.pty) {
+    throw new Error(`${label}: host PTY was resized (${baseline.pty} -> ${ptyCount})`);
+  }
+  const size = lastNormalizedMatch(host, /SIZE=(\d+)x(\d+)/g);
+  if (size === null || Number(size[1]) !== windowSize.cols || Number(size[2]) !== windowSize.rows) {
+    throw new Error(`${label}: host PTY is not ${windowSize.cols}x${windowSize.rows}`);
+  }
+}
+
 async function main() {
   console.log(`session=${session} relay=${relayUrl} cli=${cli}`);
 
-  const host = start("host", ["run", "--", process.execPath, fakeTui], hostEnv(), 90, 28);
+  const host = start(
+    "host",
+    ["run", "--", process.execPath, fakeTui],
+    hostEnv(),
+    hostCols,
+    hostRows,
+  );
   await waitFor(host, "TOKIMEKI_E2E_READY");
   pass("host PTY started fake TUI");
   // Over a high-latency link the host can take several reconnect attempts to
@@ -290,10 +496,25 @@ async function main() {
   await waitFor(host, "relay ready:", timeoutMs, "host relay ready");
   pass("host connected to relay");
 
+  let windowBaseline = null;
+  if (windowMode) {
+    await waitForLog(
+      host,
+      `SIZE=${windowSize.cols}x${windowSize.rows}`,
+      timeoutMs,
+      "fixed host PTY size",
+    );
+    windowBaseline = {
+      resize: countOccurrences(host.output, "REASON=resize"),
+      pty: countOccurrences(host.output, "PTY resized to"),
+    };
+    pass(`fixed host PTY started at ${windowSize.cols}x${windowSize.rows}`);
+  }
+
   // Live auth check: with the session online, a bad session token must be
   // rejected by the host-token hash comparison rather than session existence.
   const bad = start("bad-attach", ["attach"], {
-    ...baseEnv(),
+    ...viewerEnv(),
     TOKIMEKI_SESSION_TOKEN: randomBytes(32).toString("base64url"),
   });
   // A high-latency link can spend most of the handshake timeout before the
@@ -302,27 +523,45 @@ async function main() {
   await waitExit(bad, 10_000);
   pass("wrong session token rejected");
 
-  const attach1 = start("attach1", ["attach"], baseEnv(), 80, 24);
+  const attach1 = start("attach1", ["attach"], viewerEnv(), 80, 24);
   await waitFor(attach1, "TOKIMEKI_E2E_READY");
   pass("attach1 received initial snapshot");
+  if (configEnvelope) {
+    // The JSON session deliberately differs from the explicit env session; a
+    // successful attach proves the explicit env won.
+    pass("TOKIMEKI_CONFIG host connected; viewer attached to the explicit env session");
+  }
 
   attach1.child.write("hello-e2e\r");
   await waitFor(attach1, "ECHO:hello-e2e");
   pass("attach1 input echoed by host PTY");
 
-  if (secretCheck) {
+  if (secretCheck || configEnvelope) {
     attach1.child.write("env-check\r");
     await waitFor(attach1, "TOKIMEKI_ENV_CHECK_DONE");
     if (!attach1.output.includes("ENV_SECRETS_PRESENT=0")) {
       throw new Error("host PTY child can see relay secret environment variables");
     }
-    if (!attach1.output.includes("ENV_RELAY_URL_PRESENT=yes")) {
+    if (!attach1.output.includes("ENV_CONFIG_PRESENT=0")) {
+      throw new Error("host PTY child can see TOKIMEKI_CONFIG");
+    }
+    if (!configEnvelope && !attach1.output.includes("ENV_RELAY_URL_PRESENT=yes")) {
       throw new Error("non-secret TOKIMEKI_RELAY_URL was not preserved for the PTY child");
     }
-    pass("host PTY child cannot see relay secrets; non-secret config preserved");
+    pass(
+      configEnvelope
+        ? "TOKIMEKI_CONFIG applied and scrubbed from the PTY; explicit env won"
+        : "host PTY child cannot see relay secrets; non-secret config preserved",
+    );
   }
 
-  const attach2 = start("attach2", ["attach"], baseEnv(), 80, 24);
+  const attach2 = start(
+    "attach2",
+    ["attach"],
+    viewerEnv(),
+    windowMode ? 120 : 80,
+    windowMode ? 40 : 24,
+  );
   await waitFor(attach2, "TOKIMEKI_E2E_READY");
   pass("attach2 received initial snapshot");
 
@@ -331,14 +570,80 @@ async function main() {
   await waitFor(attach2, "ECHO:two-e2e");
   pass("shared control broadcasts input to both attaches");
 
-  attach1.child.resize(100, 30);
-  await waitFor(attach2, "SIZE=100x30", timeoutMs, "SIZE=100x30");
-  pass("resize propagated to PTY and broadcast");
+  if (windowMode) {
+    await waitForLog(host, "viewers=2", timeoutMs, "host viewers status");
+    await waitForLog(host, "f12:invite", timeoutMs, "host invite hint");
+    await waitForLog(host, "view:fit", timeoutMs, "host fit status");
+    if (!host.output.includes("\x1b[2m")) {
+      throw new Error("debug log panel did not render");
+    }
+    await waitForLog(attach1, "view:80x15@", timeoutMs, "attach1 crop status");
+    await waitForLog(attach2, "view:fit", timeoutMs, "attach2 fit status");
+    assertFixedHost(host, windowBaseline, "after two viewers attached");
+    pass("host status bar, debug log panel, and viewer crop/fit status verified");
+
+    if (inviteCheck) {
+      host.child.write("\x1b[24~");
+      await waitForLog(host, "TOKIMEKI VIEWER CONFIG (SECRET)", 20_000, "invite overlay");
+      await waitForLog(host, "viewer config (secret):", 20_000, "invite config line");
+      await waitForLog(host, "c: copy exact JSON", 20_000, "invite copy hint");
+      host.child.write("c");
+      await waitFor(host, "\x1b]52;c;", 20_000, "OSC 52 copy");
+      host.child.write("x");
+      await new Promise((r) => setTimeout(r, 500));
+      for (const viewer of [attach1, attach2]) {
+        if (viewer.output.includes("ECHO:x") || viewer.output.includes("ECHO:c")) {
+          throw new Error(`invite overlay forwarded a key to the PTY (${viewer.name})`);
+        }
+      }
+      host.child.write("\x1b");
+      await new Promise((r) => setTimeout(r, 300));
+      attach1.child.write("post-invite-e2e\r");
+      await waitForLog(attach1, "ECHO:post-invite-e2e", 20_000, "post-invite input");
+      pass("F12 overlay opened, copied via OSC 52, consumed keys, and closed");
+    }
+
+    attach1.child.resize(120, 40);
+    await waitForLog(attach1, "view:fit", timeoutMs, "attach1 fit after resize");
+    assertFixedHost(host, windowBaseline, "after viewer resize");
+    attach1.child.resize(80, 24);
+    await waitForLog(attach1, "view:80x15@", timeoutMs, "attach1 crop after resize");
+    assertFixedHost(host, windowBaseline, "after viewer resize restore");
+    pass("viewer resize only changed its local viewport; host PTY stayed fixed");
+
+    attach2.child.write("cursor-e2e\r");
+    await waitForRecent(attach1, "CURSOR_MOVED=28,90", 20_000, "cursor move");
+    await waitForCheck(
+      attach1,
+      () => {
+        const match = lastNormalizedMatch(attach1, /view:(\d+)x(\d+)@(\d+),(\d+)/g);
+        return match !== null && (Number(match[3]) > 0 || Number(match[4]) > 0);
+      },
+      20_000,
+      "camera followed cursor",
+    );
+    pass("cropped viewer camera followed the TUI cursor");
+
+    attach1.child.write("\x1b[<0;10;5M");
+    await waitForLog(attach1, "MOUSE=", 20_000, "translated mouse");
+    const mouse = lastNormalizedMatch(attach1, /MOUSE=(\d+),(\d+),/g);
+    if (mouse === null) throw new Error("fixture did not report a translated mouse event");
+    const mouseX = Number(mouse[1]);
+    const mouseY = Number(mouse[2]);
+    if (mouseX < 1 || mouseX > windowSize.cols || mouseY < 1 || mouseY > windowSize.rows) {
+      throw new Error(`translated mouse ${mouseX},${mouseY} is outside the fixed grid`);
+    }
+    pass(`viewer mouse input mapped into the fixed grid (${mouseX},${mouseY})`);
+  } else {
+    attach1.child.resize(100, 30);
+    await waitFor(attach2, "SIZE=100x30", timeoutMs, "SIZE=100x30");
+    pass("resize propagated to PTY and broadcast");
+  }
 
   // v1.1 F2: a read-only listener gets snapshots but cannot influence the PTY.
   let listener = null;
   if (listenerMode) {
-    listener = start("listener", ["attach", "--listen"], baseEnv(), 100, 30);
+    listener = start("listener", ["attach", "--listen"], viewerEnv(), 100, 30);
     await waitFor(listener, "TOKIMEKI_E2E_READY", timeoutMs, "listener initial snapshot");
     pass("listener received an immediate snapshot");
 
@@ -408,59 +713,93 @@ async function main() {
   // before we type, otherwise attach2's input may still legitimately use relay.
   let p2pDataPath = false;
   if (p2pMode !== "off") {
-    const outputMarker = tunnelMode
-      ? "p2p output started on tunnel"
-      : "p2p output started on data channel";
-    try {
-      await waitForCount(host, outputMarker, 2, 20_000, outputMarker);
-      if (tunnelMode) {
-        await waitForCount(host, "tunnel ready for", 2, 20_000, "tunnel ready for");
-        const expectedKeyMode = tunnelSecret ? "shared-secret" : "session-token";
-        const hostLog = normalizeLog(host.output);
-        if (!new RegExp(`tunnel ready for .*keyMode=\\s*=?${expectedKeyMode}`).test(hostLog)) {
-          throw new Error(`tunnel did not negotiate keyMode=${expectedKeyMode}`);
+    if (tunnelMismatch) {
+      // Different HKDF secrets make AEAD fail. The viewer detects the corrupt
+      // host output and reports a relay fallback; the host may or may not also
+      // see its own decrypt failure, so require the fallback, not that log.
+      await waitForLog(host, "p2p unavailable for", timeoutMs, "P2P mismatch fallback");
+      await waitForLog(host, "using relay", timeoutMs, "relay fallback");
+      const mismatchMarker = "tunnel-mismatch-e2e";
+      attach2.child.write(`${mismatchMarker}\r`);
+      await waitFor(attach1, `ECHO:${mismatchMarker}`, timeoutMs, "mismatch echo on attach1");
+      await waitFor(attach2, `ECHO:${mismatchMarker}`, timeoutMs, "mismatch echo on attach2");
+      if (logIncludes(host.output, "tunnel unavailable for")) {
+        pass("host also detected the tunnel decrypt mismatch");
+      }
+      pass("tunnel secret mismatch fell back to relay; input still echoed");
+      // The mismatch marker changed LAST_INPUT; restore the reconnect marker.
+      attach2.child.write("persist-e2e\r");
+      await waitForLog(attach2, "ECHO:persist-e2e", 20_000, "persist after tunnel mismatch");
+    } else {
+      const outputMarker = tunnelMode
+        ? "p2p output started on tunnel"
+        : "p2p output started on data channel";
+      try {
+        await waitForCount(host, outputMarker, 2, 20_000, outputMarker);
+        if (tunnelMode) {
+          await waitForCount(host, "tunnel ready for", 2, 20_000, "tunnel ready for");
+          const expectedKeyMode = tunnelSecretHost ? "shared-secret" : "session-token";
+          const hostLog = normalizeLog(host.output);
+          if (!new RegExp(`tunnel ready for .*keyMode=\\s*=?${expectedKeyMode}`).test(hostLog)) {
+            throw new Error(`tunnel did not negotiate keyMode=${expectedKeyMode}`);
+          }
+          pass(
+            tunnelSecretHost
+              ? "tunnel used shared-secret keyMode (relay cannot derive the keys)"
+              : "tunnel used session-token keyMode (relay can derive; not relay-blind)",
+          );
+          if (tunnelFec === "xor") {
+            if (!/tunnel ready for .*fec=xor/.test(hostLog)) {
+              throw new Error("tunnel did not negotiate XOR FEC");
+            }
+            // The e2e does not inject packet loss, so this only proves the XOR
+            // sender policy was negotiated. Single-loss recovery has unit and
+            // TunnelTransport integration coverage; real-loss e2e is unverified.
+            pass("tunnel negotiated XOR FEC (no packet loss injected; recovery unverified)");
+          }
+        }
+        await new Promise((r) => setTimeout(r, 300));
+        attach2.child.write("p2p-live\r");
+        await waitForLog(host, "p2p input received over data channel", 20_000);
+        await waitFor(attach2, "ECHO:p2p-live", 20_000);
+        if (tunnelMode && /tunnel unavailable for/.test(normalizeLog(host.output))) {
+          throw new Error("the tunnel fell back to the relay during the tunnel run");
+        }
+        p2pDataPath = true;
+        const transports = [
+          ...new Set(
+            [...host.output.matchAll(/p2p data channel open for \S+ \(([^)]+)\)/g)].map(
+              (match) => match[1],
+            ),
+          ),
+        ];
+        if (transports.length > 0) {
+          console.log(`P2P transports: ${transports.join(", ")}`);
         }
         pass(
-          tunnelSecret
-            ? "tunnel used shared-secret keyMode (relay cannot derive the keys)"
-            : "tunnel used session-token keyMode (relay can derive; not relay-blind)",
+          tunnelMode
+            ? "TUN data path carried host output and viewer input"
+            : "P2P data path carried host output and viewer input",
         );
-        if (tunnelFec === "xor") {
-          if (!/tunnel ready for .*fec=xor/.test(hostLog)) {
-            throw new Error("tunnel did not negotiate XOR FEC");
+        if (tunnelBurst) {
+          attach2.child.write("burst-e2e\r");
+          await waitForRecent(attach1, "BURST_DONE=4194304", 180_000, "tunnel burst on attach1");
+          await waitForRecent(attach2, "BURST_DONE=4194304", 180_000, "tunnel burst on attach2");
+          if (/tunnel unavailable for/.test(normalizeLog(host.output))) {
+            throw new Error("the tunnel fell back to the relay during the burst");
           }
-          // The e2e does not inject packet loss, so this only proves the XOR
-          // sender policy was negotiated. Single-loss recovery has unit and
-          // TunnelTransport integration coverage; real-loss e2e is unverified.
-          pass("tunnel negotiated XOR FEC (no packet loss injected; recovery unverified)");
+          pass("4 MiB PTY burst completed over the tunnel on both viewers");
+          attach2.child.write("redraw-e2e\r");
+          await waitForRecent(attach1, "REASON=redraw", 20_000, "redraw after tunnel burst");
+          await waitForRecent(attach2, "REASON=redraw", 20_000, "redraw after tunnel burst");
+          // The burst changed LAST_INPUT; restore the reconnect marker.
+          attach2.child.write("persist-e2e\r");
+          await waitForLog(attach2, "ECHO:persist-e2e", 20_000, "persist after tunnel burst");
         }
+      } catch (error) {
+        if (requireP2p || tunnelMode) throw error;
+        console.log(`WARN ${error instanceof Error ? error.message : String(error)}`);
       }
-      await new Promise((r) => setTimeout(r, 300));
-      attach2.child.write("p2p-live\r");
-      await waitForLog(host, "p2p input received over data channel", 20_000);
-      await waitFor(attach2, "ECHO:p2p-live", 20_000);
-      if (tunnelMode && /tunnel unavailable for/.test(normalizeLog(host.output))) {
-        throw new Error("the tunnel fell back to the relay during the tunnel run");
-      }
-      p2pDataPath = true;
-      const transports = [
-        ...new Set(
-          [...host.output.matchAll(/p2p data channel open for \S+ \(([^)]+)\)/g)].map(
-            (match) => match[1],
-          ),
-        ),
-      ];
-      if (transports.length > 0) {
-        console.log(`P2P transports: ${transports.join(", ")}`);
-      }
-      pass(
-        tunnelMode
-          ? "TUN data path carried host output and viewer input"
-          : "P2P data path carried host output and viewer input",
-      );
-    } catch (error) {
-      if (requireP2p || tunnelMode) throw error;
-      console.log(`WARN ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -470,12 +809,22 @@ async function main() {
   stop(attach1);
   await waitExit(attach1, 10_000);
   await new Promise((r) => setTimeout(r, 500));
-  const attach3 = start("attach3", ["attach"], baseEnv(), 100, 30);
-  await waitFor(attach3, "TOKIMEKI_E2E_READY");
-  await waitFor(attach3, "LAST_INPUT=persist-e2e");
+  const attach3 = start(
+    "attach3",
+    ["attach"],
+    viewerEnv(),
+    windowMode ? 140 : 100,
+    windowMode ? 40 : 30,
+  );
+  if (windowMode) {
+    await waitForLog(attach3, "relay=ready", timeoutMs, "attach3 viewport ready");
+  } else {
+    await waitFor(attach3, "TOKIMEKI_E2E_READY");
+  }
+  await waitForLog(attach3, "LAST_INPUT=persist-e2e", timeoutMs, "reconnect snapshot");
   attach3.child.write("reconnect-e2e\r");
-  await waitFor(attach3, "ECHO:reconnect-e2e");
-  await waitFor(attach2, "ECHO:reconnect-e2e");
+  await waitForLog(attach3, "ECHO:reconnect-e2e", timeoutMs, "reconnect echo");
+  await waitForLog(attach2, "ECHO:reconnect-e2e", timeoutMs, "reconnect broadcast");
   pass("reconnect snapshot restored earlier output and shared control still works");
 
   const combined = `${host.output}\n${attach2.output}\n${attach3.output}`;
@@ -486,14 +835,16 @@ async function main() {
     pass("P2P disabled: relay-only data path verified");
   } else if (p2pDataPath) {
     pass("P2P transport established (p2p-direct or p2p-turn in logs)");
+  } else if (tunnelMismatch) {
+    pass("tunnel secret mismatch stayed on the relay fallback");
   } else if (requireP2p) {
     throw new Error("P2P was required but no p2p-direct/p2p-turn transport was exercised");
   } else {
     console.log("WARN P2P not observed; relay path still passed");
   }
 
-  if (requireP2pFallback) {
-    if (!/p2p unavailable for .*using relay/.test(host.output)) {
+  if (requireP2pFallback || tunnelMismatch) {
+    if (!/p2p unavailable for .*using relay/.test(normalizeLog(host.output))) {
       throw new Error("P2P fallback was required but the host never logged a relay fallback");
     }
     pass("P2P attempt failed over to the relay data path");
@@ -534,14 +885,14 @@ main()
       try {
         mkdirSync(dumpDir, { recursive: true });
         for (const state of processes) {
-          writeFileSync(join(dumpDir, `${state.name}.log`), state.output);
+          writeFileSync(join(dumpDir, `${state.name}.log`), redactText(state.output));
         }
       } catch (dumpError) {
         console.error(`failed to dump process logs: ${String(dumpError)}`);
       }
     }
     for (const state of processes) {
-      console.error(`--- ${state.name} tail ---\n${state.output.slice(-3000)}`);
+      console.error(`--- ${state.name} tail ---\n${redactText(state.output.slice(-3000))}`);
     }
   })
   .finally(() => {
