@@ -28,6 +28,13 @@ tokimeki 让一台机器**托管**终端程序，另一台机器**接入**同一
 - **断线恢复**：快照 + 序号，viewer 掉线重连后恢复屏幕。
 - **多 viewer**：多人接入，输入共享；host 保持固定 TUI 窗口，新 viewer 接入不会改变
   被托管程序的窗口尺寸。viewer 在自己的终端里留边显示或光标跟随裁剪。
+- **只读听众**：`tokimeki attach --listen` 可观看会话，但不发送键盘输入/ACK、
+  不改变尺寸、不尝试 P2P；host 周期发送全量快照。
+- **可选 P2P 隧道**：`TOKIMEKI_TUNNEL=auto` 在 unreliable DataChannel 上启用
+  AES-256-GCM + selective-repeat ARQ，可选 XOR 校验
+  （`TOKIMEKI_TUNNEL_FEC=xor`）；失败自动回退 relay。
+- **P2P 韧性**：DataChannel 分片、P2P 直发快照并回退 relay、ICE 自动刷新、
+  TURN provider 一次重试。
 - **任意 TUI 命令**：把可执行文件名加入 `TOKIMEKI_WINDOW_TUI`，即可
   `tokimeki <命令>`（例如 `TOKIMEKI_WINDOW_TUI=claude,pi,omp` 后运行
   `tokimeki omp`）。不在列表内的未知命令会被拒绝，避免误启动。
@@ -125,6 +132,7 @@ tokimeki attach
 | `tokimeki pi [args...]` | 用 PTY 托管 pi |
 | `tokimeki run -- <cmd...>` | 托管任意 TUI/终端程序 |
 | `tokimeki attach` | 接入一个已托管会话 |
+| `tokimeki attach --listen` | 只读观看（无输入、ACK 或尺寸变更） |
 | `tokimeki doctor` | 检查 PTY、配置与 relay 连通性 |
 
 完整命令/env 参考：[docs/cli.md](docs/cli.md)。
@@ -149,7 +157,7 @@ TURN 变量、secret、按钮/手动部署步骤：
 
 所有运行时配置都通过环境变量：
 
-- [`.env.example`](.env.example) — 完整参考（含 v1.1 预留变量）。
+- [`.env.example`](.env.example) — 完整参考。
 - [docs/cli.md](docs/cli.md) — host/attach 命令与变量。
 - [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) — relay vars/secrets。
 
@@ -157,11 +165,47 @@ TURN 变量、secret、按钮/手动部署步骤：
 `TOKIMEKI_SESSION`、`TOKIMEKI_SESSION_TOKEN`、`TOKIMEKI_P2P`（`auto|off`）、
 `TOKIMEKI_ICE_TRANSPORT_POLICY`（`all|relay`）。
 
+### v1.1 配置
+
+**只读听众**（viewer：`tokimeki attach --listen`）：
+
+- 只接收全量 ANSI 快照，从不发送输入、resize、ACK、resync 或 P2P 信令；
+  Ctrl-C 只退出本地 listener。
+- `TOKIMEKI_LISTENER_SNAPSHOT_MS`（host，默认 `1000`，250–60000 ms）设置全量
+  快照间隔。
+- `TOKIMEKI_MAX_LISTENERS`（relay，默认 `8`）限制并发 listener 数；listener
+  也计入 `TOKIMEKI_MAX_CLIENTS_PER_SESSION`。
+
+**P2P 隧道**（host + viewer，opt-in，仅 P2P）：
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `TOKIMEKI_TUNNEL` | `off` | `auto` 在 unreliable/unordered DataChannel 上协商 AES-256-GCM + selective-repeat ARQ |
+| `TOKIMEKI_TUNNEL_FEC` | `off` | `xor` 每 8 条数据记录发一条校验记录，可恢复恰好 1 条丢失；其他丢失仍走 ARQ |
+| `TOKIMEKI_TUNNEL_SECRET` | — | 可选 >=16 字节共享密钥，把 `keyMode` 切换为 `shared-secret` |
+
+两端都必须设置 `TOKIMEKI_TUNNEL=auto` 且 keyMode 一致。不匹配或隧道失败会回退
+relay 并请求新快照，不会终止会话。默认 `session-token` keyMode 的密钥可由
+relay 推导，因此只是传输加固，**不是**端到端加密；只有带外共享
+`TOKIMEKI_TUNNEL_SECRET` 的 `shared-secret` 模式才可以称为 relay-blind。
+
+**LAN 诊断与保留路由配置：**
+
+- P2P debug 日志会输出所选候选对的 `lan=yes|no`；仅作诊断，不改变选路或
+  relay 回退。
+- `TOKIMEKI_ROUTE_POLICY=auto`、`TOKIMEKI_LAN_DISCOVERY=off`、
+  `TOKIMEKI_LAN_FANOUT=off` 已识别但保留/默认关闭；本版本不实现 mDNS 与
+  peer fan-out。
+
+**自动 P2P 行为**（无需配置）：DataChannel 分片、P2P 直发快照并在失败时回退
+relay、ICE 凭据到期前自动刷新、TURN provider 失败后重试一次再留在 relay。
+
 ## 安全与隐私
 
 - token 走 header，不放进 URL；relay master token 只给 host。
 - relay 承载终端数据时可以看到终端字节；P2P/TURN 改变传输路径，但不等于
-  端到端加密。
+  端到端加密。可选 TUN profile 只有两端都使用共享 `TOKIMEKI_TUNNEL_SECRET`
+  时才是 relay-blind；默认 `session-token` keyMode 可被 relay 推导。
 - 使用专用 relay/session；master token 泄漏时及时轮换。
 - 漏洞请按 [SECURITY.md](SECURITY.md) 私下报告，不要开公开 issue。
 

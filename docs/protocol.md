@@ -376,6 +376,10 @@ DataChannel 上用 selective-repeat ARQ + AES-256-GCM 承载完整的 `INPUT`/`O
 帧。控制消息、快照、resize、signal 与 relay ACK 流控仍走各自 v1 路径；relay
 不转发 `TUNNEL`，收到时仍返回 `not_implemented`。
 
+> 设计取舍（为何在 unreliable DataChannel 上自建 SR-ARQ，而不是使用 SCTP
+> reliable 模式，以及两者何时会构成重复设计）见 `docs/tunnel-reliability.md`。
+> 弱网注入 A/B 验证规划见 `docs/roadmap.md` 的 v2.0 小节。
+
 **开关与协商**
 
 - `TOKIMEKI_TUNNEL=off`（默认）时不声明 `tunnel` capability，DataChannel 保持

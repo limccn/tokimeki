@@ -1,6 +1,6 @@
 # 路线图
 
-> 本文件区分 v1 交付、v1.1 增强与 v2 兼容性工作。
+> 本文件区分 v1 交付、v1.1 增强与 v2.0 兼容性工作。
 > **v1.1 与 v2 不属于当前 v1 验收（AC1–AC10）**，未完成不会阻塞 v1 归档。
 
 ## v1（已交付基线）
@@ -87,6 +87,32 @@ mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0
   单丢包）→ LAN 选路 → peer fan-out（仅设计/实验开关）。
 
 ## v2（独立任务）
+
+### v2.0 前置决策：弱网注入可靠传输 A/B 验证（规划中）
+
+状态（2026-11-18）：规划任务 `11-18-v2-0-weaknet-ab-validation` 已创建，当前为
+planning，不启动实现。该验证是 v2.0 transport 选择的前置条件；在结论出来前，
+不把 TUN 应用层 ARQ/FEC 当作 v2.0 的既定实现。
+
+- **目的**：在可控丢包/乱序/重复/抖动/限速环境下，比较：
+  - A：v1 reliable/ordered DataChannel（SCTP 可靠 + 有序）；
+  - B：reliable/unordered DataChannel（SCTP 可靠、无 SCTP 排序；仅 harness
+    参考路径，除非结论建议提升为产品路径）；
+  - C：unreliable/unordered + TUN selective-repeat ARQ（当前 F1）；
+  - D：unreliable/unordered + TUN SR-ARQ + XOR FEC（当前 F1.1）；
+  - R：relay 回退基线（只测失败/回退正确性与恢复时间）。
+- **注入**：主环境为 Linux VM / network namespace + `tc netem`，在真实 UDP 路径
+  注入 loss/reorder/duplicate/jitter/rate；Windows/macOS 工具只做 sanity。
+  跨公网 WAN 作为外部有效性补充，不作为主矩阵。
+- **指标**：字节级正确性、p50/p95/p99 完成时间或 RTT、goodput、HOL/停顿、
+  重传/FEC 恢复、tunnel 失败与 relay 回退时间、CPU/RSS、ACK 字节占比。
+- **预注册决策门槛（待 PRD 确认）**：所有变体必须 100% 字节正确；TUN 只有在
+  目标丢包档位下显著改善 p99/恢复时间，且 CPU/ACK 开销可接受时才保留；否则
+  v2.0 优先 reliable DataChannel 方案，移除或降级应用层 ARQ/FEC。
+- **产物**：`scripts/perf/weaknet/`（可复现 harness）、
+  `docs/perf/weaknet-ab.md`（报告与决策）、任务 PRD/design/implement。
+- **不阻塞**：v2.0 的 wire 信封/relay 兼容工作可以并行；只阻塞 transport
+  可靠性方案的最终选型。
 
 - Go/Rust 纯二进制实现，复用 v1 wire protocol、加密封装、帧类型与 Worker 中继。
 - 不假设 KCP/FEC 跨语言 wire 兼容：要么用 golden vectors + 互操作测试验证同一方言，

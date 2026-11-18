@@ -23,7 +23,7 @@ control. It is self-hostable on Cloudflare Workers + Durable Objects.
 - CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.2`.
 - Protocol package: `@limccn/tokimeki-protocol`, version `0.1.2`; the CLI
   depends on it. Publish protocol **before** the CLI.
-- Relay package `@tokimeki/relay` is private; deploy with Wrangler, not npm.
+- Relay package `@limccn/tokimeki-relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
 - `npm run release:bump -- <version>` updates the root/workspace versions,
   exact protocol dependencies, and `package-lock.json`; `npm run
@@ -175,11 +175,15 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
   tests (delivery worked); link-quality work beyond the F1/F1.1 tunnel
   (fragmentation-independent ARQ tuning, Reed-Solomon/multi-loss FEC) is future.
+  A v2.0 lossy-network A/B validation (SCTP reliable vs TUN SR-ARQ/FEC) is
+  planned; see `docs/roadmap.md` and `docs/tunnel-reliability.md`.
 
 ## Documentation
 
 - User docs: `README.md`, `docs/cli.md`, `docs/deploy-cloudflare.md`.
 - Wire protocol: `docs/protocol.md`.
+- TUN reliability trade-off (SR-ARQ vs SCTP; v2.0 A/B plan):
+  `docs/tunnel-reliability.md`.
 - Production deployment: `docs/deployment.md`.
 - Release: `docs/release.md`.
 - Performance: `docs/perf/`.

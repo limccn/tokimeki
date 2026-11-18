@@ -6,7 +6,7 @@ This repository publishes two npm packages and deploys one private Worker:
 |---|---|---|
 | `@limccn/tokimeki` | public CLI | yes |
 | `@limccn/tokimeki-protocol` | public library | yes, before the CLI |
-| `@tokimeki/relay` | private Worker | no; deploy via Wrangler |
+| `@limccn/tokimeki-relay` | private Worker | no; deploy via Wrangler |
 
 Releases are published from GitHub Actions when a `v<version>` tag is pushed.
 The same workflow publishes to npmjs and to GitHub Packages and creates the
