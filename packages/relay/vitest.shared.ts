@@ -19,6 +19,18 @@ export interface RelayWorkersConfigOptions {
    * default (86400), so the alarm paths are still covered.
    */
   readonly sessionMaxTtlSeconds?: string;
+  /**
+   * Bind the static `TOKIMEKI_NAMESPACE_TOKENS` map (team-a/team-b). The
+   * legacy/fallback suites run without it so the master-token path is tested
+   * in its own mode; namespace suites opt in.
+   */
+  readonly namespaceTokens?: boolean;
+  /**
+   * Bind the `TOKIMEKI_JWT_*` variables (JWKS URL/issuer/audience). The JWT
+   * worker suite opts in; every other suite stays JWT-disabled so no test
+   * accidentally depends on JWT mode.
+   */
+  readonly jwtBindings?: boolean;
 }
 
 /**
@@ -47,11 +59,27 @@ export function relayWorkersConfig(options: RelayWorkersConfigOptions) {
             bindings: {
               // Test-only values. Production values come from Worker vars/secrets.
               TOKIMEKI_MASTER_TOKEN: "test-master-token-abc",
-              // Two static namespace hosts (>=32-byte tokens, unique, != master).
-              TOKIMEKI_NAMESPACE_TOKENS: JSON.stringify({
-                "team-a": "test-namespace-token-team-a-0123456789",
-                "team-b": "test-namespace-token-team-b-0123456789",
-              }),
+              // Two static namespace hosts (>=32-byte tokens, unique, != master),
+              // bound only when the suite requests namespace mode.
+              ...(options.namespaceTokens === true
+                ? {
+                    TOKIMEKI_NAMESPACE_TOKENS: JSON.stringify({
+                      "team-a": "test-namespace-token-team-a-0123456789",
+                      "team-b": "test-namespace-token-team-b-0123456789",
+                    }),
+                  }
+                : {}),
+              // JWT verification bindings, bound only when the suite requests
+              // JWT mode. The JWKS is mocked per test via `fetchMock`.
+              ...(options.jwtBindings === true
+                ? {
+                    TOKIMEKI_JWT_JWKS_URL: "https://tokiapi.test/api/tokimeki/jwks.json",
+                    TOKIMEKI_JWT_ISSUER: "https://tokiapi.test",
+                    TOKIMEKI_JWT_AUDIENCE: "tokimeki-relay",
+                    TOKIMEKI_JWT_JWKS_TTL_SECONDS: "3600",
+                    TOKIMEKI_JWT_CLOCK_SKEW_SECONDS: "60",
+                  }
+                : {}),
               TOKIMEKI_SESSION_TTL_SECONDS: "30",
               ...(options.sessionMaxTtlSeconds === undefined
                 ? {}

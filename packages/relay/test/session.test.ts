@@ -1,8 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+﻿import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { decodeFrame, encodeFrame, MAX_SIGNAL_PAYLOAD_BYTES } from "@limccn/tokimeki-protocol";
 import { describe, expect, it } from "vitest";
 
-import { sha256Hex } from "../src/crypto-utils.js";
 import {
   connectDirect,
   connectWorker,
@@ -13,7 +12,6 @@ import {
   openViewer,
   SESSION_TOKEN,
   sleep,
-  TEAM_A_TOKEN,
   type TestSocket,
 } from "./helpers";
 
@@ -57,7 +55,7 @@ describe("SessionDurableObject", () => {
 
   it("accepts unknown capabilities from newer clients", async () => {
     const socket = await connectWorker("unknown-capabilities", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     socket.send(
@@ -82,7 +80,7 @@ describe("SessionDurableObject", () => {
   it("echoes client identity and display capabilities in welcome and presence", async () => {
     const sessionId = "client-display-echo";
     const host = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     host.send(
@@ -151,7 +149,7 @@ describe("SessionDurableObject", () => {
   it("rejects a second host while the first is online", async () => {
     const host = await openHost("duplicate-host");
     const second = await connectWorker("duplicate-host", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     second.send(helloFor("duplicate-host", "host", "host-2"));
@@ -663,7 +661,7 @@ describe("SessionDurableObject", () => {
     host.close();
     await viewer.waitFor((message) => message.type === "host" && message.online === false);
     const reconnected = await connectWorker("host-reconnect", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     reconnected.send(helloFor("host-reconnect", "host", "host-1"));
@@ -680,7 +678,7 @@ describe("SessionDurableObject", () => {
     host.close();
     await viewer.waitFor((message) => message.type === "host" && message.online === false);
     const reconnected = await connectWorker("host-token-change", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: "different-session-token",
     });
     reconnected.send(helloFor("host-token-change", "host", "host-1"));
@@ -1129,7 +1127,7 @@ describe("SessionDurableObject", () => {
     const squatter = await openViewer(sessionId, "host-1");
 
     const replacement = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     replacement.send(helloFor(sessionId, "host", "host-1"));
@@ -1155,25 +1153,6 @@ describe("SessionDurableObject", () => {
     viewer.close();
   });
 
-  it("records the namespace of a namespace-hosted session", async () => {
-    const sessionId = "team-a.namespace-meta";
-    const host = await connectWorker(sessionId, {
-      master: TEAM_A_TOKEN,
-      token: SESSION_TOKEN,
-    });
-    host.send(helloFor(sessionId, "host", "host-1"));
-    await host.waitForType("welcome");
-
-    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
-    const meta = await runInDurableObject(stub, async (_instance, state) => {
-      return state.storage.sql
-        .exec<{ namespace_id: string | null }>("SELECT namespace_id FROM session_meta LIMIT 1")
-        .toArray();
-    });
-    expect(meta[0]?.namespace_id).toBe("team-a");
-    host.close();
-  });
-
   it("derives a namespace for root-created <namespace>.<slug> sessions", async () => {
     const named = await openHost("team-a.root-derived");
     const plain = await openHost("plain-root");
@@ -1195,78 +1174,4 @@ describe("SessionDurableObject", () => {
     plain.close();
   });
 
-  it("does not let a namespace token claim a legacy (null namespace) session", async () => {
-    const sessionId = "team-a.legacy-row";
-    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
-    const tokenHash = await sha256Hex(SESSION_TOKEN);
-    await runInDurableObject(stub, async (_instance, state) => {
-      const sql = state.storage.sql;
-      sql.exec(
-        `CREATE TABLE session_meta (
-           session_id TEXT PRIMARY KEY,
-           created_at INTEGER NOT NULL,
-           last_activity_at INTEGER NOT NULL,
-           host_token_hash TEXT NOT NULL,
-           session_ttl_seconds INTEGER NOT NULL,
-           max_clients INTEGER NOT NULL,
-           host_offline_deadline INTEGER,
-           namespace_id TEXT
-         )`,
-      );
-      sql.exec(
-        `INSERT INTO session_meta
-           (session_id, created_at, last_activity_at, host_token_hash,
-            session_ttl_seconds, max_clients, host_offline_deadline, namespace_id)
-         VALUES (?, 1, 2, ?, 30, 3, NULL, NULL)`,
-        sessionId,
-        tokenHash,
-      );
-    });
-
-    const claimed = await connectWorker(sessionId, {
-      master: TEAM_A_TOKEN,
-      token: SESSION_TOKEN,
-    });
-    claimed.send(helloFor(sessionId, "host", "host-1"));
-    const error = await claimed.waitForType("error");
-    expect(error.code).toBe("invalid_session");
-    const closed = await claimed.waitForClose();
-    expect(closed.code).toBe(4001);
-
-    // The root master remains break-glass for legacy sessions.
-    const root = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
-      token: SESSION_TOKEN,
-    });
-    root.send(helloFor(sessionId, "host", "host-1"));
-    const welcome = await root.waitForType("welcome");
-    expect(welcome.hostOnline).toBe(true);
-    root.close();
-  });
-
-  it("rejects viewers when a session's prefix does not match its stored namespace", async () => {
-    const sessionId = "team-a.viewer-guard";
-    const host = await connectWorker(sessionId, {
-      master: TEAM_A_TOKEN,
-      token: SESSION_TOKEN,
-    });
-    host.send(helloFor(sessionId, "host", "host-1"));
-    await host.waitForType("welcome");
-
-    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
-    await runInDurableObject(stub, async (_instance, state) => {
-      // Simulate inconsistent persisted metadata; the DO must refuse routing.
-      state.storage.sql.exec("UPDATE session_meta SET namespace_id = 'team-b'");
-    });
-
-    const viewer = await connectWorker(sessionId, { token: SESSION_TOKEN });
-    viewer.send(helloFor(sessionId, "viewer", "viewer-1"));
-    const error = await viewer.waitForType("error");
-    expect(error.code).toBe("invalid_session");
-    const closed = await viewer.waitForClose();
-    expect(closed.code).toBe(4001);
-
-    host.close();
-    viewer.close();
-  });
 });

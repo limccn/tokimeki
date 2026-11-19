@@ -1,4 +1,4 @@
-import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+﻿import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { encodeFrame } from "@limccn/tokimeki-protocol";
 import { describe, expect, it } from "vitest";
 
@@ -101,7 +101,7 @@ describe("session absolute TTL", () => {
 
     const before = Date.now();
     const reconnected = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     reconnected.send(helloFor(sessionId, "host", "host-1"));
@@ -121,7 +121,7 @@ describe("session absolute TTL", () => {
     host.close();
 
     const reconnected = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     reconnected.send(helloFor(sessionId, "host", "host-1"));

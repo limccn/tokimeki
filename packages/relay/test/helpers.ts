@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 
 export const MASTER_TOKEN = "test-master-token-abc";
 export const SESSION_TOKEN = "test-session-token-xyz";
-/** Must match the `TOKIMEKI_NAMESPACE_TOKENS` binding in `vitest.config.ts`. */
+/** Must match the `TOKIMEKI_NAMESPACE_TOKENS` binding in `vitest.namespace.config.ts`. */
 export const TEAM_A_TOKEN = "test-namespace-token-team-a-0123456789";
 export const TEAM_B_TOKEN = "test-namespace-token-team-b-0123456789";
 
@@ -196,7 +196,10 @@ function wrapSocket(ws: WebSocket): TestSocket {
 export interface ConnectOptions {
   readonly role?: string;
   readonly token?: string | null;
-  readonly master?: string;
+  /** Host credential sent as `X-Tokimeki-Token` (master/JWT/namespace token). */
+  readonly hostToken?: string;
+  /** Raw `Authorization` header value (Bearer carrier, JWT mode only). */
+  readonly authorization?: string;
   /** Set `X-Tokimeki-Listener: 1` (Worker-assigned listener role). */
   readonly listener?: boolean;
   /** Forged internal namespace header; the Worker must delete it. */
@@ -211,8 +214,11 @@ export async function connectWorker(
   if (options.token !== null) {
     headers["x-tokimeki-session"] = options.token ?? SESSION_TOKEN;
   }
-  if (options.master !== undefined) {
-    headers["x-tokimeki-master"] = options.master;
+  if (options.hostToken !== undefined) {
+    headers["x-tokimeki-token"] = options.hostToken;
+  }
+  if (options.authorization !== undefined) {
+    headers.authorization = options.authorization;
   }
   if (options.namespaceHeader !== undefined) {
     headers["x-tokimeki-namespace"] = options.namespaceHeader;
@@ -291,7 +297,7 @@ export async function openHost(
   options: ConnectOptions = {},
 ): Promise<TestSocket> {
   const socket = await connectWorker(sessionId, {
-    master: MASTER_TOKEN,
+    hostToken: MASTER_TOKEN,
     token: SESSION_TOKEN,
     ...options,
   });
