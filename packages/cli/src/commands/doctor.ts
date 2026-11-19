@@ -1,13 +1,14 @@
 /**
  * `tokimeki doctor`: environment shape, node-pty capability, relay health.
  *
- * The report is redacted and never contains token values. The command exits
- * non-zero when a required check fails.
+ * The report is redacted and never contains token values, header values, or
+ * JWKS material. The command exits non-zero when a required check fails.
  */
 
 import { ICE_PROVIDERS } from "@limccn/tokimeki-protocol";
 
-import { type DoctorConfig, relayHealthUrl, relayWhoamiUrl } from "../config.js";
+import { type DoctorConfig, HOST_NAMESPACE_PATTERN, relayHealthUrl, relayWhoamiUrl } from "../config.js";
+import { buildHostAuthHeaders } from "../config.js";
 import { createRedactor, formatError } from "../logger.js";
 
 export interface DoctorDeps {
@@ -27,6 +28,87 @@ function knownIceProvider(value: unknown): string | null {
   return typeof value === "string" && (ICE_PROVIDERS as readonly string[]).includes(value)
     ? value
     : null;
+}
+
+type ReportLine = (label: string) => void;
+
+/**
+ * Echo only defensive-validated whoami fields into the report.
+ *
+ * The body is remote input: every echoed value is pattern-checked so terminal
+ * escapes cannot be smuggled into the report. Tokens, the request header, and
+ * JWKS material are never printed.
+ */
+function describeWhoami(
+  body: Record<string, unknown> | null,
+  config: DoctorConfig,
+  warn: ReportLine,
+  ok: ReportLine,
+): void {
+  if (body === null || body.authMode === undefined) {
+    ok("relay whoami authenticated");
+    return;
+  }
+  const authMode = body.authMode;
+  if (authMode !== "jwt" && authMode !== "namespace" && authMode !== "master") {
+    ok("relay whoami authenticated");
+    return;
+  }
+  const turn = body.turn as { provider?: unknown } | undefined;
+  const provider = knownIceProvider(turn?.provider);
+  const turnSuffix =
+    provider !== null ? `, TURN provider: ${provider}` : "";
+
+  if (authMode === "jwt") {
+    const namespace =
+      typeof body.namespace === "string" && HOST_NAMESPACE_PATTERN.test(body.namespace)
+        ? body.namespace
+        : null;
+    const tokenUse = body.tokenUse === "host" || body.tokenUse === "session" ? body.tokenUse : null;
+    const scopes = Array.isArray(body.scopes)
+      ? body.scopes
+          .filter((scope): scope is string => typeof scope === "string" && /^[A-Za-z]{1,32}$/.test(scope))
+          .join(",")
+      : null;
+    const expiresAt =
+      typeof body.expiresAt === "number" && Number.isSafeInteger(body.expiresAt)
+        ? new Date(body.expiresAt * 1000).toISOString()
+        : null;
+    ok(
+      `relay whoami authenticated (auth=jwt` +
+        (namespace !== null ? `, namespace=${namespace}` : "") +
+        (tokenUse !== null ? `, token_use=${tokenUse}` : "") +
+        (scopes !== null && scopes.length > 0 ? `, scope=${scopes}` : "") +
+        (expiresAt !== null ? `, expires=${expiresAt}` : "") +
+        turnSuffix +
+        ")",
+    );
+    if (namespace !== null && config.namespace !== null && namespace !== config.namespace) {
+      warn(
+        `whoami namespace "${namespace}" does not match TOKIMEKI_NAMESPACE "${config.namespace}"; host connections would fail the relay prefix check`,
+      );
+    }
+    return;
+  }
+  if (authMode === "namespace") {
+    const namespace =
+      typeof body.namespace === "string" && HOST_NAMESPACE_PATTERN.test(body.namespace)
+        ? body.namespace
+        : null;
+    ok(
+      `relay whoami authenticated (auth=namespace` +
+        (namespace !== null ? `, namespace=${namespace}` : "") +
+        turnSuffix +
+        ")",
+    );
+    if (namespace !== null && config.namespace !== null && namespace !== config.namespace) {
+      warn(
+        `whoami namespace "${namespace}" does not match TOKIMEKI_NAMESPACE "${config.namespace}"; host connections would fail the relay prefix check`,
+      );
+    }
+    return;
+  }
+  ok(`relay whoami authenticated (auth=master${turnSuffix})`);
 }
 
 async function probeNodePty(): Promise<string | null> {
@@ -106,14 +188,20 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
     ok(`relay URL: ${config.relayUrl}`);
   }
 
-  if (config.hasNamespaceToken) {
+  if (config.configFilePath !== null) {
+    ok(`config file loaded (${config.configFilePath})`);
+  }
+
+  if (config.hasToken) {
     const scope = config.namespace === null ? "no namespace" : `namespace=${config.namespace}`;
-    ok(`host authentication environment is present (TOKIMEKI_NAMESPACE_TOKEN, ${scope})`);
-  } else if (config.hasMasterToken) {
-    ok("host authentication environment is present (TOKIMEKI_MASTER_TOKEN)");
+    ok(`host authentication environment is present (TOKIMEKI_TOKEN, ${scope})`);
+  } else if (config.masterToken !== null) {
+    ok(
+      "single-owner fallback authentication environment is present (TOKIMEKI_MASTER_TOKEN; a relay with namespace tokens will reject it)",
+    );
   } else {
     warn(
-      "no host token is set (set TOKIMEKI_NAMESPACE_TOKEN or TOKIMEKI_MASTER_TOKEN to host a session)",
+      "no host token is set (set TOKIMEKI_NAMESPACE and TOKIMEKI_TOKEN, or TOKIMEKI_MASTER_TOKEN, to host a session)",
     );
   }
 
@@ -161,26 +249,27 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
     // `/healthz` is intentionally minimal; TURN/auth details live behind the
     // authenticated `/auth/whoami`. Older relays do not implement it, so a
     // failure is a warning rather than a failed check (and never a token echo).
-    if (config.masterToken !== null) {
+    // The probe uses the effective host credential: TOKIMEKI_TOKEN first, then
+    // the single-owner fallback credential, always on X-Tokimeki-Token.
+    const effectiveToken = config.token ?? config.masterToken;
+    if (effectiveToken !== null) {
       const whoamiUrl = relayWhoamiUrl(config.relayUrl);
       try {
         const response = await fetchImpl(whoamiUrl, {
-          headers: { "x-tokimeki-master": config.masterToken },
+          headers: buildHostAuthHeaders(effectiveToken),
           signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
         });
         if (response.ok) {
           const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-          const turn = body?.turn as { provider?: unknown } | undefined;
-          const provider = knownIceProvider(turn?.provider);
-          ok(
-            provider !== null
-              ? `relay whoami authenticated (TURN provider: ${provider})`
-              : `relay whoami authenticated (HTTP ${response.status})`,
-          );
+          describeWhoami(body, config, warn, ok);
+        } else if (response.status === 401 || response.status === 404) {
+          const hint =
+            config.token !== null
+              ? "the token is invalid, the relay has neither JWT nor namespace-token auth enabled, or the X-Tokimeki-Token header versions do not match"
+              : "the relay may have namespace tokens enabled, which disables the fallback token; switch to TOKIMEKI_NAMESPACE + TOKIMEKI_TOKEN";
+          warn(`relay whoami returned HTTP ${response.status} (${hint})`);
         } else {
-          warn(
-            `relay whoami returned HTTP ${response.status} (older relay or invalid master token?)`,
-          );
+          warn(`relay whoami returned HTTP ${response.status} (older relay or invalid credential?)`);
         }
       } catch (error) {
         warn(`relay whoami unreachable at ${whoamiUrl}: ${formatError(error)}`);
