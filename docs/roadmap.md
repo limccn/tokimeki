@@ -108,8 +108,10 @@ wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/
 
 - **E `11-19-v1-2-cli-tokiapi-host-jwt`**：当前权威切片，代码已实现（relay
   Host JWT 最小验签 + CLI `TOKIMEKI_TOKEN`/只读 config.json），单测与 Worker
-  集成测试通过；待合并与生产 preflight，真实 TokiAPI↔relay live e2e 仍
-  **pending**（需已部署 JWKS 的 relay 与真实 Host JWT）。
+  集成测试通过；2026-11-19 已轮换 namespace token 并部署生产
+  （`5cda681f`，no-JWT），生产 no-JWT live e2e（基础/secret 清洗/listener）
+  通过；待合并，真实 TokiAPI↔relay live e2e 仍 **pending**（需已部署 JWKS 的
+  relay 与真实 Host JWT）。
   TokiAPI Host JWT/JWKS 已落地；E 负责 CLI + relay 最小 Host JWT 验签。
 - **A–D**（namespace-auth / cli-ux / web-ui / passcode）：**in_progress**；
   PRD/design/implement 已按 E 的 Host JWT 模型重写，代码尚未开始。
