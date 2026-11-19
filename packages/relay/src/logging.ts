@@ -28,6 +28,7 @@ const ALLOWED_FIELDS = new Set([
   "sessionId",
   "clientId",
   "role",
+  "namespace",
   "code",
   "closeCode",
   "type",

@@ -18,6 +18,11 @@ export default defineWorkersConfig({
           bindings: {
             // Test-only values. Production values come from Worker vars/secrets.
             TOKIMEKI_MASTER_TOKEN: "test-master-token-abc",
+            // Two static namespace hosts (>=32-byte tokens, unique, != master).
+            TOKIMEKI_NAMESPACE_TOKENS: JSON.stringify({
+              "team-a": "test-namespace-token-team-a-0123456789",
+              "team-b": "test-namespace-token-team-b-0123456789",
+            }),
             TOKIMEKI_SESSION_TTL_SECONDS: "30",
             TOKIMEKI_MAX_CLIENTS_PER_SESSION: "3",
             TOKIMEKI_MAX_LISTENERS: "2",

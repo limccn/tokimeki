@@ -245,7 +245,7 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
 
 | 角色 | URL/头 |
 |---|---|
-| host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Master: <master token>`，`X-Tokimeki-Session: <session token>` |
+| host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Master: <root master 或 namespace token>`，`X-Tokimeki-Session: <session token>` |
 | viewer | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>` |
 | listener（v1.1） | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`，`X-Tokimeki-Listener: 1` |
 | observer/agent | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`（DO 支持，Worker 入口保留） |
@@ -254,10 +254,16 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
 `listener` 三个入口角色；`X-Tokimeki-Master` 优先，存在时忽略
 `X-Tokimeki-Listener`。`observer` / `agent` 的 DO 路由、SQLite 表与协议 schema 已实现并通过直连测试，但生产 Worker 尚未提供选择这两个角色的入口，属于为后续协调层保留的能力。更早的 v1 relay 对 `listener` 返回 `not_implemented`。
 
+`X-Tokimeki-Master` 可以是 root master（`TOKIMEKI_MASTER_TOKEN`）或
+namespace host token（`TOKIMEKI_NAMESPACE_TOKENS`）。namespace token 只认证
+其 namespace，session 必须为 `<namespace>.<slug>`；Worker 删除客户端自带的
+`x-tokimeki-namespace`，只注入从 token 推导的内部头。未配置 namespace
+token 时仅 root master 生效。
+
 规则：
 
 1. `session` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`。
-2. Worker 校验 host 的 master token（常量时间比较）、session 格式，覆盖内部 `x-tokimeki-role` 头，并移除客户端自带 master 与 listener 头后再转发到 DO。
+2. Worker 校验 host 的 root master 或 namespace token（常量时间比较）、session 格式与 namespace 前缀，覆盖内部 `x-tokimeki-role` 头，并移除客户端自带 master、listener 与 namespace 头后再转发到 DO。
 3. DO 首次创建会话时保存 `sha256(sessionToken)`；已有会话校验 hash。viewer/observer/agent/listener 不做 master 校验。
 4. 认证失败返回 HTTP 401 或 `error{code:"unauthorized"}` 后关闭。
 5. WebSocket 打开后，客户端第一条消息必须是 `hello`。`hello.session` 必须等于 URL session，`hello.role` 必须等于认证角色；`protocolVersion` 若提供必须为 1，缺省按 1 处理。

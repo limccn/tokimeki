@@ -41,6 +41,10 @@ npx wrangler login
 # Required: host authentication. Use a strong random value.
 npx wrangler secret put TOKIMEKI_MASTER_TOKEN
 
+# Optional: static multi-namespace host tokens (OSS multi-user).
+# Paste the JSON object when prompted; never commit it.
+npx wrangler secret put TOKIMEKI_NAMESPACE_TOKENS
+
 # Optional TURN secrets (choose what you use)
 npx wrangler secret put TOKIMEKI_COTURN_SECRET       # coturn REST
 npx wrangler secret put TOKIMEKI_TURN_API_TOKEN      # Cloudflare TURN
@@ -74,12 +78,15 @@ set with `wrangler secret put` (or the Deploy Button prompt).
 
 | Name | Kind | Required | Meaning |
 |---|---|---|---|
-| `TOKIMEKI_MASTER_TOKEN` | secret | yes | Host authentication. Unset/blank rejects all hosts (fail-closed). Never give it to viewers. |
+| `TOKIMEKI_MASTER_TOKEN` | secret | yes | Root host authentication / break-glass. Unset/blank rejects all root hosts (fail-closed). Never give it to viewers. |
+| `TOKIMEKI_NAMESPACE_TOKENS` | secret | no | Static namespace host tokens as a JSON object `{ "<namespace>": "<token>" }`. Each token must be unique, >=32 bytes, and differ from the master token; namespaces match `^[a-z0-9][a-z0-9_-]{0,31}$` (max 64 entries, raw JSON <=16 KiB). A namespace host may only use `<namespace>.<slug>` sessions. Invalid/duplicate entries fail closed (namespace auth disabled; the root master still works). |
 
 `GET /healthz` is public and intentionally minimal. `GET /auth/whoami` is the
 authenticated operations probe: it accepts only the root master token in
 `X-Tokimeki-Master` and returns the auth mode plus TURN provider/configured
 state. It never returns tokens, TURN credentials, secrets, or ICE URLs.
+Namespace tokens are accepted only on `/ws/<session>`; the Worker derives the
+namespace from the token and strips any client-supplied namespace header.
 
 ### Sessions
 

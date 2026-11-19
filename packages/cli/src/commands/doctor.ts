@@ -106,10 +106,15 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
     ok(`relay URL: ${config.relayUrl}`);
   }
 
-  if (config.hasMasterToken) {
+  if (config.hasNamespaceToken) {
+    const scope = config.namespace === null ? "no namespace" : `namespace=${config.namespace}`;
+    ok(`host authentication environment is present (TOKIMEKI_NAMESPACE_TOKEN, ${scope})`);
+  } else if (config.hasMasterToken) {
     ok("host authentication environment is present (TOKIMEKI_MASTER_TOKEN)");
   } else {
-    warn("TOKIMEKI_MASTER_TOKEN is not set (required to host a session)");
+    warn(
+      "no host token is set (set TOKIMEKI_NAMESPACE_TOKEN or TOKIMEKI_MASTER_TOKEN to host a session)",
+    );
   }
 
   const attachComplete = config.session !== null && config.hasSessionToken;
@@ -123,7 +128,7 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
     warn(`attach environment is incomplete (missing ${missing.join(", ")})`);
   }
 
-  if (!config.hasMasterToken && !attachComplete) {
+  if (config.authMode === null && !attachComplete) {
     fail("no complete host or attach configuration was found");
   }
 

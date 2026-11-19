@@ -41,6 +41,25 @@ tokimeki claude
 # or: tokimeki run -- htop
 ```
 
+Self-hosted relays can also use static namespace tokens instead of a shared
+root master token. A namespace host may only create sessions named
+`<namespace>.<slug>`; the relay derives the namespace from the token and
+rejects any other prefix:
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.example.com
+export TOKIMEKI_NAMESPACE_TOKEN=<team-a-host-token>   # Worker secret value
+export TOKIMEKI_NAMESPACE=team-a
+
+tokimeki claude
+# session defaults to team-a.<hostname>-<cwd>; set TOKIMEKI_SESSION to override
+```
+
+`TOKIMEKI_NAMESPACE_TOKEN` takes precedence over `TOKIMEKI_MASTER_TOKEN` when
+both are set (with a warning); the token is never written to disk, argv, URLs,
+or logs, and it is removed from the hosted PTY environment like the other
+secrets. Viewers still need only the session and session token from the invite.
+
 On startup the host prints a banner:
 
 ```text
@@ -126,8 +145,10 @@ Useful host variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TOKIMEKI_RELAY_URL` | — (required) | `wss://` relay endpoint |
-| `TOKIMEKI_MASTER_TOKEN` | — (required) | Relay host secret; never share with viewers |
-| `TOKIMEKI_SESSION` | sanitized hostname+cwd | Session name (ASCII/`._-`, <=64 chars) |
+| `TOKIMEKI_MASTER_TOKEN` | — | Root host secret; never share with viewers |
+| `TOKIMEKI_NAMESPACE_TOKEN` | — | Namespace host secret (one per namespace); takes precedence over `TOKIMEKI_MASTER_TOKEN` |
+| `TOKIMEKI_NAMESPACE` | — | Namespace name (`^[a-z0-9][a-z0-9_-]{0,31}$`), required with `TOKIMEKI_NAMESPACE_TOKEN` |
+| `TOKIMEKI_SESSION` | sanitized hostname+cwd | Session name (ASCII/`._-`, <=64 chars); namespace mode auto-prefixes `<namespace>.` |
 | `TOKIMEKI_SESSION_TOKEN` | generated | Per-session viewer token; generated value is printed once |
 | `TOKIMEKI_P2P` | `auto` | `off` forces the Worker relay |
 | `TOKIMEKI_ICE_TRANSPORT_POLICY` | `all` | `relay` restricts ICE to TURN (test/forced TURN) |
@@ -238,10 +259,12 @@ TOKIMEKI_MASTER_TOKEN=<relay-master-token> \
 ```
 
 `doctor` checks PTY spawn support, relay `/healthz`, and host authentication
-configuration. When `TOKIMEKI_MASTER_TOKEN` is set it also probes the
-authenticated `/auth/whoami` endpoint for TURN/auth diagnostics; older relays
-without it produce a warning, not a failure. It prints actionable warnings for
-missing/conflicting values.
+configuration. It recognizes both `TOKIMEKI_MASTER_TOKEN` and
+`TOKIMEKI_NAMESPACE_TOKEN`/`TOKIMEKI_NAMESPACE` and warns about missing or
+conflicting values without printing tokens. When `TOKIMEKI_MASTER_TOKEN` is
+set it also probes the authenticated `/auth/whoami` endpoint (root master
+only) for TURN/auth diagnostics; older relays without it produce a warning,
+not a failure.
 
 ## Exit codes
 
@@ -308,7 +331,7 @@ existing stderr behavior.
 
 | Symptom | Check |
 |---|---|
-| `401 unauthorized` | `TOKIMEKI_MASTER_TOKEN` matches the relay secret; host/session tokens differ |
+| `401 unauthorized` | Host credential matches the relay (master or namespace token), the session prefix is `<namespace>.<slug>` in namespace mode, and host/session tokens differ |
 | `host_offline` | Host is connected to the same relay/session and still running |
 | `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
 | Viewer shows only part of the TUI | Local terminal is smaller than `TOKIMEKI_WINDOW_SIZE`; enlarge it or set a smaller fixed size at host start. The status bar shows `view:WxH@x,y` and the camera follows the TUI cursor |

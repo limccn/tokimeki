@@ -37,6 +37,7 @@ import {
   sessionTtlSeconds,
 } from "./env.js";
 import { createLogger, type Logger } from "./logging.js";
+import { deriveNamespaceFromSessionId, isNamespaceSessionId } from "./namespace-tokens.js";
 import {
   clearHostExit,
   ensureRelaySchema,
@@ -93,6 +94,12 @@ interface PendingAttachment {
   readonly connectedAt: number;
   readonly deadline: number;
   readonly tokenHash: string;
+  /**
+   * Internal namespace from the Worker's `x-tokimeki-namespace` header:
+   * `"*"` for a root-master host, the namespace name for a namespace token,
+   * `null` for viewer/listener or a direct DO connection.
+   */
+  readonly namespaceId: string | null;
 }
 
 interface PendingAck {
@@ -132,6 +139,8 @@ interface ActiveAttachment {
   client?: ClientDescriptor;
   /** Rendering capabilities echoed in welcome/presence (v0.1.2). */
   capabilities?: Capabilities;
+  /** Effective namespace recorded for hosts; diagnostic only. */
+  namespaceId?: string | null;
 }
 
 type SocketAttachment = PendingAttachment | ActiveAttachment;
@@ -208,6 +217,8 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         connectedAt: raw.connectedAt,
         deadline: raw.deadline,
         tokenHash: raw.tokenHash,
+        // Missing on attachments persisted before namespace support.
+        namespaceId: typeof raw.namespaceId === "string" ? raw.namespaceId : null,
       };
     }
     return null;
@@ -257,6 +268,7 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         // so new display/client fields survive hibernation without a migration.
         ...(isRecord(raw.client) ? { client: raw.client as ClientDescriptor } : {}),
         ...(isRecord(raw.capabilities) ? { capabilities: raw.capabilities as Capabilities } : {}),
+        ...(typeof raw.namespaceId === "string" ? { namespaceId: raw.namespaceId } : {}),
       };
     }
     return null;
@@ -390,6 +402,13 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     }
 
     const tokenHash = await sha256Hex(token);
+    // The Worker strips any client-supplied namespace header and injects this
+    // one from the verified host credential. Viewers/listeners never carry it.
+    const namespaceHeader = request.headers.get("x-tokimeki-namespace");
+    const namespaceId =
+      roleHeader === "host" && namespaceHeader !== null && namespaceHeader.length > 0
+        ? namespaceHeader
+        : null;
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -402,12 +421,14 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       connectedAt: now,
       deadline: now + HELLO_TIMEOUT_MS,
       tokenHash,
+      namespaceId,
     });
     await this.rescheduleAlarm();
     this.logger.info("connection_opened", {
       sessionId: this.sessionId,
       role: roleHeader,
       hasToken: token.length > 0,
+      ...(namespaceId === null ? {} : { namespace: namespaceId }),
     });
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -495,6 +516,25 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       return;
     }
 
+    // The effective namespace is derived only from the Worker-injected header:
+    // `"*"` is the root master, a concrete name is a namespace token, and the
+    // session id must carry the same `<namespace>.<slug>` prefix.
+    if (role === "host" && pending.namespaceId !== null && pending.namespaceId !== "*") {
+      if (!isNamespaceSessionId(hello.session, pending.namespaceId)) {
+        this.closeWithError(
+          ws,
+          "invalid_session",
+          "session does not belong to the host namespace",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+    }
+    const resolvedNamespaceId: string | null =
+      pending.namespaceId === "*"
+        ? deriveNamespaceFromSessionId(hello.session)
+        : pending.namespaceId;
+
     // Fast-path duplicate check. Host duplicates are deferred until the token is
     // verified: an authenticated host may replace a stale host socket or a
     // viewer that squatted its client id while the host was offline (SEC-09).
@@ -542,6 +582,18 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           );
           return;
         }
+        // Root hosts may take over any session; a namespace host only its own
+        // namespace; a namespace-less (legacy/direct) host never a namespaced
+        // session. A legacy row is `namespaceId: null` and stays root-only.
+        if (pending.namespaceId !== "*" && meta.namespaceId !== pending.namespaceId) {
+          this.closeWithError(
+            ws,
+            "invalid_session",
+            "host namespace does not match this session",
+            CLOSE_CODES.unauthorized,
+          );
+          return;
+        }
         const onlineHost = this.findHost();
         if (onlineHost !== null && onlineHost.att.clientId !== hello.clientId) {
           this.closeWithError(
@@ -573,6 +625,17 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         );
         return;
       }
+      // Defense in depth: a session created under a namespace must only ever
+      // accept connections on its own `<namespace>.<slug>` path.
+      if (meta.namespaceId !== null && !isNamespaceSessionId(hello.session, meta.namespaceId)) {
+        this.closeWithError(
+          ws,
+          "invalid_session",
+          "session prefix does not match its namespace",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
     }
 
     // The token check yields to the runtime. Re-read session state and recheck
@@ -584,6 +647,20 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         ws,
         "unauthorized",
         "session token changed during hello",
+        CLOSE_CODES.unauthorized,
+      );
+      return;
+    }
+    if (
+      latestMeta !== null &&
+      role === "host" &&
+      pending.namespaceId !== "*" &&
+      latestMeta.namespaceId !== pending.namespaceId
+    ) {
+      this.closeWithError(
+        ws,
+        "invalid_session",
+        "session namespace changed during hello",
         CLOSE_CODES.unauthorized,
       );
       return;
@@ -681,6 +758,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           sessionTtlSeconds: sessionTtlSeconds(this.env),
           maxClients,
           hostOfflineDeadline: null,
+          namespaceId: resolvedNamespaceId,
         });
       } else if (replacedSocket !== null) {
         this.supersedeSocket(
@@ -715,6 +793,9 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       ...(hello.rows === undefined ? {} : { rows: hello.rows }),
       ...(client === undefined ? {} : { client }),
       ...(displayCapabilities === undefined ? {} : { capabilities: displayCapabilities }),
+      ...(role === "host" && resolvedNamespaceId !== null
+        ? { namespaceId: resolvedNamespaceId }
+        : {}),
     };
     this.saveAttachment(ws, active);
     updateLastActivity(this.ctx.storage.sql, now);
@@ -820,6 +901,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       clientId: active.clientId,
       role: active.role,
       clientCount: this.activeSockets().length,
+      ...(active.namespaceId === undefined ? {} : { namespace: active.namespaceId }),
     });
     await this.rescheduleAlarm();
   }

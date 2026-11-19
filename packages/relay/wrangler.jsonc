@@ -51,6 +51,7 @@
   // Non-secret runtime configuration lives in `vars` above; secrets are set with
   // `wrangler secret put` and never committed:
   //   TOKIMEKI_MASTER_TOKEN            (secret, required) host authentication; unset rejects all hosts
+  //   TOKIMEKI_NAMESPACE_TOKENS        (secret) static namespace host tokens, JSON { "<namespace>": "<token>" }
   //   TOKIMEKI_SESSION_TTL_SECONDS     default 86400 host-offline grace
   //   TOKIMEKI_MAX_CLIENTS_PER_SESSION default 8
   //   TOKIMEKI_MAX_LISTENERS           default 8 read-only snapshot-only clients

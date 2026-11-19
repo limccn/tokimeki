@@ -93,6 +93,7 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
   const runLocal = deps.runLocal ?? defaultRunLocal;
   const bootstrapRedact = createRedactor([
     env.TOKIMEKI_MASTER_TOKEN,
+    env.TOKIMEKI_NAMESPACE_TOKEN,
     env.TOKIMEKI_SESSION_TOKEN,
     env.TOKIMEKI_TUNNEL_SECRET,
   ]);

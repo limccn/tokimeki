@@ -195,13 +195,17 @@ describe("tokimeki CLI wiring", () => {
     const runHost = makeRunHost();
     const hostPi = harness({}, { runHost });
     expect(await main(["node", "tokimeki", "pi", "--model", "x"], hostPi.deps)).toBe(2);
-    expect(hostPi.stderr()).toContain("TOKIMEKI_MASTER_TOKEN is required");
+    expect(hostPi.stderr()).toContain(
+      "TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required",
+    );
 
     const hostRun = harness({}, { runHost });
     expect(await main(["node", "tokimeki", "run", "--", "node", "script.mjs"], hostRun.deps)).toBe(
       2,
     );
-    expect(hostRun.stderr()).toContain("TOKIMEKI_MASTER_TOKEN is required");
+    expect(hostRun.stderr()).toContain(
+      "TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required",
+    );
     expect(runHost).not.toHaveBeenCalled();
   });
 
@@ -336,7 +340,7 @@ describe("tokimeki CLI wiring", () => {
     const code = await main(["node", "tokimeki", "claude"], deps);
     expect(code).toBe(2);
     expect(runHost).not.toHaveBeenCalled();
-    expect(stderr()).toContain("TOKIMEKI_MASTER_TOKEN is required");
+    expect(stderr()).toContain("TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required");
   });
 
   it("exits 2 when attach configuration is incomplete", async () => {

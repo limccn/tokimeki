@@ -13,6 +13,11 @@ export interface SessionMetadata {
   readonly sessionTtlSeconds: number;
   readonly maxClients: number;
   readonly hostOfflineDeadline: number | null;
+  /**
+   * Namespace recorded when the session was created. `null` marks a legacy or
+   * root session without a `<namespace>.<slug>` prefix.
+   */
+  readonly namespaceId: string | null;
 }
 
 export interface HostExitRecord {
@@ -42,7 +47,8 @@ const SCHEMA_STATEMENTS = [
     host_token_hash TEXT NOT NULL,
     session_ttl_seconds INTEGER NOT NULL,
     max_clients INTEGER NOT NULL,
-    host_offline_deadline INTEGER
+    host_offline_deadline INTEGER,
+    namespace_id TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS session_lifecycle (
     session_id TEXT PRIMARY KEY,
@@ -122,21 +128,71 @@ export function ensureRelaySchema(sql: SqlStorage): void {
   for (const statement of SCHEMA_STATEMENTS) {
     sql.exec(statement);
   }
+  // Additive, idempotent migration: tables created before namespace support
+  // lack this column, and `CREATE TABLE IF NOT EXISTS` does not add columns.
+  // A fresh table already has it, so the duplicate-column error is expected.
+  try {
+    sql.exec("ALTER TABLE session_meta ADD COLUMN namespace_id TEXT");
+  } catch {
+    // Column already present (or the table was just created with it).
+  }
 }
 
-/** Load the single session metadata row, if the session exists. */
+// A type alias (not an interface) so it satisfies SqlStorage's row-record
+// constraint through the implicit index signature.
+type SessionMetadataRow = {
+  session_id: string;
+  created_at: number;
+  last_activity_at: number;
+  host_token_hash: string;
+  session_ttl_seconds: number;
+  max_clients: number;
+  host_offline_deadline: number | null;
+  namespace_id: string | null;
+};
+
+function mapSessionMetadataRow(row: SessionMetadataRow): SessionMetadata {
+  return {
+    sessionId: row.session_id,
+    createdAt: row.created_at,
+    lastActivityAt: row.last_activity_at,
+    hostTokenHash: row.host_token_hash,
+    sessionTtlSeconds: row.session_ttl_seconds,
+    maxClients: row.max_clients,
+    hostOfflineDeadline: row.host_offline_deadline,
+    namespaceId: row.namespace_id ?? null,
+  };
+}
+
+/**
+ * Load the single session metadata row, if the session exists.
+ *
+ * Falls back to the pre-namespace column list when the additive migration has
+ * not run yet (for example an old DO that wakes before `ensureSchema`); those
+ * rows are treated as legacy (`namespaceId: null`).
+ */
 export function loadSessionMetadata(sql: SqlStorage): SessionMetadata | null {
   try {
     const rows = sql
-      .exec<{
-        session_id: string;
-        created_at: number;
-        last_activity_at: number;
-        host_token_hash: string;
-        session_ttl_seconds: number;
-        max_clients: number;
-        host_offline_deadline: number | null;
-      }>(
+      .exec<SessionMetadataRow>(
+        `SELECT session_id, created_at, last_activity_at, host_token_hash,
+                session_ttl_seconds, max_clients, host_offline_deadline,
+                namespace_id
+           FROM session_meta
+          LIMIT 1`,
+      )
+      .toArray();
+    const row = rows[0];
+    return row === undefined ? null : mapSessionMetadataRow(row);
+  } catch {
+    return loadLegacySessionMetadata(sql);
+  }
+}
+
+function loadLegacySessionMetadata(sql: SqlStorage): SessionMetadata | null {
+  try {
+    const rows = sql
+      .exec<Omit<SessionMetadataRow, "namespace_id">>(
         `SELECT session_id, created_at, last_activity_at, host_token_hash,
                 session_ttl_seconds, max_clients, host_offline_deadline
            FROM session_meta
@@ -155,6 +211,7 @@ export function loadSessionMetadata(sql: SqlStorage): SessionMetadata | null {
       sessionTtlSeconds: row.session_ttl_seconds,
       maxClients: row.max_clients,
       hostOfflineDeadline: row.host_offline_deadline,
+      namespaceId: null,
     };
   } catch {
     // The table may have been removed by `deleteAll()`; treat as no session.
@@ -167,8 +224,8 @@ export function insertSessionMetadata(sql: SqlStorage, meta: SessionMetadata): v
   sql.exec(
     `INSERT OR REPLACE INTO session_meta
        (session_id, created_at, last_activity_at, host_token_hash,
-        session_ttl_seconds, max_clients, host_offline_deadline)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        session_ttl_seconds, max_clients, host_offline_deadline, namespace_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     meta.sessionId,
     meta.createdAt,
     meta.lastActivityAt,
@@ -176,6 +233,7 @@ export function insertSessionMetadata(sql: SqlStorage, meta: SessionMetadata): v
     meta.sessionTtlSeconds,
     meta.maxClients,
     meta.hostOfflineDeadline,
+    meta.namespaceId,
   );
 }
 

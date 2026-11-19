@@ -7,8 +7,12 @@ import {
   helloFor,
   MASTER_TOKEN,
   openHost,
+  openListener,
+  openViewer,
   SESSION_TOKEN,
   sleep,
+  TEAM_A_TOKEN,
+  TEAM_B_TOKEN,
 } from "./helpers";
 
 describe("relay worker", () => {
@@ -220,5 +224,175 @@ describe("relay worker", () => {
         .map((row) => row.name);
     });
     expect(tables).not.toContain("session_meta");
+  });
+});
+
+describe("namespace host authentication", () => {
+  it("admits a namespace token only for its own <namespace>.<slug> session", async () => {
+    const sessionId = "team-a.desk";
+    const host = await connectWorker(sessionId, {
+      master: TEAM_A_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    host.send(helloFor(sessionId, "host", "host-1"));
+    const welcome = await host.waitForType("welcome");
+    expect(welcome.session).toBe(sessionId);
+    expect(welcome.hostOnline).toBe(true);
+    host.close();
+  });
+
+  it("rejects a namespace token without the matching session prefix", async () => {
+    for (const sessionId of ["desk", "team-b.desk", "team-a", "team-a.", "team-ab.desk"]) {
+      const response = await SELF.fetch(`https://relay.test/ws/${sessionId}`, {
+        headers: {
+          Upgrade: "websocket",
+          "x-tokimeki-master": TEAM_A_TOKEN,
+          "x-tokimeki-session": SESSION_TOKEN,
+        },
+      });
+      expect(response.status).toBe(401);
+      const body = await response.json<Record<string, unknown>>();
+      expect(body).toMatchObject({ ok: false, error: "unauthorized" });
+    }
+  });
+
+  it("lets the root master host named and plain sessions", async () => {
+    const named = await openHost("team-b.root-created");
+    expect(named.controls.find((message) => message.type === "welcome")?.session).toBe(
+      "team-b.root-created",
+    );
+    const plain = await openHost("plain-root-session");
+    expect(plain.controls.find((message) => message.type === "welcome")?.session).toBe(
+      "plain-root-session",
+    );
+    named.close();
+    plain.close();
+  });
+
+  it("rejects a namespace token that equals the session token", async () => {
+    const response = await SELF.fetch("https://relay.test/ws/team-a.equal", {
+      headers: {
+        Upgrade: "websocket",
+        "x-tokimeki-master": TEAM_A_TOKEN,
+        "x-tokimeki-session": TEAM_A_TOKEN,
+      },
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("fails closed on an invalid namespace map while the root master still works", async () => {
+    const worker = (await import("../src/index")).default;
+    const invalidEnv = { ...env, TOKIMEKI_NAMESPACE_TOKENS: '{"team-a":"too-short"}' };
+    const blocked = await worker.fetch(
+      new Request("https://relay.test/ws/team-a.desk", {
+        headers: {
+          Upgrade: "websocket",
+          "x-tokimeki-master": TEAM_A_TOKEN,
+          "x-tokimeki-session": SESSION_TOKEN,
+        },
+      }),
+      invalidEnv,
+    );
+    expect(blocked.status).toBe(401);
+
+    const root = await worker.fetch(
+      new Request("https://relay.test/ws/root-still-works", {
+        headers: {
+          Upgrade: "websocket",
+          "x-tokimeki-master": MASTER_TOKEN,
+          "x-tokimeki-session": SESSION_TOKEN,
+        },
+      }),
+      invalidEnv,
+    );
+    expect(root.status).toBe(101);
+    root.webSocket?.accept();
+    root.webSocket?.close(1000, "test");
+  });
+
+  it("ignores and strips a client-supplied namespace header", async () => {
+    const sessionId = "team-a.forged";
+    const host = await connectWorker(sessionId, {
+      master: TEAM_A_TOKEN,
+      token: SESSION_TOKEN,
+      // A team-a host must not be able to claim team-b (or a client-chosen ns).
+      namespaceHeader: "team-b",
+    });
+    host.send(helloFor(sessionId, "host", "host-1"));
+    await host.waitForType("welcome");
+
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    const stored = await runInDurableObject(stub, async (_instance, state) => {
+      return state.storage.sql
+        .exec<{ namespace_id: string | null }>("SELECT namespace_id FROM session_meta LIMIT 1")
+        .toArray();
+    });
+    expect(stored[0]?.namespace_id).toBe("team-a");
+    host.close();
+  });
+
+  it("lets viewers and listeners attach to a namespace session with the session token", async () => {
+    const sessionId = "team-a.with-viewers";
+    const host = await connectWorker(sessionId, {
+      master: TEAM_A_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    host.send(helloFor(sessionId, "host", "host-1"));
+    await host.waitForType("welcome");
+
+    const viewer = await openViewer(sessionId, "viewer-1");
+    expect(viewer.controls.find((message) => message.type === "welcome")?.session).toBe(sessionId);
+
+    const listener = await openListener(sessionId, "listener-1");
+    expect(listener.controls.find((message) => message.type === "welcome")?.session).toBe(
+      sessionId,
+    );
+
+    host.close();
+    viewer.close();
+    listener.close();
+  });
+
+  it("lets a namespace host reconnect to the session it created", async () => {
+    const sessionId = "team-a.reconnect";
+    const first = await connectWorker(sessionId, {
+      master: TEAM_A_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    first.send(helloFor(sessionId, "host", "host-1"));
+    await first.waitForType("welcome");
+    first.close();
+    await sleep(100);
+
+    const second = await connectWorker(sessionId, {
+      master: TEAM_A_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    // Same client id exercises the stale-socket replacement path too.
+    second.send(helloFor(sessionId, "host", "host-1"));
+    const welcome = await second.waitForType("welcome");
+    expect(welcome.hostOnline).toBe(true);
+    second.close();
+  });
+
+  it("keeps the same slug in two namespaces independent", async () => {
+    const a = await connectWorker("team-a.shared", {
+      master: TEAM_A_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    a.send(helloFor("team-a.shared", "host", "host-1"));
+    const aWelcome = await a.waitForType("welcome");
+
+    const b = await connectWorker("team-b.shared", {
+      master: TEAM_B_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    b.send(helloFor("team-b.shared", "host", "host-1"));
+    const bWelcome = await b.waitForType("welcome");
+
+    expect(aWelcome.session).toBe("team-a.shared");
+    expect(bWelcome.session).toBe("team-b.shared");
+    a.close();
+    b.close();
   });
 });

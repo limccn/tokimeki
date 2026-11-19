@@ -9,6 +9,9 @@ function doctorConfig(overrides: Partial<DoctorConfig> = {}): DoctorConfig {
     session: null,
     hasMasterToken: true,
     masterToken: "test-master-token-abc",
+    hasNamespaceToken: false,
+    namespace: null,
+    authMode: "master",
     hasSessionToken: false,
     warnings: [],
     secrets: ["test-master-token-abc"],
@@ -115,6 +118,7 @@ describe("runDoctor", () => {
         hasMasterToken: false,
         masterToken: null,
         hasSessionToken: true,
+        authMode: null,
         secrets: [],
       }),
       {
@@ -127,5 +131,34 @@ describe("runDoctor", () => {
     expect(code).toBe(0);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(output()).not.toContain("whoami");
+  });
+
+  it("reports namespace host authentication without printing the token", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { stream, output } = fakeStdout();
+
+    const code = await runDoctor(
+      doctorConfig({
+        hasMasterToken: false,
+        masterToken: null,
+        hasNamespaceToken: true,
+        namespace: "team-a",
+        authMode: "namespace",
+        secrets: ["namespace-token-team-a"],
+      }),
+      {
+        stdout: stream,
+        fetchImpl: asFetch(fetchImpl),
+        probePty: async () => null,
+      },
+    );
+
+    expect(code).toBe(0);
+    const text = output();
+    expect(text).toContain("TOKIMEKI_NAMESPACE_TOKEN");
+    expect(text).toContain("namespace=team-a");
+    expect(text).not.toContain("namespace-token-team-a");
+    // The v1 whoami probe is root-master-only, so it is skipped.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

@@ -59,6 +59,8 @@ describe("buildChildEnvironment", () => {
       env: {
         PATH: "/usr/bin",
         TOKIMEKI_MASTER_TOKEN: "master-secret",
+        TOKIMEKI_NAMESPACE_TOKEN: "namespace-secret",
+        TOKIMEKI_NAMESPACE_TOKENS: '{"team-a":"namespace-secret"}',
         TOKIMEKI_SESSION_TOKEN: "session-secret",
         TOKIMEKI_TUNNEL_SECRET: "tunnel-secret",
         TOKIMEKI_COTURN_SECRET: "coturn-secret",
@@ -69,6 +71,8 @@ describe("buildChildEnvironment", () => {
       },
     });
     expect(env.TOKIMEKI_MASTER_TOKEN).toBeUndefined();
+    expect(env.TOKIMEKI_NAMESPACE_TOKEN).toBeUndefined();
+    expect(env.TOKIMEKI_NAMESPACE_TOKENS).toBeUndefined();
     expect(env.TOKIMEKI_SESSION_TOKEN).toBeUndefined();
     expect(env.TOKIMEKI_TUNNEL_SECRET).toBeUndefined();
     expect(env.TOKIMEKI_COTURN_SECRET).toBeUndefined();
@@ -85,6 +89,8 @@ describe("buildChildEnvironment", () => {
       env: {
         Path: "C:\\Windows",
         Tokimeki_Master_Token: "master-secret",
+        Tokimeki_Namespace_Token: "namespace-secret",
+        Tokimeki_Namespace_Tokens: '{"team-a":"namespace-secret"}',
         tokimeki_session_token: "session-secret",
         Tokimeki_Tunnel_Secret: "tunnel-secret",
         Tokimeki_Turn_Api_Token: "turn-api-token",
@@ -93,6 +99,8 @@ describe("buildChildEnvironment", () => {
       },
     });
     expect(env.Tokimeki_Master_Token).toBeUndefined();
+    expect(env.Tokimeki_Namespace_Token).toBeUndefined();
+    expect(env.Tokimeki_Namespace_Tokens).toBeUndefined();
     expect(env.tokimeki_session_token).toBeUndefined();
     expect(env.Tokimeki_Tunnel_Secret).toBeUndefined();
     expect(env.Tokimeki_Turn_Api_Token).toBeUndefined();

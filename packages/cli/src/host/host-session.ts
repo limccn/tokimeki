@@ -554,7 +554,9 @@ class HostSession {
     const client = new RelayClient({
       url: this.#config.websocketUrl,
       headers: {
-        "X-Tokimeki-Master": this.#config.masterToken,
+        // Namespace tokens travel in the same host header; the relay derives
+        // the namespace from the token and never trusts a client header.
+        "X-Tokimeki-Master": this.#config.hostToken,
         "X-Tokimeki-Session": this.#config.sessionToken,
       },
       role: "host",

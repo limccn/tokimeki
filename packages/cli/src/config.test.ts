@@ -170,12 +170,12 @@ describe("loadHostConfig", () => {
     expect(config.session.startsWith("my-host")).toBe(true);
   });
 
-  it("requires a relay URL and a master token", () => {
+  it("requires a relay URL and a host credential", () => {
     expect(() => loadHostConfig({ env: { TOKIMEKI_MASTER_TOKEN: "x" } })).toThrow(
       /TOKIMEKI_RELAY_URL is required/,
     );
     expect(() => loadHostConfig({ env: { TOKIMEKI_RELAY_URL: "https://relay.example" } })).toThrow(
-      /TOKIMEKI_MASTER_TOKEN is required/,
+      /TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required/,
     );
   });
 
@@ -291,6 +291,120 @@ describe("loadHostConfig", () => {
     expect(
       invalid.warnings.some((warning) => warning.includes("TOKIMEKI_LISTENER_SNAPSHOT_MS")),
     ).toBe(true);
+  });
+});
+
+describe("namespace host configuration", () => {
+  const namespaceEnv = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+    TOKIMEKI_RELAY_URL: "https://relay.example",
+    TOKIMEKI_NAMESPACE_TOKEN: "namespace-token-team-a",
+    TOKIMEKI_NAMESPACE: "team-a",
+    ...overrides,
+  });
+
+  it("selects namespace auth and sends the namespace token", () => {
+    const config = loadHostConfig({
+      env: namespaceEnv({ TOKIMEKI_SESSION: "team-a.desk" }),
+    });
+    expect(config.authMode).toBe("namespace");
+    expect(config.hostToken).toBe("namespace-token-team-a");
+    expect(config.namespaceToken).toBe("namespace-token-team-a");
+    expect(config.masterToken).toBeNull();
+    expect(config.namespace).toBe("team-a");
+    expect(config.session).toBe("team-a.desk");
+    expect(config.secrets).toContain("namespace-token-team-a");
+  });
+
+  it("prefers the namespace token with a warning when both tokens are set", () => {
+    const config = loadHostConfig({
+      env: namespaceEnv({
+        TOKIMEKI_MASTER_TOKEN: "master-token-1234",
+        TOKIMEKI_SESSION: "team-a.desk",
+      }),
+    });
+    expect(config.authMode).toBe("namespace");
+    expect(config.hostToken).toBe("namespace-token-team-a");
+    expect(config.masterToken).toBe("master-token-1234");
+    expect(config.warnings.some((warning) => warning.includes("takes precedence"))).toBe(true);
+  });
+
+  it("requires a valid namespace name", () => {
+    expect(() => loadHostConfig({ env: namespaceEnv({ TOKIMEKI_NAMESPACE: undefined }) })).toThrow(
+      /TOKIMEKI_NAMESPACE is required/,
+    );
+    for (const namespace of ["Team-A", "team a", "-team", "a".repeat(33)]) {
+      expect(() =>
+        loadHostConfig({ env: namespaceEnv({ TOKIMEKI_NAMESPACE: namespace }) }),
+      ).toThrow(/TOKIMEKI_NAMESPACE must match/);
+    }
+  });
+
+  it("auto-prefixes the default session with the namespace", () => {
+    const config = loadHostConfig({
+      env: namespaceEnv(),
+      cwd: "/work/project",
+      hostname: "testhost",
+    });
+    expect(config.session.startsWith("team-a.")).toBe(true);
+    expect(config.session).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+    expect(config.websocketUrl).toBe(`wss://relay.example/ws/${config.session}`);
+  });
+
+  it("keeps the auto-generated namespace session within 64 characters", () => {
+    const config = loadHostConfig({
+      env: namespaceEnv({ TOKIMEKI_NAMESPACE: "a".repeat(32) }),
+      cwd: "/work/".concat("x".repeat(200)),
+      hostname: "h".repeat(60),
+    });
+    expect(config.session.length).toBeLessThanOrEqual(64);
+    expect(config.session.startsWith(`${"a".repeat(32)}.`)).toBe(true);
+    expect(config.warnings.some((warning) => warning.includes("truncated"))).toBe(true);
+  });
+
+  it("rejects an explicit session without the namespace prefix", () => {
+    for (const session of ["desk", "team-b.desk", "team-a.", "team-ab.desk"]) {
+      expect(() => loadHostConfig({ env: namespaceEnv({ TOKIMEKI_SESSION: session }) })).toThrow(
+        /must start with "team-a\."/,
+      );
+    }
+  });
+
+  it("does not force a prefix in root/master mode", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_NAMESPACE: "team-a" }),
+    });
+    expect(config.authMode).toBe("master");
+    expect(config.masterToken).toBe("master-token-1234");
+    expect(config.hostToken).toBe("master-token-1234");
+    expect(config.namespace).toBeNull();
+    expect(config.session).toBe("sess-1");
+  });
+
+  it("rejects a session token equal to the namespace token", () => {
+    expect(() =>
+      loadHostConfig({
+        env: namespaceEnv({
+          TOKIMEKI_SESSION: "team-a.desk",
+          TOKIMEKI_SESSION_TOKEN: "namespace-token-team-a",
+        }),
+      }),
+    ).toThrow(/must be different/);
+  });
+
+  it("never echoes the namespace token in configuration errors", () => {
+    try {
+      loadHostConfig({
+        env: namespaceEnv({
+          TOKIMEKI_NAMESPACE_TOKEN: "leaky-namespace-token",
+          TOKIMEKI_SESSION: "team-a.desk",
+          TOKIMEKI_SESSION_TOKEN: "leaky-namespace-token",
+        }),
+      });
+      throw new Error("expected ConfigError");
+    } catch (error) {
+      expect((error as Error).message).toMatch(/must be different/);
+      expect((error as Error).message).not.toContain("leaky-namespace-token");
+    }
   });
 });
 
@@ -455,6 +569,9 @@ describe("loadDoctorConfig", () => {
     expect(config.session).toBeNull();
     expect(config.hasMasterToken).toBe(false);
     expect(config.masterToken).toBeNull();
+    expect(config.hasNamespaceToken).toBe(false);
+    expect(config.namespace).toBeNull();
+    expect(config.authMode).toBeNull();
     expect(config.hasSessionToken).toBe(false);
   });
 
@@ -488,5 +605,38 @@ describe("loadDoctorConfig", () => {
     });
     expect(config.warnings.some((warning) => warning.includes("identical"))).toBe(true);
     expect(config.warnings.join(" ")).not.toContain("same-token-value");
+  });
+
+  it("reports namespace host authentication", () => {
+    const config = loadDoctorConfig({
+      TOKIMEKI_RELAY_URL: "https://relay.example",
+      TOKIMEKI_NAMESPACE_TOKEN: "namespace-token-team-a",
+      TOKIMEKI_NAMESPACE: "team-a",
+      TOKIMEKI_SESSION: "team-a.desk",
+      TOKIMEKI_SESSION_TOKEN: "session-token-9876",
+    });
+    expect(config.hasNamespaceToken).toBe(true);
+    expect(config.namespace).toBe("team-a");
+    expect(config.authMode).toBe("namespace");
+    expect(config.masterToken).toBeNull();
+    expect(config.secrets).toContain("namespace-token-team-a");
+  });
+
+  it("warns about namespace conflicts without echoing tokens", () => {
+    const config = loadDoctorConfig({
+      TOKIMEKI_NAMESPACE_TOKEN: "namespace-token-team-a",
+      TOKIMEKI_MASTER_TOKEN: "master-token-1234",
+      TOKIMEKI_NAMESPACE: "Team-A",
+      TOKIMEKI_SESSION: "other.desk",
+    });
+    expect(config.authMode).toBe("namespace");
+    expect(
+      config.warnings.some((warning) => warning.includes("TOKIMEKI_NAMESPACE must match")),
+    ).toBe(true);
+    expect(config.warnings.some((warning) => warning.includes("takes precedence"))).toBe(true);
+    expect(config.warnings.some((warning) => warning.includes("requires TOKIMEKI_NAMESPACE"))).toBe(
+      true,
+    );
+    expect(config.warnings.join(" ")).not.toContain("namespace-token-team-a");
   });
 });

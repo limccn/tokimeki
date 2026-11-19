@@ -2,6 +2,9 @@ import { env, SELF } from "cloudflare:test";
 
 export const MASTER_TOKEN = "test-master-token-abc";
 export const SESSION_TOKEN = "test-session-token-xyz";
+/** Must match the `TOKIMEKI_NAMESPACE_TOKENS` binding in `vitest.config.ts`. */
+export const TEAM_A_TOKEN = "test-namespace-token-team-a-0123456789";
+export const TEAM_B_TOKEN = "test-namespace-token-team-b-0123456789";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -196,6 +199,8 @@ export interface ConnectOptions {
   readonly master?: string;
   /** Set `X-Tokimeki-Listener: 1` (Worker-assigned listener role). */
   readonly listener?: boolean;
+  /** Forged internal namespace header; the Worker must delete it. */
+  readonly namespaceHeader?: string;
 }
 
 export async function connectWorker(
@@ -208,6 +213,9 @@ export async function connectWorker(
   }
   if (options.master !== undefined) {
     headers["x-tokimeki-master"] = options.master;
+  }
+  if (options.namespaceHeader !== undefined) {
+    headers["x-tokimeki-namespace"] = options.namespaceHeader;
   }
   if (options.listener === true) {
     headers["x-tokimeki-listener"] = "1";

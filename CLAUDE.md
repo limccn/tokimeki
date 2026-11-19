@@ -58,12 +58,26 @@ assets/              README icon
   no-store and no secrets; `/ws/<session>` requires a non-empty
   `x-tokimeki-session`; optional `x-tokimeki-master` upgrades the role to
   host; constant-time comparisons; master token equal to session token is
-  rejected; master header removed before forwarding to the DO.
+  rejected; master/listener/namespace headers removed before forwarding.
+- Host auth precedence: root `TOKIMEKI_MASTER_TOKEN` first, then static
+  namespace tokens from `TOKIMEKI_NAMESPACE_TOKENS` (JSON
+  `{ "<namespace>": "<token>" }`; `namespace-tokens.ts` validates and matches
+  in constant time without early exit). Namespace hosts may only use
+  `<namespace>.<slug>` sessions (dot route); the Worker derives the namespace
+  from the token only and injects `x-tokimeki-namespace` (`*` for root).
+  Invalid/duplicate/short/oversized maps fail closed; unset keeps the
+  master-only behavior.
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
   host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
   reserved `TUNNEL` returns `not_implemented`; lazy schema only on
   authenticated host hello.
+- `session_meta.namespace_id` is additive (idempotent `ALTER TABLE ... ADD
+  COLUMN` in `ensureRelaySchema`, plus a legacy SELECT fallback). Hosts write
+  it on create (root derives it from a dotted session id), namespace hosts
+  must match it, and `NULL` legacy rows stay root/master-only. viewers and
+  listeners get a defensive session-prefix check. `welcome` has no namespace
+  field (the session id carries it).
 - Listeners are read-only snapshot-only clients: `X-Tokimeki-Listener: 1` at
   the Worker selects the role (master token still wins as host), they are
   capped by `TOKIMEKI_MAX_LISTENERS` (default 8) on top of `maxClients`, receive
@@ -92,7 +106,11 @@ assets/              README icon
 
 - `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach` (`--listen` for
   read-only listener mode), `doctor`; all runtime config comes from env
-  (`.env.example` is the reference).
+  (`.env.example` is the reference). Host auth accepts
+  `TOKIMEKI_MASTER_TOKEN` or `TOKIMEKI_NAMESPACE_TOKEN` +
+  `TOKIMEKI_NAMESPACE` (namespace wins with a warning when both are set);
+  namespace mode auto-prefixes `<namespace>.` sessions and rejects an explicit
+  `TOKIMEKI_SESSION` without it.
 - `host/`: node-pty, Windows ConPTY, headless xterm mirror, mode tracker,
   resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup, and a
   separate periodic listener snapshot timer (`TOKIMEKI_LISTENER_SNAPSHOT_MS`,
@@ -142,6 +160,7 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 - `npm run deploy` uses the root config; `npm run deploy:prod` uses the relay
   config. Keep shared fields in sync.
 - Worker secrets: `TOKIMEKI_MASTER_TOKEN` (required), optional
+  `TOKIMEKI_NAMESPACE_TOKENS` (static namespace host tokens, JSON object),
   `TOKIMEKI_COTURN_SECRET`, `TOKIMEKI_TURN_API_TOKEN`,
   `TOKIMEKI_TURN_CREDENTIAL`. `.dev.vars.example` is the Deploy Button
   template; never commit real values.

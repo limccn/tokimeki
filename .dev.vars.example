@@ -6,6 +6,12 @@
 # Replace change-me with a strong random value before deploying.
 TOKIMEKI_MASTER_TOKEN=change-me
 
+# Optional: static namespace host tokens as a JSON object.
+# Each value must be a unique random token >= 32 bytes and differ from the
+# master token. Namespace hosts may only use "<namespace>.<slug>" sessions.
+# Example: {"team-a":"<32+ byte random>","team-b":"<32+ byte random>"}
+TOKIMEKI_NAMESPACE_TOKENS=
+
 # Optional: coturn REST shared secret (must match coturn static-auth-secret).
 TOKIMEKI_COTURN_SECRET=
 

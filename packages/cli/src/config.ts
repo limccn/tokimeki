@@ -11,6 +11,7 @@ import { hostname as defaultHostname } from "node:os";
 import {
   isTerminalSizeWithinLimits,
   isValidSessionId,
+  MAX_SESSION_ID_LENGTH,
   MAX_TERMINAL_DIMENSION,
   MIN_TUNNEL_SECRET_BYTES,
   RESIZE_POLICIES,
@@ -33,6 +34,15 @@ export type PiTuiMode = "fullscreen" | "regular";
 export type TunnelMode = "off" | "auto";
 /** Local parity sender policy (`TOKIMEKI_TUNNEL_FEC`). */
 export type TunnelFecMode = "off" | "xor";
+/**
+ * Host credential source: the root `TOKIMEKI_MASTER_TOKEN` or a static
+ * namespace token (`TOKIMEKI_NAMESPACE_TOKEN`). Namespace tokens only work for
+ * `<namespace>.<slug>` sessions and take precedence when both are set.
+ */
+export type HostAuthMode = "master" | "namespace";
+
+/** Namespace names match the relay's `^[a-z0-9][a-z0-9_-]{0,31}$` rule. */
+export const HOST_NAMESPACE_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 export interface TerminalSize {
   readonly cols: number;
@@ -66,7 +76,17 @@ export interface CommonConfig {
 
 export interface HostConfig extends CommonConfig {
   readonly role: "host";
-  readonly masterToken: string;
+  /** Which credential authenticated this host at the relay. */
+  readonly authMode: HostAuthMode;
+  /**
+   * Value sent as `X-Tokimeki-Master`: the namespace token in namespace mode,
+   * otherwise the root master token. Never logged.
+   */
+  readonly hostToken: string;
+  readonly masterToken: string | null;
+  readonly namespaceToken: string | null;
+  /** Namespace name from `TOKIMEKI_NAMESPACE` (namespace mode only). */
+  readonly namespace: string | null;
   readonly sessionToken: string;
   readonly sessionTokenGenerated: boolean;
   readonly term: string;
@@ -102,6 +122,10 @@ export interface DoctorConfig {
   readonly hasMasterToken: boolean;
   /** Master token value, used only for the `/auth/whoami` probe; never printed. */
   readonly masterToken: string | null;
+  readonly hasNamespaceToken: boolean;
+  readonly namespace: string | null;
+  /** Host credential source, or null when no host token is configured. */
+  readonly authMode: HostAuthMode | null;
   readonly hasSessionToken: boolean;
   readonly warnings: readonly string[];
   readonly secrets: readonly string[];
@@ -296,6 +320,53 @@ export function sanitizeSessionId(raw: string): string {
   return cleaned.length > 0 ? cleaned : "session";
 }
 
+/** True when `session` is exactly `<namespace>.<slug>` with a non-empty slug. */
+export function isNamespaceScopedSession(session: string, namespace: string): boolean {
+  const prefix = `${namespace}.`;
+  return session.startsWith(prefix) && session.length > prefix.length;
+}
+
+/**
+ * Resolve the host session id.
+ *
+ * Namespace hosts must use `<namespace>.<slug>` so the relay can enforce
+ * isolation; when `TOKIMEKI_SESSION` is omitted the slug is derived from the
+ * hostname and cwd. Root/master hosts keep the pre-namespace behavior.
+ */
+function resolveHostSession(
+  explicit: string | undefined,
+  namespace: string | null,
+  defaults: { readonly hostname: string; readonly cwd: string },
+  warnings: string[],
+): string {
+  if (explicit !== undefined) {
+    if (!isValidSessionId(explicit)) {
+      throw new ConfigError("TOKIMEKI_SESSION must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+    }
+    if (namespace !== null && !isNamespaceScopedSession(explicit, namespace)) {
+      throw new ConfigError(
+        `TOKIMEKI_SESSION must start with "${namespace}." when TOKIMEKI_NAMESPACE_TOKEN is set`,
+      );
+    }
+    return explicit;
+  }
+  const slug = sanitizeSessionId(`${defaults.hostname}-${defaults.cwd}`);
+  if (namespace === null) {
+    return slug;
+  }
+  const prefix = `${namespace}.`;
+  const budget = Math.max(1, MAX_SESSION_ID_LENGTH - prefix.length);
+  let trimmed = slug.slice(0, budget);
+  // A dot at the end is legal but a trailing cut is confusing; trim it.
+  trimmed = trimmed.replace(/\.+$/, "") || "session";
+  if (trimmed.length < slug.length) {
+    warnings.push(
+      `the auto-generated session id was truncated to fit the ${MAX_SESSION_ID_LENGTH}-character limit with namespace "${namespace}"; set TOKIMEKI_SESSION to choose it explicitly`,
+    );
+  }
+  return `${prefix}${trimmed.slice(0, budget)}`;
+}
+
 /** Recognize v1.1-only variables and describe them without printing values. */
 export function collectV11Warnings(env: NodeJS.ProcessEnv): string[] {
   const present = V11_ENV_VARS.filter((name) => optionalEnv(env, name) !== undefined);
@@ -483,6 +554,7 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
   }
   const secrets = [
     optionalEnv(env, "TOKIMEKI_MASTER_TOKEN"),
+    optionalEnv(env, "TOKIMEKI_NAMESPACE_TOKEN"),
     optionalEnv(env, "TOKIMEKI_SESSION_TOKEN"),
     optionalEnv(env, "TOKIMEKI_TUNNEL_SECRET"),
   ].filter((value): value is string => value !== undefined);
@@ -508,20 +580,58 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
   const env = applyConfigEnvelope(inputs.env ?? process.env);
   const cwd = inputs.cwd ?? process.cwd();
   const hostname = inputs.hostname ?? defaultHostname();
-  const masterToken = requireEnv(env, "TOKIMEKI_MASTER_TOKEN");
+  const masterToken = optionalEnv(env, "TOKIMEKI_MASTER_TOKEN") ?? null;
+  const namespaceToken = optionalEnv(env, "TOKIMEKI_NAMESPACE_TOKEN") ?? null;
+  const namespaceRaw = optionalEnv(env, "TOKIMEKI_NAMESPACE") ?? null;
+  const warnings: string[] = [];
+
+  let authMode: HostAuthMode;
+  let hostToken: string;
+  let namespace: string | null = null;
+  if (namespaceToken !== null) {
+    // Namespace tokens are scoped credentials and take precedence over a
+    // co-configured root master token; relying on the master here would give
+    // the host more access than the operator intended.
+    if (namespaceRaw === null) {
+      throw new ConfigError("TOKIMEKI_NAMESPACE is required when TOKIMEKI_NAMESPACE_TOKEN is set");
+    }
+    if (!HOST_NAMESPACE_PATTERN.test(namespaceRaw)) {
+      throw new ConfigError("TOKIMEKI_NAMESPACE must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+    }
+    if (masterToken !== null) {
+      warnings.push(
+        "TOKIMEKI_NAMESPACE_TOKEN takes precedence over TOKIMEKI_MASTER_TOKEN; the master token is ignored",
+      );
+    }
+    authMode = "namespace";
+    hostToken = namespaceToken;
+    namespace = namespaceRaw;
+  } else if (masterToken !== null) {
+    authMode = "master";
+    hostToken = masterToken;
+  } else {
+    throw new ConfigError("TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required");
+  }
+
   const explicitSession = optionalEnv(env, "TOKIMEKI_SESSION");
-  const session = explicitSession ?? sanitizeSessionId(`${hostname}-${cwd}`);
+  const session = resolveHostSession(explicitSession, namespace, { hostname, cwd }, warnings);
   const envSessionToken = optionalEnv(env, "TOKIMEKI_SESSION_TOKEN");
   const sessionToken = envSessionToken ?? randomBytes(32).toString("base64url");
-  if (masterToken === sessionToken) {
-    // Never let the value shared with viewers double as the host master token.
-    throw new ConfigError("TOKIMEKI_MASTER_TOKEN and TOKIMEKI_SESSION_TOKEN must be different");
+  if (hostToken === sessionToken) {
+    // Never let the value shared with viewers double as the host credential.
+    const name = authMode === "namespace" ? "TOKIMEKI_NAMESPACE_TOKEN" : "TOKIMEKI_MASTER_TOKEN";
+    throw new ConfigError(`${name} and TOKIMEKI_SESSION_TOKEN must be different`);
   }
   const common = loadCommon(env, session);
+  common.warnings.push(...warnings);
   return {
     ...common,
     role: "host",
+    authMode,
+    hostToken,
     masterToken,
+    namespaceToken,
+    namespace,
     sessionToken,
     sessionTokenGenerated: envSessionToken === undefined,
     term: optionalEnv(env, "TOKIMEKI_TERM") ?? DEFAULT_TERM,
@@ -552,7 +662,7 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
       "fullscreen",
     ),
     claudeBg: parseBooleanish("TOKIMEKI_CLAUDE_BG", optionalEnv(env, "TOKIMEKI_CLAUDE_BG"), false),
-    secrets: [...common.secrets, masterToken, sessionToken],
+    secrets: [...common.secrets, hostToken, sessionToken],
   };
 }
 
@@ -616,20 +726,60 @@ export function loadDoctorConfig(env: NodeJS.ProcessEnv = process.env): DoctorCo
   }
   parseLogLevel(env, warnings);
   const masterToken = optionalEnv(env, "TOKIMEKI_MASTER_TOKEN");
+  const namespaceToken = optionalEnv(env, "TOKIMEKI_NAMESPACE_TOKEN");
+  const namespaceRaw = optionalEnv(env, "TOKIMEKI_NAMESPACE");
   const sessionToken = optionalEnv(env, "TOKIMEKI_SESSION_TOKEN");
+  let namespace: string | null = null;
+  if (namespaceRaw !== undefined) {
+    if (HOST_NAMESPACE_PATTERN.test(namespaceRaw)) {
+      namespace = namespaceRaw;
+    } else {
+      warnings.push("TOKIMEKI_NAMESPACE must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+    }
+  }
+  if (namespaceToken !== undefined) {
+    if (masterToken !== undefined) {
+      warnings.push(
+        "TOKIMEKI_NAMESPACE_TOKEN takes precedence over TOKIMEKI_MASTER_TOKEN; the master token is ignored",
+      );
+    }
+    if (namespace === null) {
+      warnings.push("TOKIMEKI_NAMESPACE_TOKEN requires TOKIMEKI_NAMESPACE");
+    } else if (session !== null && !isNamespaceScopedSession(session, namespace)) {
+      warnings.push(
+        `TOKIMEKI_SESSION must start with "${namespace}." when TOKIMEKI_NAMESPACE_TOKEN is set`,
+      );
+    }
+  }
   if (masterToken !== undefined && sessionToken !== undefined && masterToken === sessionToken) {
     warnings.push(
       "TOKIMEKI_MASTER_TOKEN and TOKIMEKI_SESSION_TOKEN are identical; use different values",
     );
   }
-  const secrets = [masterToken, sessionToken, optionalEnv(env, "TOKIMEKI_TUNNEL_SECRET")].filter(
-    (value): value is string => value !== undefined,
-  );
+  if (
+    namespaceToken !== undefined &&
+    sessionToken !== undefined &&
+    namespaceToken === sessionToken
+  ) {
+    warnings.push(
+      "TOKIMEKI_NAMESPACE_TOKEN and TOKIMEKI_SESSION_TOKEN are identical; use different values",
+    );
+  }
+  const secrets = [
+    masterToken,
+    namespaceToken,
+    sessionToken,
+    optionalEnv(env, "TOKIMEKI_TUNNEL_SECRET"),
+  ].filter((value): value is string => value !== undefined);
   return {
     relayUrl,
     session,
     hasMasterToken: masterToken !== undefined,
     masterToken: masterToken ?? null,
+    hasNamespaceToken: namespaceToken !== undefined,
+    namespace,
+    authMode:
+      namespaceToken !== undefined ? "namespace" : masterToken !== undefined ? "master" : null,
     hasSessionToken: sessionToken !== undefined,
     warnings,
     secrets,

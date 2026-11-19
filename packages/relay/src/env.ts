@@ -8,6 +8,7 @@ export type CoturnUrlConfig = string | readonly string[];
  *
  * Secrets are provided with `wrangler secret put`:
  * - `TOKIMEKI_MASTER_TOKEN`
+ * - `TOKIMEKI_NAMESPACE_TOKENS`
  * - `TOKIMEKI_COTURN_SECRET`
  * - `TOKIMEKI_TURN_API_TOKEN`
  *
@@ -17,6 +18,8 @@ export type CoturnUrlConfig = string | readonly string[];
 export interface RelayEnv {
   readonly SESSIONS: DurableObjectNamespace;
   readonly TOKIMEKI_MASTER_TOKEN?: string;
+  /** JSON object `{ "<namespace>": "<token>" }` for static namespace hosts. */
+  readonly TOKIMEKI_NAMESPACE_TOKENS?: string;
   readonly TOKIMEKI_SESSION_TTL_SECONDS?: string;
   readonly TOKIMEKI_MAX_CLIENTS_PER_SESSION?: string;
   /** Independent limit for read-only listeners (default 8). */

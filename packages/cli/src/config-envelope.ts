@@ -22,6 +22,8 @@ const FIELDS: Readonly<Record<string, FieldMapping>> = {
   session: { env: "TOKIMEKI_SESSION", kind: "string" },
   sessionToken: { env: "TOKIMEKI_SESSION_TOKEN", kind: "string" },
   masterToken: { env: "TOKIMEKI_MASTER_TOKEN", kind: "string" },
+  namespaceToken: { env: "TOKIMEKI_NAMESPACE_TOKEN", kind: "string" },
+  namespace: { env: "TOKIMEKI_NAMESPACE", kind: "string" },
   window: { env: "TOKIMEKI_WINDOW_SIZE", kind: "size" },
   windowSize: { env: "TOKIMEKI_WINDOW_SIZE", kind: "size" },
   ptySize: { env: "TOKIMEKI_PTY_SIZE", kind: "size" },

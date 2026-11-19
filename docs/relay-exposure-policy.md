@@ -5,10 +5,13 @@
 > 相关设计：`.trellis/tasks/11-18-relay-exposure-policy`（决策与调研）、
 > v1.2 JWT/JWKS（namespace 模型）、`docs/multi-namespace-design.md`（规划）。
 >
-> 已部分实现（2026-11-19，`11-19-relay-exposure-hardening` 分支；未提交、
-> 未部署）：listener TURN 门禁、最小化 `/healthz` + 认证 `/auth/whoami`
-> （v1 仅 root master）、TURN 凭据默认 TTL 900s、边缘 per-IP 限速文档化。
-> namespace token、JWT/JWKS、配额与绝对/空闲 TTL 仍未实现。
+> 已部分实现（2026-11-19，`11-19-relay-exposure-hardening` 与
+> `11-19-relay-namespace-tokens` 分支；未提交、未部署）：listener TURN 门禁、
+> 最小化 `/healthz` + 认证 `/auth/whoami`（v1 仅 root master）、TURN 凭据
+> 默认 TTL 900s、边缘 per-IP 限速文档化、静态 namespace token
+> （`TOKIMEKI_NAMESPACE_TOKENS` + CLI `TOKIMEKI_NAMESPACE_TOKEN`/
+> `TOKIMEKI_NAMESPACE`，点号 `<namespace>.<slug>` 路由）。JWT/JWKS、配额与
+> 绝对/空闲 TTL 仍未实现。
 >
 > 术语：**namespace** 是隔离、配额与会话前缀的作用域单位。hosted 中它对应
 > TokiAPI 用户/账户，OSS 中对应静态 namespace token；v1.2 JWT claim 已统一为
@@ -94,8 +97,9 @@ tokimeki relay 只有两个公网入口：`/healthz` 与 `/ws/<session>`。真�
 | P2P / TUN | 免费，仅需 invite | 免费，仅需 invite |
 | 未来 observer/agent | 账户/namespace scope | 运维策略 |
 
-> OSS 的 static namespace token 是目标设计（见 §16.4/§16.9）；当前实现仍是
-> master-only。两者都不允许匿名 host。
+> OSS 的 static namespace token 已实现（见 §16.4/§16.9，
+> `11-19-relay-namespace-tokens`）；未配置 `TOKIMEKI_NAMESPACE_TOKENS` 时
+> 保持 master-only。两者都不允许匿名 host。
 
 ## 5. TURN 策略
 
@@ -592,10 +596,10 @@ namespace token（namespace 作用域）。**
   **新** session，但不能接管已有 session：DO 首次 host 时保存
   `sha256(sessionToken)`，后续 host 必须匹配。
 - 同时知道 host token 和 session token 的人可以 host/接管该 session。
-- 当前 CLI 的 `claude` / `pi` / `run` 要求 `TOKIMEKI_MASTER_TOKEN`；
-  接入 namespace token 后应支持 `TOKIMEKI_NAMESPACE_TOKEN` +
-  `TOKIMEKI_NAMESPACE`（实现任务）。`TOKIMEKI_SESSION_TOKEN` 未提供时由
-  CLI 随机生成。
+- CLI 的 `claude` / `pi` / `run` 接受 `TOKIMEKI_NAMESPACE_TOKEN` +
+  `TOKIMEKI_NAMESPACE`（隐式 `<namespace>.<slug>` session）或
+  `TOKIMEKI_MASTER_TOKEN`；两者同时配置时 namespace token 优先并告警。
+  `TOKIMEKI_SESSION_TOKEN` 未提供时由 CLI 随机生成。
 - 轮换 master 会让所有 host 同时失效；轮换 namespace token 只影响该
   namespace 的新连接。两者都没有单用户撤销。
 - v1.2 未配置 `TOKIMEKI_JWT_JWKS_URL` 时就是此模型；配置 JWKS 后可用
