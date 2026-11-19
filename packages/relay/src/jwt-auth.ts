@@ -283,9 +283,7 @@ export interface JwksLookup {
   readonly key: CryptoKey;
 }
 
-export type JwksFailure =
-  | { readonly kind: "unavailable" }
-  | { readonly kind: "unknown_kid" };
+export type JwksFailure = { readonly kind: "unavailable" } | { readonly kind: "unknown_kid" };
 
 class JwksFetchError extends Error {}
 
@@ -477,11 +475,9 @@ export async function getJwksKey(
       return key !== undefined ? { kind: "key", key } : { kind: "unknown_kid" };
     }
   }
-  // Fetch failed or was gated off: fall back to a stale cache if it helps.
-  if (cached !== undefined) {
-    const key = cached.keys.get(kid);
-    return key !== undefined ? { kind: "key", key } : { kind: "unknown_kid" };
-  }
+  // Only an unexpired cache may verify tokens; one that has outlived its TTL
+  // MUST NOT keep accepting signatures while the JWKS stays unreachable,
+  // otherwise key rotation could never invalidate outstanding tokens.
   return { kind: "unavailable" };
 }
 

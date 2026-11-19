@@ -1,17 +1,16 @@
-import { describe, expect, it, beforeEach } from "vitest";
-
+import { beforeEach, describe, expect, it } from "vitest";
+import type { RelayEnv } from "../src/env.js";
 import {
   __resetJwtCacheForTests,
   DEFAULT_JWT_AUDIENCE,
   type HostJwtClaims,
-  type JwtAuthConfig,
   JWKS_REFRESH_MIN_INTERVAL_MS,
+  type JwtAuthConfig,
   looksLikeJwt,
   readJwtAuthConfig,
   selectHostCredential,
   verifyHostJwt,
 } from "../src/jwt-auth.js";
-import type { RelayEnv } from "../src/env.js";
 
 // ---------------------------------------------------------------------------
 // Helpers: ES256 key material and a JWT signer (P1363 r||s, like TokiAPI).
@@ -29,18 +28,17 @@ function encodeSegment(value: unknown): string {
   return base64UrlEncode(new TextEncoder().encode(JSON.stringify(value)));
 }
 
-export interface TestKeyMaterial {
+interface TestKeyMaterial {
   readonly kid: string;
   readonly privateJwk: JsonWebKey;
   readonly publicJwk: Record<string, string>;
 }
 
 async function generateTestKey(kid: string): Promise<TestKeyMaterial> {
-  const pair = (await crypto.subtle.generateKey(
-    { name: "ECDSA", namedCurve: "P-256" },
-    true,
-    ["sign", "verify"],
-  )) as unknown as CryptoKeyPair;
+  const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+    "sign",
+    "verify",
+  ])) as unknown as CryptoKeyPair;
   const privateJwk = (await crypto.subtle.exportKey("jwk", pair.privateKey)) as JsonWebKey;
   const publicJwk = {
     kty: "EC",
@@ -62,9 +60,13 @@ async function signHostJwt(
   const signingInput = `${encodeSegment(header)}.${encodeSegment(payload)}`;
   const signature = await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" },
-    await crypto.subtle.importKey("jwk", key.privateJwk, { name: "ECDSA", namedCurve: "P-256" }, false, [
-      "sign",
-    ]),
+    await crypto.subtle.importKey(
+      "jwk",
+      key.privateJwk,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["sign"],
+    ),
     new TextEncoder().encode(signingInput),
   );
   return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
@@ -108,7 +110,8 @@ describe("readJwtAuthConfig", () => {
     expect(readJwtAuthConfig({} as RelayEnv).status).toBe("disabled");
     expect(readJwtAuthConfig({ TOKIMEKI_JWT_JWKS_URL: "   " } as RelayEnv).status).toBe("disabled");
     expect(
-      readJwtAuthConfig({ TOKIMEKI_JWT_JWKS_URL: " ", TOKIMEKI_JWT_ISSUER: "x" } as RelayEnv).status,
+      readJwtAuthConfig({ TOKIMEKI_JWT_JWKS_URL: " ", TOKIMEKI_JWT_ISSUER: "x" } as RelayEnv)
+        .status,
     ).toBe("disabled");
   });
 
@@ -217,9 +220,9 @@ describe("looksLikeJwt", () => {
     expect(looksLikeJwt(`${encodeSegment({ alg: "HS256", kid: "kd1" })}.AAAA.AAAA`)).toBe(false);
     expect(looksLikeJwt(`${encodeSegment({ alg: "ES256" })}.AAAA.AAAA`)).toBe(false);
     expect(looksLikeJwt(`${encodeSegment({ alg: "ES256", kid: "" })}.AAAA.AAAA`)).toBe(false);
-    expect(
-      looksLikeJwt(`${encodeSegment({ alg: "ES256", kid: "k".repeat(129) })}.AAAA.AAAA`),
-    ).toBe(false);
+    expect(looksLikeJwt(`${encodeSegment({ alg: "ES256", kid: "k".repeat(129) })}.AAAA.AAAA`)).toBe(
+      false,
+    );
     // Oversized token.
     const filler = "A".repeat(8192);
     expect(looksLikeJwt(`${filler}.AAAA.AAAA`)).toBe(false);
@@ -404,11 +407,38 @@ describe("verifyHostJwt", () => {
     expect(cached.ok).toBe(true);
   });
 
+  it("fails closed instead of reusing an expired cache when the JWKS is down", async () => {
+    const token = await signHostJwt(key, validClaims());
+    const config = baseConfig({ jwksTtlSeconds: 60 });
+    const failing: typeof fetch = (input) => {
+      void input;
+      return Promise.reject(new Error("down"));
+    };
+    const working: typeof fetch = (input) => {
+      void input;
+      return Promise.resolve(new Response(JSON.stringify({ keys: [jwks] }), { status: 200 }));
+    };
+    const ok = await verifyHostJwt(token, config, { nowMs: BASE_NOW_MS, fetchImpl: working });
+    expect(ok.ok).toBe(true);
+    // The cache is outside its TTL and the refresh fails: a rotated-out key
+    // must not keep verifying tokens just because the JWKS is unreachable.
+    const expired = await verifyHostJwt(token, config, {
+      nowMs: BASE_NOW_MS + 61_000,
+      fetchImpl: failing,
+    });
+    expect(expired).toEqual({ ok: false, reason: "jwks_unavailable" });
+  });
+
   it("fails closed on malformed JWKS documents", async () => {
     const token = await signHostJwt(key, validClaims());
     const documents: unknown[] = [
       { keys: [] },
-      { keys: [{ ...jwks, kid: "a" }, { ...jwks, kid: "a" }] },
+      {
+        keys: [
+          { ...jwks, kid: "a" },
+          { ...jwks, kid: "a" },
+        ],
+      },
       { keys: [{ ...jwks, alg: "HS256" }] },
       { keys: [{ ...jwks, use: "enc" }] },
       { keys: [{ ...jwks, kty: "RSA" }] },

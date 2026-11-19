@@ -53,8 +53,9 @@ function namespaceTokenConfig(
 }
 
 /** One-shot per-isolate migration warnings (never contain values). */
-const warnedNamespacesLookLikeJwt = new Set<string>();
 let warnedFallbackDisabled = false;
+/** Parsed namespace map that already produced the look-like-JWT warning. */
+let checkedNamespaceJwtShapeConfig: NamespaceTokenConfig | null = null;
 
 function jsonResponse(status: number, body: unknown, extraHeaders?: HeadersInit): Response {
   return new Response(JSON.stringify(body), {
@@ -130,11 +131,14 @@ async function resolveHostAuth(
   if (
     jwtStatus.status !== "disabled" &&
     namespaceConfig.error === undefined &&
-    namespaceActive
+    namespaceActive &&
+    checkedNamespaceJwtShapeConfig !== namespaceConfig
   ) {
+    // Checked once per parsed map, not on every connection: the shape test
+    // decodes each token, and the warning is a migration diagnostic only.
+    checkedNamespaceJwtShapeConfig = namespaceConfig;
     for (const entry of namespaceConfig.entries) {
-      if (!warnedNamespacesLookLikeJwt.has(entry.namespace) && looksLikeJwt(entry.token)) {
-        warnedNamespacesLookLikeJwt.add(entry.namespace);
+      if (looksLikeJwt(entry.token)) {
         logger.warn("namespace_token_looks_like_jwt", { namespace: entry.namespace });
       }
     }
@@ -150,7 +154,10 @@ async function resolveHostAuth(
   }
   if (selection.action === "unauthorized") {
     logger.warn("jwt_auth_failed", { sessionId, reason: selection.reason });
-    return { outcome: "response", response: jsonResponse(401, { ok: false, error: "unauthorized" }) };
+    return {
+      outcome: "response",
+      response: jsonResponse(401, { ok: false, error: "unauthorized" }),
+    };
   }
   const credential = selection.value;
 
@@ -158,7 +165,10 @@ async function resolveHostAuth(
   // already holds the session token and could otherwise claim the host role.
   if (presentedSession !== null && credential === presentedSession) {
     logger.warn("master_session_token_equal", { sessionId });
-    return { outcome: "response", response: jsonResponse(401, { ok: false, error: "unauthorized" }) };
+    return {
+      outcome: "response",
+      response: jsonResponse(401, { ok: false, error: "unauthorized" }),
+    };
   }
 
   // 1. Fallback token (constant-time compare, token carrier only). First so a
