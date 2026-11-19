@@ -100,6 +100,8 @@ export interface DoctorConfig {
   readonly relayUrl: string | null;
   readonly session: string | null;
   readonly hasMasterToken: boolean;
+  /** Master token value, used only for the `/auth/whoami` probe; never printed. */
+  readonly masterToken: string | null;
   readonly hasSessionToken: boolean;
   readonly warnings: readonly string[];
   readonly secrets: readonly string[];
@@ -257,12 +259,22 @@ export function normalizeRelayBaseUrl(raw: string): string {
   return `${protocol}//${parsed.host}${pathname}`;
 }
 
-/** Convert a relay base URL into the `/healthz` HTTP(S) endpoint. */
-export function relayHealthUrl(baseUrl: string): string {
+/** Convert a relay base URL into an HTTP(S) endpoint below its path prefix. */
+function relayHttpEndpoint(baseUrl: string, endpoint: string): string {
   const parsed = new URL(baseUrl);
   const protocol = parsed.protocol === "wss:" ? "https:" : "http:";
   const pathname = parsed.pathname.replace(/\/+$/, "");
-  return `${protocol}//${parsed.host}${pathname}/healthz`;
+  return `${protocol}//${parsed.host}${pathname}/${endpoint}`;
+}
+
+/** Convert a relay base URL into the `/healthz` HTTP(S) endpoint. */
+export function relayHealthUrl(baseUrl: string): string {
+  return relayHttpEndpoint(baseUrl, "healthz");
+}
+
+/** Convert a relay base URL into the authenticated `/auth/whoami` endpoint. */
+export function relayWhoamiUrl(baseUrl: string): string {
+  return relayHttpEndpoint(baseUrl, "auth/whoami");
 }
 
 /** Append `/ws/<session>` and the role hint to a normalized relay base URL. */
@@ -617,6 +629,7 @@ export function loadDoctorConfig(env: NodeJS.ProcessEnv = process.env): DoctorCo
     relayUrl,
     session,
     hasMasterToken: masterToken !== undefined,
+    masterToken: masterToken ?? null,
     hasSessionToken: sessionToken !== undefined,
     warnings,
     secrets,

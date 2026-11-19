@@ -206,6 +206,56 @@ describe("SessionDurableObject", () => {
     sized.close();
   });
 
+  it("never issues TURN credentials to a listener", async () => {
+    const sessionId = "listener-turn-gate";
+    // The test env has coturn configured, so hosts/viewers get TURN.
+    const host = await openHost(sessionId);
+    expect(host.controls.find((message) => message.type === "welcome")?.iceProvider).toBe("coturn");
+    const viewer = await openViewer(sessionId, "viewer-1");
+    expect(viewer.controls.find((message) => message.type === "welcome")?.iceProvider).toBe(
+      "coturn",
+    );
+
+    const listener = await openListener(sessionId, "listener-1");
+    const welcome = listener.controls.find((message) => message.type === "welcome");
+    expect(welcome?.iceProvider).toBe("stun");
+    expect(welcome?.iceExpiresAt).toBeNull();
+    // Control messages arrive as untyped JSON in this harness; narrow the
+    // listener welcome's ICE server list for the TURN assertions.
+    const servers = (welcome?.iceServers ?? []) as Array<{
+      urls: string | string[];
+      username?: string;
+      credential?: string;
+    }>;
+    expect(servers.length).toBeGreaterThan(0);
+    for (const server of servers) {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      expect(urls.every((url) => url.startsWith("stun:"))).toBe(true);
+      expect(server.username).toBeUndefined();
+      expect(server.credential).toBeUndefined();
+    }
+    const serialized = JSON.stringify(welcome);
+    expect(serialized).not.toContain("test-coturn-secret");
+    expect(serialized).not.toContain("turn:coturn.test.invalid");
+
+    listener.send({ v: 1, type: "ice-refresh" });
+    const error = await listener.waitFor(
+      (message) => message.type === "error" && String(message.message).includes("TURN"),
+    );
+    expect(error.code).toBe("invalid_role");
+    await sleep(100);
+    expect(listener.controls.some((message) => message.type === "ice")).toBe(false);
+
+    // Host/viewer ICE refresh behavior is unchanged.
+    viewer.send({ v: 1, type: "ice-refresh" });
+    const refreshed = await viewer.waitForType("ice");
+    expect(refreshed.iceProvider).toBe("coturn");
+
+    host.close();
+    viewer.close();
+    listener.close();
+  });
+
   it("rejects a listener without a host session and does not create the schema", async () => {
     const sessionId = "listener-no-session";
     const listener = await connectWorker(sessionId, { token: SESSION_TOKEN, listener: true });

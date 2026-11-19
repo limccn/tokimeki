@@ -115,7 +115,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 |---|---|---|---|
 | `hello` | client → DO | `role`, `session`, `clientId` | `protocolVersion`（默认 1）、`client`、`capabilities`（默认 `{}`）、`cols`, `rows` |
 | `welcome` | DO → client | `session`, `hostOnline`, `iceProvider`, `sessionTtlSeconds` | `protocolVersion`（默认 1）、`clients`（默认 `[]`）、`iceServers`（默认 `[]`）、`iceExpiresAt`、`transportPolicy`（默认 `all`）、`capabilities` |
-| `ice-refresh` | client → DO | 无 | `provider` |
+| `ice-refresh` | host/viewer → DO | 无 | `provider` |
 | `ice` | DO → client | `iceServers`, `iceProvider` | `iceExpiresAt` |
 | `peer-joined` | DO → host | `clientId` | `role`（v1.1；缺省视为 viewer）、`capabilities`（默认 `{}`） |
 | `peer-left` | DO → host | `clientId` | — |
@@ -292,8 +292,9 @@ viewer                     relay / DO                         host
 - `listener` 角色：v1.1 relay 接受只读 listener；更早的 v1 relay 返回
   `error{code:"not_implemented"}`（关闭码 4005），不得静默降级为 viewer。
 - listener 的只读边界：发送 `INPUT`/`RESYNC_REQ`/`resize`/`resync`/`ack`/`signal`/
-  `transport` 返回 `invalid_role`，relay 不转发给 host；listener 不接收 `OUTPUT`，
-  不参与 ACK、`unackedBytes`、`droppedBytes`、pause 或 slow-consumer 判定。
+  `transport`/`ice-refresh` 返回 `invalid_role`，relay 不转发给 host；listener 不接收
+  `OUTPUT`，不参与 ACK、`unackedBytes`、`droppedBytes`、pause 或 slow-consumer 判定。
+  listener 的 `welcome` 只含 STUN（`iceProvider:"stun"`），relay 不向其签发 TURN 凭据。
 - 未知 `agent.*` 消息：返回 `not_implemented`，通常**不关闭**连接，允许同一连接继续发送 v1 消息。
 
 ## 6. 输出序号、确认、重连与快照
@@ -357,6 +358,7 @@ viewer                     relay / DO                         host
 - Cloudflare TURN 使用短期凭据；TTL 上限 48 小时。provider 为 `stun` 表示未配置 TURN，只尝试直连。
 - `iceExpiresAt` 是 epoch 毫秒。v1.1 F0 的 host/viewer 在到期前自动发送 `ice-refresh`，收到 `ice` 后更新配置并重排；刷新严格串行，超时有退避，relay 未 ready 时不发请求。重新连接会获得新的 `welcome`/ICE 配置并重置定时器。
 - `ice-refresh.provider` 受 `TOKIMEKI_TURN_PROVIDER` 约束：`none` 只允许 `stun`；`coturn` 只允许 `coturn`/`static`/`stun`；`cloudflare` 只允许 `cloudflare`/`stun`；`auto` 允许任意已配置 provider。越权覆盖回退到 mode 默认，不报错。客户端以实际返回的 `iceProvider` 为准。
+- `listener` 永远不获得 TURN 凭据：其 `welcome.iceServers` 只含 STUN、`iceProvider` 为 `stun`、`iceExpiresAt` 为 `null`；listener 的 `ice-refresh` 返回 `invalid_role`，不返回 `ice`。host/viewer 的签发与刷新行为不变。
 - v1.1 F0 在 P2P link 尚未 ready 时失败，最多重试一次：先按 `coturn → static → cloudflare` 刷新到可用 TURN 配置（或刷新临期凭据），再重新协商；无可用配置或第二次失败则发送 `transport{mode:"relay", state:"failed"}` 并保持 relay。已 ready 后的关闭、DataChannel 发送失败不触发重试。relay 路径不受 ICE 凭据过期影响。
 - TURN 凭据、secret、credential 不得写入日志、URL 或 `hello`。
 

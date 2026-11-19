@@ -59,12 +59,12 @@
   //   TOKIMEKI_TURN_PROVIDER           auto | coturn | cloudflare | none (default auto)
   //   TOKIMEKI_COTURN_URLS             JSON array or legacy comma-separated turn:/turns: URLs
   //   TOKIMEKI_COTURN_SECRET           (secret) coturn static-auth-secret
-  //   TOKIMEKI_COTURN_TTL_SECONDS      default 86400
+  //   TOKIMEKI_COTURN_TTL_SECONDS      default 900 (15 min), recommended 600..3600
   //   TOKIMEKI_TURN_URLS               static TURN URLs
   //   TOKIMEKI_TURN_USERNAME           static TURN username
   //   TOKIMEKI_TURN_CREDENTIAL         (secret) static TURN credential
   //   TOKIMEKI_TURN_KEY_ID             Cloudflare Realtime TURN key id
   //   TOKIMEKI_TURN_API_TOKEN          (secret) Cloudflare Realtime TURN API token
-  //   TOKIMEKI_TURN_TTL_SECONDS        default 86400, Cloudflare clamps to 172800
+  //   TOKIMEKI_TURN_TTL_SECONDS        default 900, Cloudflare clamps to 172800
   //   TOKIMEKI_LOG_LEVEL               debug | info | warn | error | silent (default info)
 }

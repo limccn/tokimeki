@@ -5,7 +5,9 @@
  * non-zero when a required check fails.
  */
 
-import { type DoctorConfig, relayHealthUrl } from "../config.js";
+import { ICE_PROVIDERS } from "@limccn/tokimeki-protocol";
+
+import { type DoctorConfig, relayHealthUrl, relayWhoamiUrl } from "../config.js";
 import { createRedactor, formatError } from "../logger.js";
 
 export interface DoctorDeps {
@@ -16,6 +18,16 @@ export interface DoctorDeps {
 }
 
 const HEALTH_TIMEOUT_MS = 5_000;
+
+/**
+ * The `/auth/whoami` body is remote input, so only a known provider name is
+ * echoed into the report; anything else could smuggle terminal escapes.
+ */
+function knownIceProvider(value: unknown): string | null {
+  return typeof value === "string" && (ICE_PROVIDERS as readonly string[]).includes(value)
+    ? value
+    : null;
+}
 
 async function probeNodePty(): Promise<string | null> {
   try {
@@ -139,6 +151,35 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
       }
     } catch (error) {
       fail(`relay healthz unreachable at ${healthUrl}: ${formatError(error)}`);
+    }
+
+    // `/healthz` is intentionally minimal; TURN/auth details live behind the
+    // authenticated `/auth/whoami`. Older relays do not implement it, so a
+    // failure is a warning rather than a failed check (and never a token echo).
+    if (config.masterToken !== null) {
+      const whoamiUrl = relayWhoamiUrl(config.relayUrl);
+      try {
+        const response = await fetchImpl(whoamiUrl, {
+          headers: { "x-tokimeki-master": config.masterToken },
+          signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+        });
+        if (response.ok) {
+          const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+          const turn = body?.turn as { provider?: unknown } | undefined;
+          const provider = knownIceProvider(turn?.provider);
+          ok(
+            provider !== null
+              ? `relay whoami authenticated (TURN provider: ${provider})`
+              : `relay whoami authenticated (HTTP ${response.status})`,
+          );
+        } else {
+          warn(
+            `relay whoami returned HTTP ${response.status} (older relay or invalid master token?)`,
+          );
+        }
+      } catch (error) {
+        warn(`relay whoami unreachable at ${whoamiUrl}: ${formatError(error)}`);
+      }
     }
   }
 

@@ -48,7 +48,7 @@ import {
   setHostOfflineDeadline,
   updateLastActivity,
 } from "./storage.js";
-import { issueIceConfig } from "./turn.js";
+import { issueIceConfig, stunOnlyIceConfig } from "./turn.js";
 
 /** Anonymous sockets must send `hello` within this window. */
 const HELLO_TIMEOUT_MS = 10_000;
@@ -719,11 +719,16 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     this.saveAttachment(ws, active);
     updateLastActivity(this.ctx.storage.sql, now);
 
-    const ice = await issueIceConfig({
-      env: this.env,
-      clientId: active.clientId,
-      sql: this.ctx.storage.sql,
-    });
+    // Listeners receive snapshots only. They can never use P2P/TURN, so they
+    // must never receive TURN credentials either.
+    const ice =
+      role === "listener"
+        ? stunOnlyIceConfig(this.env)
+        : await issueIceConfig({
+            env: this.env,
+            clientId: active.clientId,
+            sql: this.ctx.storage.sql,
+          });
     if (ice.fallbackReason !== undefined) {
       this.logger.warn("turn_fallback", {
         sessionId: this.sessionId,
@@ -1219,6 +1224,13 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     att: ActiveAttachment,
     requestedProvider: IceProvider | undefined,
   ): Promise<void> {
+    if (att.role === "listener") {
+      this.sendControl(
+        ws,
+        errorMessage("invalid_role", "listeners do not receive TURN credentials"),
+      );
+      return;
+    }
     const ice = await issueIceConfig({
       env: this.env,
       clientId: att.clientId,

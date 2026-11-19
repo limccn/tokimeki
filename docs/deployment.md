@@ -74,6 +74,9 @@ fail-closed：master token 未配置时，所有 host 认证都会被拒绝（�
 - 所有 WebSocket 连接必须携带非空 `X-Tokimeki-Session`；缺失或空值返回 HTTP 401。
 - 每个会话的 OPEN socket 上限为 `TOKIMEKI_MAX_CLIENTS_PER_SESSION * 2`（含 pending），
   超限返回 HTTP 429；relay schema 只在该会话首次 host `hello` 时创建。
+- 只读 listener 永远不获得 TURN 凭据：其 `welcome.iceServers` 只含 STUN、
+  `iceProvider="stun"`；listener 的 `ice-refresh` 返回 `invalid_role`。host/viewer
+  的 TURN 签发行为不变。
 
 ## 4. TURN / STUN（coturn 优先）
 
@@ -240,7 +243,9 @@ allocation 8/8：
 
 Worker 会用 `TOKIMEKI_COTURN_SECRET` 生成 TURN REST 临时凭据：
 `username=<expiry>:<clientId>`，`credential=base64(HMAC-SHA1(secret, username))`，
-TTL 由 `TOKIMEKI_COTURN_TTL_SECONDS` 控制（默认 86400）。客户端只收到临时凭据。
+TTL 由 `TOKIMEKI_COTURN_TTL_SECONDS` 控制（默认 900 秒，即 15 分钟；建议范围
+600–3600 秒）。relay 无法计量 TURN 字节，短 TTL 用于限制泄露凭据的影响面；
+仍需要 24 小时的部署必须显式设置该变量。客户端只收到临时凭据。
 
 ### 4.2 Cloudflare Realtime TURN（验证完成，当前未启用）
 
@@ -248,7 +253,7 @@ TTL 由 `TOKIMEKI_COTURN_TTL_SECONDS` 控制（默认 86400）。客户端只收
 `TOKIMEKI_TURN_PROVIDER=coturn`。Cloudflare 配置保留为未启用的验证/回退路径：
 `TOKIMEKI_TURN_KEY_ID`（vars）/ `TOKIMEKI_TURN_API_TOKEN`（secret），Worker 调用
 `POST https://rtc.live.cloudflare.com/v1/turn/keys/{id}/credentials/generate-ice-servers`
-签发短期 `iceServers`，TTL 默认 86400 秒、上限 172800 秒。验证时 provider=cloudflare、
+签发短期 `iceServers`，TTL 默认 900 秒（15 分钟）、上限 172800 秒。验证时 provider=cloudflare、
 100% 版本 `ee0e0f3c`，生产 TURN-only e2e `E2E PASS`；详见
 `.trellis/tasks/11-13-production-rollout-key-rotation/research/cloudflare-turn-verification.md`。
 把 `TOKIMEKI_TURN_PROVIDER` 改为 `cloudflare` 后重新部署即可重新启用。
@@ -326,9 +331,19 @@ export TOKIMEKI_RELAY_URL=wss://relay.tokiapi.app
 
 ```bash
 curl -sS https://relay.tokiapi.app/healthz
+# {"ok":true,"service":"tokimeki-relay","protocolVersion":1}
+
+# 认证的运维探针：只接受 root master，返回 TURN 状态（不含 token/凭据）。
+curl -sS -H "X-Tokimeki-Master: $TOKIMEKI_MASTER_TOKEN" \
+  https://relay.tokiapi.app/auth/whoami
 # {"ok":true,"service":"tokimeki-relay","protocolVersion":1,
-#  "turnProvider":"coturn","turnConfigured":true}
+#  "authMode":"master","turn":{"provider":"coturn","configured":true}}
 ```
+
+`/healthz` 是公开的最小探活，不包含 TURN/JWT/namespace 详情；外部监控只应检查
+HTTP 200。`/auth/whoami` 对缺失/错误的 master 返回 401，非 GET 返回 405，响应为
+`no-store`，且不包含 token、TURN 凭据、secret 或 ICE URL。上面的生产示例仅适用于
+部署本源码之后；当前线上版本（`1104916c`）仍返回旧的 healthz 字段。
 
 **当前部署状态（2026-11-16）**：
 
@@ -412,7 +427,9 @@ TURN provider 由 Worker 选择，客户端从 `welcome` / `ice` 获取 `iceServ
 匹配并删除所有变体（例如 `Tokimeki_Master_Token`）；POSIX 只删除规范大写名，保留
 用户自己的小写变量。`TOKIMEKI_MASTER_TOKEN` 与 `TOKIMEKI_SESSION_TOKEN` 必须不同。
 
-`tokimeki doctor` 会检查 PTY、配置与 `/healthz` 连通性；缺失必需环境变量时 CLI 会在启动
+`tokimeki doctor` 会检查 PTY、配置与 `/healthz` 连通性；配置了
+`TOKIMEKI_MASTER_TOKEN` 时还会探测 `/auth/whoami`（旧 relay 无该端点时只警告，
+不判失败，也不打印 token）。缺失必需环境变量时 CLI 会在启动
 PTY 前给出可操作错误。TLS 代理场景请确认 `TOKIMEKI_RELAY_URL` 使用 `wss://`/`https://`；
 本机回环测试可用 `ws://`/`http://`。
 

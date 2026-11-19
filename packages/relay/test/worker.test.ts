@@ -12,22 +12,78 @@ import {
 } from "./helpers";
 
 describe("relay worker", () => {
-  it("reports health without secrets", async () => {
+  it("reports minimal health without secrets", async () => {
     const response = await SELF.fetch("https://relay.test/healthz");
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
     const body = await response.json<Record<string, unknown>>();
-    expect(body).toMatchObject({
+    // Public healthz must not expose TURN/JWT/namespace details.
+    expect(body).toEqual({
       ok: true,
       service: "tokimeki-relay",
       protocolVersion: 1,
-      turnProvider: "coturn",
-      turnConfigured: true,
     });
     const text = JSON.stringify(body);
     expect(text).not.toContain(MASTER_TOKEN);
+    expect(text).not.toContain(SESSION_TOKEN);
     expect(text).not.toContain("test-coturn-secret");
     expect(text).not.toContain("test-turn-api-token");
+  });
+
+  it("reports authenticated ops details from /auth/whoami", async () => {
+    const response = await SELF.fetch("https://relay.test/auth/whoami", {
+      headers: { "x-tokimeki-master": MASTER_TOKEN },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.json<Record<string, unknown>>();
+    expect(body).toEqual({
+      ok: true,
+      service: "tokimeki-relay",
+      protocolVersion: 1,
+      authMode: "master",
+      turn: { provider: "coturn", configured: true },
+    });
+    const text = JSON.stringify(body);
+    expect(text).not.toContain(MASTER_TOKEN);
+    expect(text).not.toContain(SESSION_TOKEN);
+    expect(text).not.toContain("test-coturn-secret");
+    expect(text).not.toContain("test-turn-api-token");
+    expect(text).not.toContain("turn:coturn.test.invalid");
+  });
+
+  it("rejects missing and wrong master tokens on /auth/whoami", async () => {
+    const cases: Array<Record<string, string>> = [
+      {},
+      { "x-tokimeki-master": "wrong-master-token" },
+      { "x-tokimeki-master": "" },
+    ];
+    for (const headers of cases) {
+      const response = await SELF.fetch("https://relay.test/auth/whoami", { headers });
+      expect(response.status).toBe(401);
+      const body = await response.json<Record<string, unknown>>();
+      expect(body).toMatchObject({ ok: false, error: "unauthorized" });
+    }
+  });
+
+  it("fails closed on /auth/whoami when no master token is configured", async () => {
+    const worker = (await import("../src/index")).default;
+    const response = await worker.fetch(
+      new Request("https://relay.test/auth/whoami", {
+        headers: { "x-tokimeki-master": "any-token" },
+      }),
+      { ...env, TOKIMEKI_MASTER_TOKEN: undefined },
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects non-GET /auth/whoami requests", async () => {
+    const response = await SELF.fetch("https://relay.test/auth/whoami", {
+      method: "POST",
+      headers: { "x-tokimeki-master": MASTER_TOKEN },
+    });
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("GET");
   });
 
   it("rejects non-websocket requests to the session route", async () => {

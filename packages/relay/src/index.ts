@@ -2,7 +2,7 @@ import { isValidSessionId, PROTOCOL_VERSION } from "@limccn/tokimeki-protocol";
 
 import { isMasterTokenValid } from "./auth.js";
 import type { RelayEnv } from "./env.js";
-import { createLogger } from "./logging.js";
+import { createLogger, type Logger } from "./logging.js";
 import { describeTurn } from "./turn.js";
 
 export { SessionDurableObject } from "./session-do.js";
@@ -20,15 +20,41 @@ function jsonResponse(status: number, body: unknown, extraHeaders?: HeadersInit)
   });
 }
 
-function healthPayload(env: RelayEnv): Record<string, unknown> {
-  const turn = describeTurn(env);
+/**
+ * Public liveness probe. Operational details such as TURN configuration live
+ * behind the authenticated `/auth/whoami` endpoint instead.
+ */
+function healthPayload(): Record<string, unknown> {
   return {
     ok: true,
     service: SERVICE_NAME,
     protocolVersion: PROTOCOL_VERSION,
-    turnProvider: turn.provider,
-    turnConfigured: turn.configured,
   };
+}
+
+/**
+ * Authenticated operational probe (v1: root master only).
+ *
+ * Opaque session tokens cannot be verified on their own, so they are not
+ * accepted here; Host/Session JWT support belongs to the v1.2 rewrite.
+ */
+async function whoamiResponse(request: Request, env: RelayEnv, logger: Logger): Promise<Response> {
+  const presentedMaster = request.headers.get("x-tokimeki-master");
+  const valid = await isMasterTokenValid(presentedMaster, env.TOKIMEKI_MASTER_TOKEN);
+  if (!valid) {
+    logger.warn("whoami_auth_failed", {
+      hasToken: presentedMaster !== null && presentedMaster.length > 0,
+    });
+    return jsonResponse(401, { ok: false, error: "unauthorized" });
+  }
+  const turn = describeTurn(env);
+  return jsonResponse(200, {
+    ok: true,
+    service: SERVICE_NAME,
+    protocolVersion: PROTOCOL_VERSION,
+    authMode: "master",
+    turn: { provider: turn.provider, configured: turn.configured },
+  });
 }
 
 function parseSessionPath(pathname: string): string | null {
@@ -64,7 +90,20 @@ export default {
           },
         );
       }
-      return jsonResponse(200, healthPayload(env));
+      return jsonResponse(200, healthPayload());
+    }
+
+    if (url.pathname === "/auth/whoami") {
+      if (request.method !== "GET") {
+        return jsonResponse(
+          405,
+          { ok: false, error: "method_not_allowed" },
+          {
+            allow: "GET",
+          },
+        );
+      }
+      return whoamiResponse(request, env, logger);
     }
 
     const isSessionPath = url.pathname.startsWith("/ws/");

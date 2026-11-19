@@ -52,7 +52,10 @@ assets/              README icon
 
 ## Relay / SessionDO notes
 
-- `packages/relay/src/index.ts`: `/healthz`; `/ws/<session>`; mandatory
+- `packages/relay/src/index.ts`: public `/healthz` returns only
+  `{ok, service, protocolVersion}`; authenticated `GET /auth/whoami`
+  (root master only, v1) returns `authMode` and TURN provider/configured with
+  no-store and no secrets; `/ws/<session>` requires a non-empty
   `x-tokimeki-session`; optional `x-tokimeki-master` upgrades the role to
   host; constant-time comparisons; master token equal to session token is
   rejected; master header removed before forwarding to the DO.
@@ -66,7 +69,9 @@ assets/              README icon
   capped by `TOKIMEKI_MAX_LISTENERS` (default 8) on top of `maxClients`, receive
   relay `SNAPSHOT_TO` only, and are excluded from `OUTPUT`, ACK/unacked bytes,
   pause/resume, slow-consumer, resize, and P2P. INPUT/resize/resync/ack/signal/
-  transport from a listener returns `invalid_role`.
+  transport/ice-refresh from a listener returns `invalid_role`. Listeners never
+  receive TURN credentials: their `welcome` is STUN-only (`iceProvider:"stun"`,
+  `iceExpiresAt: null`).
 - Flow control: ACK-driven `unackedBytes` high water 1 MiB, low water 256 KiB,
   hard limit 8 MiB, ACK ring 256; `pause`/`resume` control messages; slow
   consumers close with code 4000. Listeners never enter this accounting.
@@ -79,7 +84,9 @@ assets/              README icon
 - TURN: `TOKIMEKI_TURN_PROVIDER=auto|coturn|cloudflare|none`; coturn REST
   (HMAC) preferred, then static TURN, then Cloudflare Realtime TURN, then
   STUN-only. The CLI (libjuice) uses TURN UDP; include a
-  `turn:...?transport=udp` URL.
+  `turn:...?transport=udp` URL. Credential TTL defaults to 900s (15 min);
+  `TOKIMEKI_COTURN_TTL_SECONDS` / `TOKIMEKI_TURN_TTL_SECONDS` override it and
+  Cloudflare still clamps to 172800s.
 
 ## CLI notes
 

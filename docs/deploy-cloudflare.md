@@ -76,6 +76,11 @@ set with `wrangler secret put` (or the Deploy Button prompt).
 |---|---|---|---|
 | `TOKIMEKI_MASTER_TOKEN` | secret | yes | Host authentication. Unset/blank rejects all hosts (fail-closed). Never give it to viewers. |
 
+`GET /healthz` is public and intentionally minimal. `GET /auth/whoami` is the
+authenticated operations probe: it accepts only the root master token in
+`X-Tokimeki-Master` and returns the auth mode plus TURN provider/configured
+state. It never returns tokens, TURN credentials, secrets, or ICE URLs.
+
 ### Sessions
 
 | Name | Kind | Default | Meaning |
@@ -94,13 +99,23 @@ set with `wrangler secret put` (or the Deploy Button prompt).
 | `TOKIMEKI_ICE_TRANSPORT_POLICY` | var | `all` | Advertised policy: `all` or `relay` |
 | `TOKIMEKI_COTURN_URLS` | var | — | JSON array (or comma-separated) of coturn `turn:`/`turns:` URLs |
 | `TOKIMEKI_COTURN_SECRET` | secret | — | coturn REST shared secret |
-| `TOKIMEKI_COTURN_TTL_SECONDS` | var | `86400` | coturn credential TTL |
+| `TOKIMEKI_COTURN_TTL_SECONDS` | var | `900` | coturn credential TTL (seconds) |
 | `TOKIMEKI_TURN_URLS` | var | — | Static TURN URLs (fallback below coturn REST) |
 | `TOKIMEKI_TURN_USERNAME` | var | — | Static TURN username |
 | `TOKIMEKI_TURN_CREDENTIAL` | secret | — | Static TURN credential |
 | `TOKIMEKI_TURN_KEY_ID` | var | — | Cloudflare Realtime TURN key ID |
 | `TOKIMEKI_TURN_API_TOKEN` | secret | — | Cloudflare Realtime TURN API token |
-| `TOKIMEKI_TURN_TTL_SECONDS` | var | `86400` | Cloudflare credential TTL (Cloudflare caps at 172800) |
+| `TOKIMEKI_TURN_TTL_SECONDS` | var | `900` | Cloudflare credential TTL (Cloudflare caps at 172800) |
+
+TURN credentials default to a 15-minute lifetime; `600`–`3600` seconds is the
+recommended range. The relay cannot meter TURN bytes (media does not traverse
+it), so short-lived credentials limit the blast radius of a leaked session
+token. Deployments that need longer-lived credentials must set the matching
+TTL var explicitly; Cloudflare still clamps to 172800 seconds.
+
+Listeners are read-only snapshot-only clients and never receive TURN
+credentials: their `welcome` is STUN-only (`iceProvider: "stun"`), and an
+`ice-refresh` from a listener returns `invalid_role`.
 
 Provider selection with `auto`:
 
@@ -166,17 +181,45 @@ unless you own the domain.
 
 ```bash
 curl -s https://<your-worker>.workers.dev/healthz
+# {"ok":true,"service":"tokimeki-relay","protocolVersion":1}
+
+# Send the master token from your secret store; never commit a real value.
+curl -s -H "X-Tokimeki-Master: $TOKIMEKI_MASTER_TOKEN" \
+  https://<your-worker>.workers.dev/auth/whoami
+# {"ok":true,"service":"tokimeki-relay","protocolVersion":1,"authMode":"master",
+#  "turn":{"provider":"stun","configured":false}}
 ```
 
-Expected for a fresh STUN-only deploy:
+`/healthz` is public and minimal by design (no TURN/JWT/namespace details).
+`/auth/whoami` requires the root master token, returns `401` without a valid
+one, `405` for non-GET requests, and sets `no-store`. Its response never
+contains the token, TURN credentials, secrets, or ICE URLs. After configuring
+TURN, `turn.provider` becomes `coturn`, `static`, or `cloudflare` and
+`turn.configured` becomes `true`; if it stays `stun`, a required var or secret
+is missing.
 
-```json
-{"ok":true,"service":"tokimeki-relay","protocolVersion":1,"turnProvider":"stun","turnConfigured":false}
-```
+External monitors should check `/healthz` for HTTP 200 only, or use
+`/auth/whoami` with the master token for TURN diagnostics.
 
-After configuring TURN, `turnProvider` becomes `coturn`, `static`, or
-`cloudflare` and `turnConfigured` becomes `true`. If `turnProvider` stays
-`stun` after you configure TURN, a required var or secret is missing.
+## Edge rate limiting (recommended)
+
+The Worker implements no per-IP throttling. Put Cloudflare Rate Limiting / WAF
+rules in front of the Worker for the WebSocket upgrade path:
+
+- Limit `GET /ws/*` upgrades per client IP (for example 30 per minute).
+- Cap concurrent pending connections per IP (for example 10). The relay also
+  returns HTTP 429 once a session's OPEN sockets reach
+  `TOKIMEKI_MAX_CLIENTS_PER_SESSION * 2`.
+- Watch failure rates and block or challenge anomalous IPs; alert on spikes in
+  session creation or TURN credential issuance.
+- Rules apply to new upgrades only; established sessions are not interrupted.
+- Do not echo thresholds from the Worker or put them in error bodies. Rate
+  limit responses belong to the edge (typically HTTP 429 with a generic body).
+
+The available Cloudflare products and limits depend on the account plan, so
+this repository does not encode them in `wrangler.jsonc`. Configure them in the
+dashboard or with the Cloudflare API after deployment. Self-hosted
+alternatives should put an equivalent per-IP limiter in front of the relay.
 
 ## Updates and rollback
 

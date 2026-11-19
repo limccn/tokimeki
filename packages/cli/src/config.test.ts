@@ -19,6 +19,7 @@ import {
   MIN_SCROLLBACK_LINES,
   normalizeRelayBaseUrl,
   relayHealthUrl,
+  relayWhoamiUrl,
   sanitizeSessionId,
 } from "./config.js";
 
@@ -81,6 +82,13 @@ describe("relay URL helpers", () => {
   it("derives the health endpoint", () => {
     expect(relayHealthUrl("wss://relay.example/base")).toBe("https://relay.example/base/healthz");
     expect(relayHealthUrl("ws://localhost:8787")).toBe("http://localhost:8787/healthz");
+  });
+
+  it("derives the authenticated whoami endpoint", () => {
+    expect(relayWhoamiUrl("wss://relay.example/base")).toBe(
+      "https://relay.example/base/auth/whoami",
+    );
+    expect(relayWhoamiUrl("ws://localhost:8787")).toBe("http://localhost:8787/auth/whoami");
   });
 
   it("sanitizes arbitrary hostnames and paths into session IDs", () => {
@@ -446,6 +454,7 @@ describe("loadDoctorConfig", () => {
     expect(config.relayUrl).toBeNull();
     expect(config.session).toBeNull();
     expect(config.hasMasterToken).toBe(false);
+    expect(config.masterToken).toBeNull();
     expect(config.hasSessionToken).toBe(false);
   });
 
@@ -459,6 +468,16 @@ describe("loadDoctorConfig", () => {
     expect(config.session).toBe("sess-1");
     expect(config.hasSessionToken).toBe(true);
     expect(config.secrets).toContain("session-token-9876");
+  });
+
+  it("exposes the master token only for the whoami probe", () => {
+    const config = loadDoctorConfig({
+      TOKIMEKI_RELAY_URL: "https://relay.example",
+      TOKIMEKI_MASTER_TOKEN: "master-token-1234",
+    });
+    expect(config.hasMasterToken).toBe(true);
+    expect(config.masterToken).toBe("master-token-1234");
+    expect(config.secrets).toContain("master-token-1234");
   });
 
   it("warns when the master and session tokens are identical", () => {

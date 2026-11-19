@@ -238,7 +238,10 @@ TOKIMEKI_MASTER_TOKEN=<relay-master-token> \
 ```
 
 `doctor` checks PTY spawn support, relay `/healthz`, and host authentication
-configuration. It prints actionable warnings for missing/conflicting values.
+configuration. When `TOKIMEKI_MASTER_TOKEN` is set it also probes the
+authenticated `/auth/whoami` endpoint for TURN/auth diagnostics; older relays
+without it produce a warning, not a failure. It prints actionable warnings for
+missing/conflicting values.
 
 ## Exit codes
 
