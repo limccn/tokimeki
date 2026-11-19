@@ -106,7 +106,10 @@ wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/
 状态（2026-11-19）：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与
 **五个**子任务已创建。
 
-- **E `11-19-v1-2-cli-tokiapi-host-jwt`**：当前权威切片，planning，未启动实现。
+- **E `11-19-v1-2-cli-tokiapi-host-jwt`**：当前权威切片，代码已实现（relay
+  Host JWT 最小验签 + CLI `TOKIMEKI_TOKEN`/只读 config.json），单测与 Worker
+  集成测试通过；待合并与生产 preflight，真实 TokiAPI↔relay live e2e 仍
+  **pending**（需已部署 JWKS 的 relay 与真实 Host JWT）。
   TokiAPI Host JWT/JWKS 已落地；E 负责 CLI + relay 最小 Host JWT 验签。
 - **A–D**（namespace-auth / cli-ux / web-ui / passcode）：**in_progress**；
   PRD/design/implement 已按 E 的 Host JWT 模型重写，代码尚未开始。
@@ -114,7 +117,7 @@ wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/
   invite v2/offline fallback；C=Session JWT/Web viewer；D=可选 passcode。
 - TokiAPI Session JWT、session 创建、invite v2、Web viewer、passcode 仍需落地；
   A–D 已恢复规划/实现准备。v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
-- **2026-11-19 审查结论**：E 实现前必须确认 TokiAPI 5 位 namespace 唯一性、
+- **2026-11-19 审查结论**：E 合并/部署前必须确认 TokiAPI 5 位 namespace 唯一性、
   生产 `TOKIMEKI_NAMESPACE_TOKENS` 轮换/分发 preflight，并更新过期的
   `docs/relay-exposure-policy.md`；A–D 已补充 `looksLikeJwt`、legacy NULL、
   token 类型判定、Web `web` 校验/TURN 剥离、passcode secret 清单等安全契约。
