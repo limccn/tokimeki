@@ -5,13 +5,15 @@
 > 相关设计：`.trellis/tasks/11-18-relay-exposure-policy`（决策与调研）、
 > v1.2 JWT/JWKS（namespace 模型）、`docs/multi-namespace-design.md`（规划）。
 >
-> 已部分实现（2026-11-19，`11-19-relay-exposure-hardening` 与
-> `11-19-relay-namespace-tokens` 分支；未提交、未部署）：listener TURN 门禁、
-> 最小化 `/healthz` + 认证 `/auth/whoami`（v1 仅 root master）、TURN 凭据
-> 默认 TTL 900s、边缘 per-IP 限速文档化、静态 namespace token
-> （`TOKIMEKI_NAMESPACE_TOKENS` + CLI `TOKIMEKI_NAMESPACE_TOKEN`/
-> `TOKIMEKI_NAMESPACE`，点号 `<namespace>.<slug>` 路由）。JWT/JWKS、配额与
-> 绝对/空闲 TTL 仍未实现。
+> 已部分实现（2026-11-19，`11-19-relay-exposure-hardening`、
+> `11-19-relay-namespace-tokens` 与 `11-19-relay-quotas-ttl` 分支；未提交、
+> 未部署）：listener TURN 门禁、最小化 `/healthz` + 认证 `/auth/whoami`
+> （v1 仅 root master）、TURN 凭据默认 TTL 900s、边缘 per-IP 限速文档化、
+> 静态 namespace token（`TOKIMEKI_NAMESPACE_TOKENS` + CLI
+> `TOKIMEKI_NAMESPACE_TOKEN`/`TOKIMEKI_NAMESPACE`，点号
+> `<namespace>.<slug>` 路由）、per-session 绝对/空闲 TTL 与字节/消息速率
+> 硬上限（见 §8.5）。JWT/JWKS、JWT `features`/`limits` 读取、付费/白名单
+> 以及 per-namespace 日流量/签发次数聚合仍未实现。
 >
 > 术语：**namespace** 是隔离、配额与会话前缀的作用域单位。hosted 中它对应
 > TokiAPI 用户/账户，OSS 中对应静态 namespace token；v1.2 JWT claim 已统一为
@@ -256,6 +258,29 @@ TURN（coturn REST / static / Cloudflare）凭据的签发必须同时满足：
   管道，或由 TokiAPI 侧限流；namespace 级限制允许短时最终一致，per-session
   限制才是硬边界。
 - 不要求 relay 逐连接回调 TokiAPI；namespace 聚合数据可以异步上报。
+
+### 8.5 第一版实现（2026-11-19，per-session 硬上限 + 开关）
+
+第一版只做“硬上限 + 开关”，不做细粒度 throttle / PTY 暂停：
+
+| env | 默认 | 语义 |
+|---|---|---|
+| `TOKIMEKI_SESSION_MAX_TTL_SECONDS` | 86400（24h） | 从 `created_at` 起算的绝对寿命；`0` 关闭；上限 30 天。host 在线也不能续期。旧行在下一次 host `hello` 设置 `now + maxTtl`。 |
+| `TOKIMEKI_SESSION_IDLE_TTL_SECONDS` | 0（关闭） | 基于 `last_activity_at` 的空闲寿命；有控制/数据帧或心跳即刷新；alarm 触发时重读最新活动时间。 |
+| `TOKIMEKI_SESSION_MAX_BYTES` | 0（关闭） | session 生命周期内 relay 转发的终端字节：host `OUTPUT`/`SNAPSHOT_TO`、viewer `INPUT`，每帧计一次，不按 viewer 放大。 |
+| `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND` | 0（关闭） | 活跃连接入站 WebSocket 消息的 1 秒滑动窗口；pending/未认证 socket 不参与。 |
+
+- TTL 到期：复用 `error{code:"host_exited"}` + 关闭码 4004，关闭所有连接后
+  `deleteAll()`；alarm 优先级为绝对 TTL → 空闲 TTL → host 离线 TTL。
+- 配额超限：复用 `error{code:"session_full"}` + 关闭码 4002，关闭整个 session
+  并删除数据；不暂停共享 PTY、不静默丢帧。**不新增 wire error code**。
+- 字节计数每累计 1 MiB 落盘；DO 休眠/驱逐可能丢失最后一次落盘后的增量
+  （≤1 MiB），因此是近似硬上限。消息窗口同样随驱逐重置。P2P/TUN 数据不经过
+  relay，不计入字节上限。
+- 旧行兼容：`absolute_deadline` / `relay_bytes` 为 additive 列，缺列时读取回退
+  为 `NULL`/`0`；关闭 env 即回到 v1.1 行为，无数据迁移。
+- 本版不读取 JWT `features`/`limits`，也不做 per-namespace 日流量/签发次数
+  精确聚合；这些仍是后续 counter DO/Analytics 任务。
 
 ## 9. JWT 配置开关（预留，TokiAPI 管理）
 

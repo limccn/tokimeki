@@ -90,6 +90,14 @@ assets/              README icon
   hard limit 8 MiB, ACK ring 256; `pause`/`resume` control messages; slow
   consumers close with code 4000. Listeners never enter this accounting.
   Resize is throttled (250 ms trailing) and resync is throttled (500 ms).
+- Session limits: `TOKIMEKI_SESSION_MAX_TTL_SECONDS` (default 86400, `0` off)
+  is an absolute lifetime from creation that a host reconnect cannot extend;
+  `TOKIMEKI_SESSION_IDLE_TTL_SECONDS`, `TOKIMEKI_SESSION_MAX_BYTES`, and
+  `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND` default 0 (off). TTL expiry closes
+  with `host_exited`/4004, quota breaches with `session_full`/4002 — no new
+  error codes, and the shared PTY is never paused. Byte accounting covers
+  relay-delivered `OUTPUT`/`SNAPSHOT_TO`/`INPUT` frames only (once per frame)
+  and is approximate (1 MiB flush window); P2P/TUN bytes are not counted.
 - Snapshots: host sends `SNAPSHOT_TO` at `seq=N`, then resumes `>N`; viewers
   clear and apply the snapshot; P2P switch snapshots also use relay
   `SNAPSHOT_TO` in v1.

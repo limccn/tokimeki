@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 
 export const MASTER_TOKEN = "test-master-token-abc";
 export const SESSION_TOKEN = "test-session-token-xyz";
@@ -244,6 +244,28 @@ export async function connectDirect(
     throw new Error(`expected websocket 101, got ${response.status}`);
   }
   return wrapSocket(response.webSocket);
+}
+
+/**
+ * Test-only: override bindings on the live SessionDO instance.
+ *
+ * `cloudflare:test`'s `env` mutations are not visible to a Durable Object, and
+ * each DO instance owns its own runtime binding object, so quota/TTL tests
+ * patch the instance directly. Use a session id unique to the test: overrides
+ * never leak to another DO.
+ */
+export async function setDoEnv(
+  sessionId: string,
+  overrides: Record<string, string | undefined>,
+): Promise<void> {
+  const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+  await runInDurableObject(stub, (instance) => {
+    // Test-only cast: the base class holds the runtime binding object.
+    const target = instance as unknown as { env: Record<string, unknown> };
+    for (const [key, value] of Object.entries(overrides)) {
+      target.env[key] = value;
+    }
+  });
 }
 
 export function helloFor(

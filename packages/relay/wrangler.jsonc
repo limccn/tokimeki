@@ -53,6 +53,10 @@
   //   TOKIMEKI_MASTER_TOKEN            (secret, required) host authentication; unset rejects all hosts
   //   TOKIMEKI_NAMESPACE_TOKENS        (secret) static namespace host tokens, JSON { "<namespace>": "<token>" }
   //   TOKIMEKI_SESSION_TTL_SECONDS     default 86400 host-offline grace
+  //   TOKIMEKI_SESSION_MAX_TTL_SECONDS default 86400 absolute lifetime from creation; 0 disables
+  //   TOKIMEKI_SESSION_IDLE_TTL_SECONDS default 0 (off) inactivity lifetime from last activity
+  //   TOKIMEKI_SESSION_MAX_BYTES       default 0 (off) relay bytes per session; approximate (1 MiB flush)
+  //   TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND default 0 (off) inbound WS messages per active session
   //   TOKIMEKI_MAX_CLIENTS_PER_SESSION default 8
   //   TOKIMEKI_MAX_LISTENERS           default 8 read-only snapshot-only clients
   //   TOKIMEKI_ICE_TRANSPORT_POLICY    all | relay (default all)

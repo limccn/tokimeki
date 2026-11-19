@@ -13,7 +13,14 @@
     "moduleResolution": "Bundler",
     "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers", "node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "test/**/*.d.ts", "vitest.config.ts"],
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "test/**/*.d.ts",
+    "vitest.config.ts",
+    "vitest.quotas.config.ts",
+    "vitest.shared.ts"
+  ],
   "exclude": ["dist", "node_modules"],
   "references": [{ "path": "../protocol" }]
 }

@@ -78,6 +78,33 @@ fail-closed：master token 未配置时，所有 host 认证都会被拒绝（�
   `iceProvider="stun"`；listener 的 `ice-refresh` 返回 `invalid_role`。host/viewer
   的 TURN 签发行为不变。
 
+会话寿命与硬配额（2026-11-19，可分别用 env 关闭）：
+
+- `TOKIMEKI_SESSION_MAX_TTL_SECONDS`（默认 86400，`0` 关闭，上限 30 天）：从
+  `created_at` 起算的绝对寿命。host 在线也不会延长或续期；到期发送
+  `error{code:"host_exited"}` 并以关闭码 4004 关闭所有连接，然后删除该 DO 的
+  session 数据。旧行（`absolute_deadline` 为 NULL）在下一次 host `hello` 时设置
+  `now + maxTtl`，之后不再延长。长于 24h 的会话会被默认值关闭，需要更长寿命时
+  显式调大或设 `0`。
+- `TOKIMEKI_SESSION_IDLE_TTL_SECONDS`（默认 `0`/关闭）：基于 `last_activity_at`
+  的空闲寿命；任何控制帧/二进制帧/心跳都会刷新。alarm 触发时会重新读取最新
+  `last_activity_at`，未到期则重排。host 在线期间同样生效。
+- `TOKIMEKI_SESSION_MAX_BYTES`（默认 `0`/关闭）：session 生命周期内 relay 接受并
+  转发的终端字节总数，按帧计一次（host `OUTPUT`/`SNAPSHOT_TO`、viewer `INPUT`），
+  不因多个 viewer 重复放大。计数每累计 1 MiB 落盘；DO 休眠/驱逐可能丢失最后一次
+  落盘之后的增量（≤1 MiB），因此是**近似硬上限**。P2P/TUN 数据不经过 relay，
+  不计入。
+- `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND`（默认 `0`/关闭）：活跃连接入站
+  WebSocket 消息的 1 秒滑动窗口上限；pending/未认证 socket 不参与，避免匿名连接
+  关闭他人会话。窗口随 DO 驱逐重置，用于防突发而非精确计费。
+- 超限行为：复用 `error{code:"session_full"}` + 关闭码 4002 关闭整个 session 并
+  删除数据；TTL 到期复用 `host_exited`/4004。**不新增 wire error code**，不暂停
+  共享 PTY，也不在丢帧后继续服务。
+- 旧行兼容：新列为 additive（`absolute_deadline`、`relay_bytes`），旧表缺列时读取
+  回退为 `NULL`/`0`；关闭对应 env 即回到 v1.1 行为。
+- JWT `features`/`limits` 仍是预留契约：relay 目前不读取，也没有 per-namespace
+  日流量/签发次数的精确聚合。
+
 ## 4. TURN / STUN（coturn 优先）
 
 选路优先级：

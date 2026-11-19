@@ -46,6 +46,11 @@ const ALLOWED_FIELDS = new Set([
   "mode",
   "hasToken",
   "durationMs",
+  // Quota diagnostics: the breached limit kind and numeric boundary. Never a
+  // payload, token, or credential.
+  "kind",
+  "limit",
+  "observed",
 ]);
 
 function parseLogLevel(raw: string | undefined): LogLevel {
