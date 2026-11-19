@@ -172,6 +172,7 @@ stdin.on("data", (data) => {
     write("\r\nCURSOR_MOVED=28,90\r\n");
     write(`${ESC}[28;90H`);
   }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI mouse escape sequence from the PTY
   for (const match of text.matchAll(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g)) {
     write(`MOUSE=${match[2]},${match[3]},${match[4]}\r\n`);
   }
