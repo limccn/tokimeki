@@ -6,6 +6,55 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Static namespace host tokens for OSS multi-namespace hosting:
+  `TOKIMEKI_NAMESPACE_TOKENS` maps a namespace to a host token, namespace
+  sessions use `<namespace>.<slug>`, and the CLI accepts
+  `TOKIMEKI_NAMESPACE_TOKEN`/`TOKIMEKI_NAMESPACE`. Includes an additive
+  `session_meta.namespace_id` migration; unset preserves master-only behavior.
+- Authenticated `GET /auth/whoami` (root master in v1) exposes TURN
+  provider/configured diagnostics while the public `/healthz` stays minimal.
+- Opt-in session limits: absolute/idle TTL and per-session byte/message hard
+  caps via `TOKIMEKI_SESSION_MAX_TTL_SECONDS`,
+  `TOKIMEKI_SESSION_IDLE_TTL_SECONDS`, `TOKIMEKI_SESSION_MAX_BYTES`, and
+  `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND`.
+
+### Changed
+
+- Renamed the private relay workspace package to `@limccn/tokimeki-relay` for
+  npm scope consistency. Relay deployment and the public npm packages are
+  unchanged.
+- Replaced the repository banner artwork with the new 1024×512 illustration
+  and removed the unused `banner-paint.png`, `icon-1254.png`, and `icon.svg`
+  sources. Both READMEs continue to use `assets/icon.png`.
+- Listener connections are STUN-only and can no longer obtain TURN
+  credentials; listener `ice-refresh` returns `invalid_role`.
+- Public `/healthz` now returns only `{ok, service, protocolVersion}`; use the
+  authenticated `/auth/whoami` for TURN details.
+- TURN credential default TTL is 15 minutes (900s); explicit env overrides and
+  the Cloudflare 172800s cap are unchanged.
+- Session absolute TTL defaults to 24h; idle/byte/rate caps default off.
+
+### Fixed
+
+- Doctor sanitizes the relay-provided TURN provider string before printing and
+  treats a missing whoami endpoint on older relays as a warning.
+
+### Documentation
+
+- README (English and Chinese) now documents v1.1 configuration: read-only
+  listeners (`tokimeki attach --listen`, `TOKIMEKI_LISTENER_SNAPSHOT_MS`,
+  relay `TOKIMEKI_MAX_LISTENERS`), the opt-in P2P TUN profile
+  (`TOKIMEKI_TUNNEL`, `TOKIMEKI_TUNNEL_FEC`, `TOKIMEKI_TUNNEL_SECRET`), LAN
+  diagnostics and reserved routing variables, and automatic P2P behavior.
+- Added `docs/tunnel-reliability.md` (SR-ARQ vs SCTP trade-offs) and the v2.0
+  weak-network A/B validation plan. That validation is currently postponed.
+- Added `docs/relay-exposure-policy.md` (public surface, namespace gating, TURN
+  limits, and the master -> static namespace token -> JWT/TokiAPI route) and
+  updated CLI/protocol/deployment docs for `/auth/whoami`, the listener TURN
+  gate, the 900s TURN default, namespace tokens, and session limits.
+
 ## [0.1.2] - 2026-11-16
 
 ### Added

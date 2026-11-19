@@ -18,7 +18,8 @@ TypeScript/Node + npm workspaces：
   预留项在 v1 只返回 `not_implemented`，不实现行为。
 - Agent 协调只建 SQLite schema 与 `agent.*` 协议扩展点，不实现 runner。
 
-当前状态：**v1 实现完成（Phase 6）；v1.1 已立项并进入规划（2026-11-16）**。
+当前状态：**v1 实现完成（Phase 6）；v1.1 五个子任务已完成本地实现并归档，
+生产/跨机器验证待执行（2026-11-18）**。
 relay、PTY/TUI、共享控制、快照重连与 P2P/TURN/relay 回退已落地；本机 live e2e
 1–5 组场景通过（第 5 组为 host 1006 重连，见 `docs/deployment.md` §7.2）。生产
 Worker 已部署，2026-11-13 已完成本机 NAT ↔ 日本/美国 VPS 的跨机器 relay、直连
@@ -39,7 +40,8 @@ v1 基线历史限制（F0 已在 `b8c9ec4` 解决）：v1 本身不做 DataChan
 
 ## v1.1（独立任务，不阻塞 v1）
 
-状态（2026-11-16）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建。F0 已实现、
+状态（2026-11-18）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建并于
+2026-11-16 归档为 completed。F0 已实现、
 本地验证并归档（提交 `b8c9ec4`：typecheck/lint/276 tests/75 relay tests/build、
 P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公网 NAT/TURN 复测与
 生产部署尚未执行。F2 listener snapshot-only 已实现、提交（`147974f`）并归档；
@@ -86,13 +88,67 @@ mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0
   AEAD（先定密钥威胁模型）→ unreliable DataChannel ARQ → FEC（F1.1 已完成 XOR
   单丢包）→ LAN 选路 → peer fan-out（仅设计/实验开关）。
 
+## Relay 身份/namespace 路线（2026-11-19 确认）
+
+1. **master token 单用户**（现状）：一个全局 root，适合单管理员/break-glass。
+2. **静态 multi-namespace 多用户**（OSS 主方案）：`TOKIMEKI_NAMESPACE_TOKENS`
+   按 namespace 分发 host token，不要求 JWT/TokiAPI。
+3. **JWT 对接 TokiAPI 用户**（hosted）：relay 离线验签 Host/Session JWT，
+   读取 namespace/feature flags；v1.2 设计将重写。
+
+wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/<session>`
+斜杠路径。
+
+## v1.2（规划中，2026-11-18 立项；设计将重写）
+
+状态：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与四个子任务已创建，
+均为 planning，未启动实现。**2026-11-19 用户暂存 v1.2：设计将重写，当前 PRD/
+design/implement 仅作历史参考，不作为实现依据。** 等待 TokiAPI（cf-ai-gateway）
+前置修改（namespace 码签发、ES256/JWKS、session 创建、Web 代理）；恢复前不启动
+A/B/C/D。v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
+
+- **多 namespace**：namespace = TokiAPI 用户；TokiAPI 签发 **ES256 JWT** 并暴露 JWKS；
+  relay 缓存 JWKS、**离线验签**（不逐连接回调 TokiAPI）；Host JWT 证明
+  namespace/user/scope，Session JWT 证明 session 能力；`TOKIMEKI_MASTER_TOKEN`
+  保留为 root 回退（也可用 JWT 字符串，按 exp 失效）；**无 refresh**，
+  TTL 在签发时设置（默认 1 天，最长 90 天），过期即失效；无撤销列表，
+  紧急失效靠轮换签名密钥。网页端使用独立的 `web` scope；relay 仍按
+  `attach`/`listen` 决定 viewer/listener，TokiAPI Web 代理强制要求 `web`。
+  `TOKIMEKI_JWT_JWKS_URL` 未配置 = JWT 模式关闭；配置必须是 HTTPS JWKS URL，
+  格式/响应非法时 fail-closed。JWT 是 hosted/可选接入；OSS 小团队可用静态
+  namespace token（`TOKIMEKI_NAMESPACE_TOKENS`），不要求 TokiAPI。
+- **CLI/UX**：CLI 把 JWT 当**不透明字符串**（不解析、不刷新）；只读
+  `~/.tokimeki/config.json`（`TOKIMEKI_*` 键），环境变量优先，不创建/写回
+  任何 token 文件；host 调 TokiAPI 创建 session，使用返回的 `session`/
+  Session JWT/expiry；viewer config v2；doctor 通过 whoami 检查 claims。
+- **Web UI**：TokiAPI dashboard 申请 token 并代理 WebSocket；浏览器用 xterm.js
+  完整 viewer 控制（输入/resize/ACK/重连）；浏览器不接触 JWT；v1.2 仅 relay；
+  **不新增独立 web-client 包**，浏览器逻辑由 TokiAPI 实现。
+- **Passcode（可选）**：per-session passcode 作为第二因素；host 本地 PBKDF2
+  验证器，relay 用独立 header 验证并限速/锁定；passcode 不进入 JWT/invite/
+  URL/日志；Web UI 提示输入并由代理转发。
+- **TokiAPI 停机回退**：namespaceId 不再向 TokiAPI 获取；优先使用预置
+  `TOKIMEKI_SESSION` + `TOKIMEKI_SESSION_TOKEN`（跳过 TokiAPI），其次
+  `TOKIMEKI_OFFLINE_FALLBACK=opaque` 用 relay whoami 取 namespace + 本地 opaque
+  session token（Host JWT 认证），最后 master legacy；默认 `off` 不静默降级；
+  Web UI 在 TokiAPI 停机时不可用。
+- 子任务：
+  - A `.trellis/tasks/11-18-v1-2-namespace-auth` — JWT/JWKS 离线认证。
+  - B `.trellis/tasks/11-18-v1-2-cli-ux` — CLI/UX JWT 多 namespace 适配。
+  - C `.trellis/tasks/11-18-v1-2-web-ui` — TokiAPI JWT 签发与 Web viewer。
+  - D `.trellis/tasks/11-18-v1-2-passcode` — 可选 session passcode。
+- 边界：不引入 SQLite namespace 目录/introspection/per-viewer JWT/refresh token；
+  不独立发布 web-client 包；不做组织/团队模型、不做浏览器 P2P；
+  wire version 保持 v1。
+
 ## v2（独立任务）
 
-### v2.0 前置决策：弱网注入可靠传输 A/B 验证（规划中）
+### v2.0 前置决策：弱网注入可靠传输 A/B 验证（已押后）
 
 状态（2026-11-18）：规划任务 `11-18-v2-0-weaknet-ab-validation` 已创建，当前为
-planning，不启动实现。该验证是 v2.0 transport 选择的前置条件；在结论出来前，
-不把 TUN 应用层 ARQ/FEC 当作 v2.0 的既定实现。
+planning。用户已决定**押后（postponed）**，暂不启动，恢复时间待定。恢复后该
+验证仍是 v2.0 transport 选择的前置条件；在结论出来前，不把 TUN 应用层
+ARQ/FEC 当作 v2.0 的既定实现。
 
 - **目的**：在可控丢包/乱序/重复/抖动/限速环境下，比较：
   - A：v1 reliable/ordered DataChannel（SCTP 可靠 + 有序）；
