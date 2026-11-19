@@ -52,7 +52,11 @@ describe("runDoctor", () => {
         url: String(input),
         headers: (init?.headers ?? {}) as Record<string, string>,
       });
-      return jsonResponse({ ok: true, authMode: "master", turn: { provider: "coturn", configured: true } });
+      return jsonResponse({
+        ok: true,
+        authMode: "master",
+        turn: { provider: "coturn", configured: true },
+      });
     });
     const { stream, output } = fakeStdout();
 
@@ -184,7 +188,11 @@ describe("runDoctor", () => {
       if (String(input).endsWith("/healthz")) {
         return new Response("{}", { status: 200 });
       }
-      return jsonResponse({ ok: true, authMode: "master", turn: { provider: "\u001b[2Jevil", configured: true } });
+      return jsonResponse({
+        ok: true,
+        authMode: "master",
+        turn: { provider: "\u001b[2Jevil", configured: true },
+      });
     });
     const { stream, output } = fakeStdout();
 

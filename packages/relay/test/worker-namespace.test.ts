@@ -99,8 +99,7 @@ describe("namespace host authentication", () => {
     const response = await SELF.fetch("https://relay.test/ws/jwt-shape-namespace", {
       headers: {
         Upgrade: "websocket",
-        "x-tokimeki-token":
-          "eyJhbGciOiJFUzI1NiIsImtpZCI6ImtkMSJ9.eyJzdWIiOiJ1In0.AAAAAAAA",
+        "x-tokimeki-token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImtkMSJ9.eyJzdWIiOiJ1In0.AAAAAAAA",
         "x-tokimeki-session": SESSION_TOKEN,
       },
     });

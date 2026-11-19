@@ -6,9 +6,13 @@
  */
 
 import { ICE_PROVIDERS } from "@limccn/tokimeki-protocol";
-
-import { type DoctorConfig, HOST_NAMESPACE_PATTERN, relayHealthUrl, relayWhoamiUrl } from "../config.js";
-import { buildHostAuthHeaders } from "../config.js";
+import {
+  buildHostAuthHeaders,
+  type DoctorConfig,
+  HOST_NAMESPACE_PATTERN,
+  relayHealthUrl,
+  relayWhoamiUrl,
+} from "../config.js";
 import { createRedactor, formatError } from "../logger.js";
 
 export interface DoctorDeps {
@@ -56,8 +60,7 @@ function describeWhoami(
   }
   const turn = body.turn as { provider?: unknown } | undefined;
   const provider = knownIceProvider(turn?.provider);
-  const turnSuffix =
-    provider !== null ? `, TURN provider: ${provider}` : "";
+  const turnSuffix = provider !== null ? `, TURN provider: ${provider}` : "";
 
   if (authMode === "jwt") {
     const namespace =
@@ -67,7 +70,9 @@ function describeWhoami(
     const tokenUse = body.tokenUse === "host" || body.tokenUse === "session" ? body.tokenUse : null;
     const scopes = Array.isArray(body.scopes)
       ? body.scopes
-          .filter((scope): scope is string => typeof scope === "string" && /^[A-Za-z]{1,32}$/.test(scope))
+          .filter(
+            (scope): scope is string => typeof scope === "string" && /^[A-Za-z]{1,32}$/.test(scope),
+          )
           .join(",")
       : null;
     const expiresAt =
@@ -269,7 +274,9 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
               : "the relay may have namespace tokens enabled, which disables the fallback token; switch to TOKIMEKI_NAMESPACE + TOKIMEKI_TOKEN";
           warn(`relay whoami returned HTTP ${response.status} (${hint})`);
         } else {
-          warn(`relay whoami returned HTTP ${response.status} (older relay or invalid credential?)`);
+          warn(
+            `relay whoami returned HTTP ${response.status} (older relay or invalid credential?)`,
+          );
         }
       } catch (error) {
         warn(`relay whoami unreachable at ${whoamiUrl}: ${formatError(error)}`);

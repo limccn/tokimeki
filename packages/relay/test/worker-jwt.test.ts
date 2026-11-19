@@ -40,11 +40,10 @@ let key: TestKey;
 let jwksResponder: (() => { statusCode: number; data: string }) | null = null;
 
 beforeAll(async () => {
-  const pair = (await crypto.subtle.generateKey(
-    { name: "ECDSA", namedCurve: "P-256" },
-    true,
-    ["sign", "verify"],
-  )) as unknown as CryptoKeyPair;
+  const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+    "sign",
+    "verify",
+  ])) as unknown as CryptoKeyPair;
   const jwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey;
   key = {
     kid: "test-kid-1",
@@ -84,7 +83,11 @@ function signHostJwt(
 ): Promise<string> {
   const signingInput = `${encodeSegment(header)}.${encodeSegment(payload)}`;
   return crypto.subtle
-    .sign({ name: "ECDSA", hash: "SHA-256" }, key.privateKey, new TextEncoder().encode(signingInput))
+    .sign(
+      { name: "ECDSA", hash: "SHA-256" },
+      key.privateKey,
+      new TextEncoder().encode(signingInput),
+    )
     .then((signature) => `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`);
 }
 

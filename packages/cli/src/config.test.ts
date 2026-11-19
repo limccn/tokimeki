@@ -320,8 +320,7 @@ describe("token host configuration", () => {
     const config = loadHostConfig({
       env: namespaceEnv({
         TOKIMEKI_SESSION: "team-a.desk",
-        TOKIMEKI_TOKEN:
-          "eyJhbGciOiJFUzI1NiIsImtpZCI6ImtkMSJ9.eyJzdWIiOiJ1In0.AAAAAAAAAAAAAAAAAAAA",
+        TOKIMEKI_TOKEN: "eyJhbGciOiJFUzI1NiIsImtpZCI6ImtkMSJ9.eyJzdWIiOiJ1In0.AAAAAAAAAAAAAAAAAAAA",
       }),
     });
     expect(config.authMode).toBe("token");
@@ -351,21 +350,21 @@ describe("token host configuration", () => {
         TOKIMEKI_SESSION: "team-a.desk",
       }),
     });
-    expect(config.warnings.some((warning) => warning.includes("equals TOKIMEKI_MASTER_TOKEN"))).toBe(
-      true,
-    );
+    expect(
+      config.warnings.some((warning) => warning.includes("equals TOKIMEKI_MASTER_TOKEN")),
+    ).toBe(true);
   });
 
   it("rejects an oversized or whitespace-bearing token", () => {
     expect(() =>
       loadHostConfig({ env: namespaceEnv({ TOKIMEKI_TOKEN: "a".repeat(8193) }) }),
     ).toThrow(/at most 8192/);
-    expect(() =>
-      loadHostConfig({ env: namespaceEnv({ TOKIMEKI_TOKEN: "two tokens" }) }),
-    ).toThrow(/whitespace/);
-    expect(() =>
-      loadHostConfig({ env: namespaceEnv({ TOKIMEKI_TOKEN: "line\nbreak" }) }),
-    ).toThrow(/whitespace/);
+    expect(() => loadHostConfig({ env: namespaceEnv({ TOKIMEKI_TOKEN: "two tokens" }) })).toThrow(
+      /whitespace/,
+    );
+    expect(() => loadHostConfig({ env: namespaceEnv({ TOKIMEKI_TOKEN: "line\nbreak" }) })).toThrow(
+      /whitespace/,
+    );
   });
 
   it("requires a valid namespace name", () => {
@@ -698,9 +697,7 @@ describe("loadDoctorConfig", () => {
   });
 
   it("rejects the retired TOKIMEKI_NAMESPACE_TOKEN variable", () => {
-    expect(() =>
-      loadDoctorConfig({ TOKIMEKI_NAMESPACE_TOKEN: "old-token" }),
-    ).toThrow(/retired/);
+    expect(() => loadDoctorConfig({ TOKIMEKI_NAMESPACE_TOKEN: "old-token" })).toThrow(/retired/);
     expect(loadDoctorConfig({ TOKIMEKI_NAMESPACE_TOKEN: "" }).authMode).toBeNull();
   });
 });

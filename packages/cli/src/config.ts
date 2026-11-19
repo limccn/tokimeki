@@ -664,11 +664,7 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
     const name = authMode === "token" ? "TOKIMEKI_TOKEN" : "TOKIMEKI_MASTER_TOKEN";
     throw new ConfigError(`${name} and TOKIMEKI_SESSION_TOKEN must be different`);
   }
-  if (
-    token !== null &&
-    masterToken !== null &&
-    token === masterToken
-  ) {
+  if (token !== null && masterToken !== null && token === masterToken) {
     warnings.push(
       "TOKIMEKI_TOKEN equals TOKIMEKI_MASTER_TOKEN; a relay in fallback mode would treat the host as the single-owner credential",
     );
@@ -803,9 +799,7 @@ export function loadDoctorConfig(
     if (namespace === null) {
       warnings.push("TOKIMEKI_NAMESPACE and TOKIMEKI_TOKEN must be set together");
     } else if (session !== null && !isNamespaceScopedSession(session, namespace)) {
-      warnings.push(
-        `TOKIMEKI_SESSION must start with "${namespace}." when TOKIMEKI_TOKEN is set`,
-      );
+      warnings.push(`TOKIMEKI_SESSION must start with "${namespace}." when TOKIMEKI_TOKEN is set`);
     }
     if (typeof token === "string" && token.length > 0) {
       if (token.length > MAX_HOST_TOKEN_LENGTH) {
@@ -819,9 +813,7 @@ export function loadDoctorConfig(
     warnings.push("TOKIMEKI_NAMESPACE is set without TOKIMEKI_TOKEN; it will be ignored");
   }
   if (token !== undefined && sessionToken !== undefined && token === sessionToken) {
-    warnings.push(
-      "TOKIMEKI_TOKEN and TOKIMEKI_SESSION_TOKEN are identical; use different values",
-    );
+    warnings.push("TOKIMEKI_TOKEN and TOKIMEKI_SESSION_TOKEN are identical; use different values");
   }
   if (masterToken !== undefined && sessionToken !== undefined && masterToken === sessionToken) {
     warnings.push(

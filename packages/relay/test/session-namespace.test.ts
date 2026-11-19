@@ -2,13 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { sha256Hex } from "../src/crypto-utils.js";
-import {
-  connectWorker,
-  helloFor,
-  MASTER_TOKEN,
-  SESSION_TOKEN,
-  TEAM_A_TOKEN,
-} from "./helpers";
+import { connectWorker, helloFor, MASTER_TOKEN, SESSION_TOKEN, TEAM_A_TOKEN } from "./helpers";
 
 /**
  * Namespace-mode SessionDO interaction tests (namespace tokens bound, no JWT).

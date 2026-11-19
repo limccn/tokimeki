@@ -78,10 +78,9 @@ export function checkSecretFilePermissions(
  * naming the path (never the values). Keys must be `TOKIMEKI_*` and values
  * scalar; unknown keys are ignored.
  */
-export function readConfigFile(options: {
-  homeDir?: string;
-  platform?: NodeJS.Platform;
-} = {}): ConfigFileResult {
+export function readConfigFile(
+  options: { homeDir?: string; platform?: NodeJS.Platform } = {},
+): ConfigFileResult {
   const path = join(options.homeDir ?? homedir(), ".tokimeki", "config.json");
   const warnings: string[] = [];
   let raw: string;
@@ -290,9 +289,7 @@ export function resolveConfigEnv(
   return { env: merged, file: file.info, warnings };
 }
 
-function pickFirstNonEmpty(
-  ...values: Array<string | undefined>
-): string | null {
+function pickFirstNonEmpty(...values: Array<string | undefined>): string | null {
   for (const value of values) {
     if (typeof value === "string" && value.trim().length > 0) {
       return value;

@@ -30,7 +30,7 @@ import {
   buildInviteOverlayLines,
   formatViewerConfigJson,
 } from "../client-info.js";
-import { type HostConfig, buildHostAuthHeaders } from "../config.js";
+import { buildHostAuthHeaders, type HostConfig } from "../config.js";
 import { inviteKeyLabel } from "../invite.js";
 import { formatError, type Logger } from "../logger.js";
 import { TerminalMirror } from "../terminal/mirror.js";

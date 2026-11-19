@@ -1,4 +1,4 @@
-﻿import { chmodSync, mkdirSync, mkdtempSync, existsSync, rmSync, writeFileSync } from "node:fs";
+﻿import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, loadHostConfig } from "./config.js";
 import {
-  checkSecretFilePermissions,
   CONFIG_FILE_MAX_BYTES,
+  checkSecretFilePermissions,
   readConfigFile,
   resolveConfigEnv,
 } from "./config-file.js";
@@ -128,10 +128,13 @@ describe("resolveConfigEnv", () => {
       TOKIMEKI_RELAY_URL: "https://file.example",
       TOKIMEKI_SESSION: "file-session",
     });
-    const resolved = resolveConfigEnv({
-      TOKIMEKI_RELAY_URL: "https://env.example",
-      TOKIMEKI_MASTER_TOKEN: "master-token",
-    }, { homeDir: home, enabled: true });
+    const resolved = resolveConfigEnv(
+      {
+        TOKIMEKI_RELAY_URL: "https://env.example",
+        TOKIMEKI_MASTER_TOKEN: "master-token",
+      },
+      { homeDir: home, enabled: true },
+    );
     expect(resolved.env.TOKIMEKI_RELAY_URL).toBe("https://env.example");
     expect(resolved.env.TOKIMEKI_SESSION).toBe("file-session");
     expect(resolved.file.exists).toBe(true);
@@ -143,14 +146,19 @@ describe("resolveConfigEnv", () => {
       TOKIMEKI_TOKEN: "stale-file-token",
       TOKIMEKI_NAMESPACE: "file-namespace",
     });
-    const resolved = resolveConfigEnv({
-      TOKIMEKI_RELAY_URL: "https://relay.example",
-      TOKIMEKI_TOKEN: "explicit-env-token",
-    }, { homeDir: home, enabled: true });
-    expect(resolved.env.TOKIMEKI_TOKEN).toBe("explicit-env-token");
-    expect(resolved.warnings.some((warning) => warning.includes("TOKIMEKI_TOKEN from the config file is ignored"))).toBe(
-      true,
+    const resolved = resolveConfigEnv(
+      {
+        TOKIMEKI_RELAY_URL: "https://relay.example",
+        TOKIMEKI_TOKEN: "explicit-env-token",
+      },
+      { homeDir: home, enabled: true },
     );
+    expect(resolved.env.TOKIMEKI_TOKEN).toBe("explicit-env-token");
+    expect(
+      resolved.warnings.some((warning) =>
+        warning.includes("TOKIMEKI_TOKEN from the config file is ignored"),
+      ),
+    ).toBe(true);
     // Non-credential keys keep normal per-key precedence.
     expect(resolved.env.TOKIMEKI_NAMESPACE).toBe("file-namespace");
   });
@@ -219,7 +227,9 @@ describe("config file integration", () => {
       TOKIMEKI_NAMESPACE: "team-a",
       TOKIMEKI_SESSION: "team-a.desk",
     });
-    const config = loadHostConfig({ env: resolveConfigEnv({}, { homeDir: home, enabled: true }).env });
+    const config = loadHostConfig({
+      env: resolveConfigEnv({}, { homeDir: home, enabled: true }).env,
+    });
     expect(config.authMode).toBe("token");
     expect(config.hostToken).toBe("file-host-token");
   });

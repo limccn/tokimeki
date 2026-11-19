@@ -1173,5 +1173,4 @@ describe("SessionDurableObject", () => {
     named.close();
     plain.close();
   });
-
 });
