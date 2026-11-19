@@ -126,6 +126,30 @@ export const TransportsCapabilitySchema = z.looseObject({
     .optional(),
 });
 
+/**
+ * Session security capabilities (v1.2). `passcode: 1` means the peer supports
+ * the PBKDF2-SHA256 verifier in `hello.passcode` and the
+ * `X-Tokimeki-Passcode` viewer/listener header.
+ */
+export const SessionSecurityCapabilitySchema = z.looseObject({
+  passcode: z.number().int().positive().optional(),
+});
+
+/**
+ * Host-computed session passcode verifier. The plaintext passcode never
+ * travels; only the KDF parameters and the derived hash do.
+ */
+export const PasscodeVerifierSchema = z.looseObject({
+  v: z.literal(1).default(1),
+  kdf: z.literal("pbkdf2-sha256"),
+  /** base64url-encoded salt (16 bytes by default). */
+  salt: z.string().min(16).max(64),
+  /** PBKDF2 iteration count; bounded so a host cannot burn the DO's CPU. */
+  iterations: z.number().int().min(10_000).max(200_000),
+  /** base64url-encoded PBKDF2-SHA256 output (32 bytes by default). */
+  hash: z.string().min(32).max(64),
+});
+
 export const CapabilitiesSchema = z.looseObject({
   /** Capability schema generation, independent from the wire version. */
   protocolVersion: z.number().int().nonnegative().optional(),
@@ -139,6 +163,8 @@ export const CapabilitiesSchema = z.looseObject({
   listener: ListenerCapabilitySchema.optional(),
   /** Reserved for v1.1; ignored by v1. */
   peerRelay: PeerRelayCapabilitySchema.optional(),
+  /** v1.2 optional session passcode support. */
+  sessionSecurity: SessionSecurityCapabilitySchema.optional(),
 });
 
 /** TURN/STUN server entry handed to WebRTC clients. */
@@ -194,6 +220,8 @@ export const HelloMessageSchema = z
     protocolVersion: zV1.default(PROTOCOL_VERSION),
     client: ClientDescriptorSchema.optional(),
     capabilities: CapabilitiesSchema.default({}),
+    /** v1.2 host-only: PBKDF2 verifier; the plaintext passcode never travels. */
+    passcode: PasscodeVerifierSchema.optional(),
     cols: terminalDimension.optional(),
     rows: terminalDimension.optional(),
   })

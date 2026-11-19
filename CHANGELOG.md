@@ -37,6 +37,29 @@ maintained separately as 0.1.4.
   env > `TOKIMEKI_CONFIG` > file precedence, host credentials selected per
   source layer, and POSIX 0600 enforcement. `doctor` probes `/auth/whoami`
   with the effective credential and reports `authMode=jwt|namespace|master`.
+- Relay **Session JWT** verification (v1.2-A): when JWT mode is enabled, a
+  three-segment `X-Tokimeki-Session` is verified as `token_use=session` with
+  `attach`/`listen` scope, an exact `session` claim, and the token namespace
+  prefix. Verified viewers/listeners reach the SessionDO with
+  `x-tokimeki-session-claim`/`-scope`; the DO re-checks session/namespace/scope
+  and skips the opaque `host_token_hash` comparison. Legacy
+  `namespace_id=NULL` sessions keep the opaque path only. Session JWTs are
+  never host credentials; JWT-disabled mode leaves opaque tokens unchanged.
+- Optional **session passcode** (v1.2-D): `TOKIMEKI_PASSCODE` (6..128 chars)
+  makes the host send only a PBKDF2-SHA256 verifier in `hello.passcode`;
+  viewers/listeners submit `X-Tokimeki-Passcode`. The relay stores the verifier
+  in `session_passcode`, locks verification for 30 s after five failures, and
+  advertises `welcome.capabilities.sessionSecurity.passcode=1`. New error codes
+  `passcode_required`/`passcode_invalid`/`passcode_locked`/`passcode_mismatch`;
+  unset passcode behavior is unchanged. The CLI scrubs the passcode from the
+  hosted PTY environment and logs.
+- CLI accepts a TokiAPI **Session JWT** in `TOKIMEKI_SESSION_TOKEN` as an
+  opaque value (no parsing/refresh); viewer config envelopes accept `v:2`
+  (`namespace`, `expiresAt`, `passcodeRequired`). `docs/web-viewer.md` records
+  the TokiAPI proxy contract, TURN stripping, passcode handshake, and the
+  cross-repo e2e harness (`scripts/e2e/v1.2-cross-repo.mjs`).
+- Test-only `TOKIMEKI_JWT_ALLOW_HTTP=1` allows a loopback `http://` JWKS URL
+  for local cross-repo e2e; production must leave it unset.
 - Static namespace host tokens for OSS multi-namespace hosting:
   `TOKIMEKI_NAMESPACE_TOKENS` maps a namespace to a host token, namespace
   sessions use `<namespace>.<slug>`, and the CLI uses `TOKIMEKI_TOKEN` +

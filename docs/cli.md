@@ -173,7 +173,8 @@ Useful host variables:
 | `TOKIMEKI_NAMESPACE` | — | Namespace name (`^[a-z0-9][a-z0-9_-]{0,31}$`), required with `TOKIMEKI_TOKEN` |
 | `TOKIMEKI_MASTER_TOKEN` | — | Single-owner fallback credential (one person owning a relay); rejected once the relay has valid namespace tokens |
 | `TOKIMEKI_SESSION` | `<namespace>.<hostname>-<cwd>` or sanitized hostname+cwd | Session name (ASCII/`._-`, <=64 chars); token mode auto-prefixes `<namespace>.` |
-| `TOKIMEKI_SESSION_TOKEN` | generated | Per-session viewer token; generated value is printed once |
+| `TOKIMEKI_SESSION_TOKEN` | generated | Per-session viewer token; generated value is printed once. Viewers may also receive a TokiAPI Session JWT (opaque to the CLI) |
+| `TOKIMEKI_PASSCODE` | — | Optional per-session passcode (6..128 chars). Host sends only a PBKDF2 verifier; viewers send `X-Tokimeki-Passcode`. Not the 6-digit TokiAPI session access code |
 | `TOKIMEKI_P2P` | `auto` | `off` forces the Worker relay |
 | `TOKIMEKI_ICE_TRANSPORT_POLICY` | `all` | `relay` restricts ICE to TURN (test/forced TURN) |
 | `TOKIMEKI_RESIZE_POLICY` | `latest` | `latest`, `min`, or `pinned`; ignored when the fixed TUI window is active |
@@ -208,6 +209,13 @@ tokimeki attach
 Attach needs `TOKIMEKI_SESSION` and `TOKIMEKI_SESSION_TOKEN`; it does **not**
 need the relay master token. The viewer enters the alternate screen, applies
 the current snapshot, and forwards keyboard input.
+
+`TOKIMEKI_SESSION_TOKEN` may be either the host's opaque session token or a
+TokiAPI **Session JWT** issued by an invite (`POST /api/tokimeki/attach/cli`).
+The CLI treats both as opaque values; the relay verifies the JWT and skips the
+opaque hash comparison. If the host set `TOKIMEKI_PASSCODE`, viewers must also
+set it (sent as `X-Tokimeki-Passcode`); wrong passcodes lock verification for
+30 seconds after five failures.
 
 - **Config envelope:** the host's `viewer config` JSON can be passed as
   `TOKIMEKI_CONFIG` instead of setting `TOKIMEKI_RELAY_URL`,

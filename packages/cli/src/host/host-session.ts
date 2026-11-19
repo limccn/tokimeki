@@ -33,6 +33,7 @@ import {
 import { buildHostAuthHeaders, type HostConfig } from "../config.js";
 import { inviteKeyLabel } from "../invite.js";
 import { formatError, type Logger } from "../logger.js";
+import { createPasscodeVerifier, type PasscodeVerifier } from "../passcode.js";
 import { TerminalMirror } from "../terminal/mirror.js";
 import { ModeTracker } from "../terminal/mode-tracker.js";
 import { ByteRing } from "../terminal/ring-buffer.js";
@@ -209,6 +210,8 @@ class HostSession {
   readonly #env: NodeJS.ProcessEnv;
   readonly #clientId = `host-${randomUUID()}`;
 
+  /** Derived once per process; reconnect hellos reuse the same verifier. */
+  #passcodeVerifierCache: PasscodeVerifier | null = null;
   #pty: HostPty | null = null;
   #mirror: TerminalMirror | null = null;
   #viewport: LocalViewport | null = null;
@@ -550,7 +553,18 @@ class HostSession {
     process.once("exit", this.#exitHandler);
   }
 
+  #passcodeVerifier(): PasscodeVerifier | null {
+    if (this.#config.passcode === null) {
+      return null;
+    }
+    if (this.#passcodeVerifierCache === null) {
+      this.#passcodeVerifierCache = createPasscodeVerifier(this.#config.passcode);
+    }
+    return this.#passcodeVerifierCache;
+  }
+
   #connectRelay(): void {
+    const passcodeVerifier = this.#passcodeVerifier();
     const client = new RelayClient({
       url: this.#config.websocketUrl,
       headers: {
@@ -560,6 +574,9 @@ class HostSession {
         ...buildHostAuthHeaders(this.#config.hostToken),
         "X-Tokimeki-Session": this.#config.sessionToken,
       },
+      ...(passcodeVerifier === null
+        ? {}
+        : { passcodeVerifier, requireSessionSecurityPasscode: true }),
       role: "host",
       session: this.#config.session,
       clientId: this.#clientId,
@@ -570,6 +587,7 @@ class HostSession {
       capabilities: buildCapabilities({
         p2p: this.#config.p2p === "auto",
         snapshotMaxBytes: this.#config.snapshotMaxBytes,
+        sessionSecurity: this.#config.passcode !== null,
         ...(this.#config.tunnel === "auto" ? { tunnelKeyMode: this.#config.tunnelKeyMode } : {}),
         ...(this.#fixedGeometryEnabled
           ? {
@@ -646,7 +664,7 @@ class HostSession {
       this.#updateTunnelViewer(client.clientId, client.capabilities);
       this.#scheduleSnapshot(client.clientId);
       const link = this.#p2pLinks.get(client.clientId);
-      if (link !== undefined && link.ready && link.peer.isOpen && link.mode !== null) {
+      if (link?.ready === true && link.peer.isOpen && link.mode !== null) {
         // Relay reconnection resets the attachment's recorded transport mode;
         // re-announce and refresh the snapshot for an already-open DataChannel.
         this.#pendingP2PSwitches.add(client.clientId);
@@ -1071,7 +1089,7 @@ class HostSession {
 
   #isP2PReady(clientId: string): boolean {
     const link = this.#p2pLinks.get(clientId);
-    return link !== undefined && link.ready && link.peer.isOpen;
+    return link?.ready === true && link.peer.isOpen;
   }
 
   #handleFatal(error: RelayFatalError): void {
@@ -1375,10 +1393,7 @@ class HostSession {
         // The TUN profile runs on an unreliable DataChannel; snapshots stay on
         // the relay path (they are the recovery boundary, not tunnel data).
         const canSendDirect =
-          link !== undefined &&
-          link.peer.isOpen &&
-          link.supportsFragmentation &&
-          link.tunnel === null;
+          link?.peer.isOpen === true && link.supportsFragmentation && link.tunnel === null;
         if (canSendDirect) {
           try {
             directFrame ??= encodeFrame({

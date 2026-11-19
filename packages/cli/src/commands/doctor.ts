@@ -221,6 +221,10 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
     warn(`attach environment is incomplete (missing ${missing.join(", ")})`);
   }
 
+  if (config.hasPasscode) {
+    ok("session passcode is configured (TOKIMEKI_PASSCODE)");
+  }
+
   if (config.authMode === null && !attachComplete) {
     fail("no complete host or attach configuration was found");
   }

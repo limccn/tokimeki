@@ -99,6 +99,7 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
     env.TOKIMEKI_MASTER_TOKEN,
     env.TOKIMEKI_SESSION_TOKEN,
     env.TOKIMEKI_TUNNEL_SECRET,
+    env.TOKIMEKI_PASSCODE,
   ]);
 
   const printError = (error: unknown): void => {

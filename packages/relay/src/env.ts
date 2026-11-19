@@ -56,6 +56,12 @@ export interface RelayEnv {
   readonly TOKIMEKI_JWT_AUDIENCE?: string;
   readonly TOKIMEKI_JWT_JWKS_TTL_SECONDS?: string;
   readonly TOKIMEKI_JWT_CLOCK_SKEW_SECONDS?: string;
+  /**
+   * Test-only escape hatch: `1` accepts an `http://` JWKS URL when the host is
+   * loopback (`localhost`/`127.0.0.1`/`[::1]`). Used by the local cross-repo
+   * e2e harness; production deployments must leave this unset.
+   */
+  readonly TOKIMEKI_JWT_ALLOW_HTTP?: string;
   readonly TOKIMEKI_LOG_LEVEL?: string;
 }
 

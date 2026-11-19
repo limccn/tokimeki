@@ -18,6 +18,7 @@ export default relayWorkersConfig({
     "test/worker-namespace.test.ts",
     "test/session-namespace.test.ts",
     "test/worker-jwt.test.ts",
+    "test/worker-session-jwt.test.ts",
   ],
   // Absolute TTL alarms are exercised by the quota suite; see vitest.shared.ts.
   sessionMaxTtlSeconds: "0",

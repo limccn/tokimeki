@@ -117,3 +117,127 @@ describe("RelayClient listener compatibility", () => {
     }
   });
 });
+
+describe("RelayClient session passcode", () => {
+  it("includes the host verifier in hello and accepts an advertised capability", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    const helloReceived = new Promise<Record<string, unknown>>((resolve) => {
+      server.on("connection", (socket) => {
+        socket.once("message", (data) => {
+          resolve(
+            JSON.parse(Buffer.from(data as Buffer).toString("utf8")) as Record<string, unknown>,
+          );
+          socket.send(
+            JSON.stringify({
+              v: 1,
+              type: "welcome",
+              session: "sess-1",
+              protocolVersion: 1,
+              hostOnline: true,
+              clients: [],
+              iceServers: [],
+              iceProvider: "stun",
+              transportPolicy: "all",
+              sessionTtlSeconds: 3600,
+              capabilities: { sessionSecurity: { passcode: 1 } },
+            }),
+          );
+        });
+      });
+    });
+
+    const logger = new Logger({ level: "silent", write: () => {} });
+    const client = new RelayClient({
+      url: `ws://127.0.0.1:${port}/ws/sess-1`,
+      headers: { "X-Tokimeki-Session": "session-token" },
+      role: "host",
+      session: "sess-1",
+      clientId: "host-1",
+      heartbeatSeconds: 0,
+      capabilities: { sessionSecurity: { passcode: 1 } },
+      passcodeVerifier: {
+        v: 1,
+        kdf: "pbkdf2-sha256",
+        salt: "c2FsdHNhbHRzYWx0c2FsdA",
+        iterations: 10_000,
+        hash: "a".repeat(43),
+      },
+      requireSessionSecurityPasscode: true,
+      logger,
+    });
+
+    try {
+      client.start();
+      const hello = await helloReceived;
+      expect(hello.passcode).toEqual({
+        v: 1,
+        kdf: "pbkdf2-sha256",
+        salt: "c2FsdHNhbHRzYWx0c2FsdA",
+        iterations: 10_000,
+        hash: "a".repeat(43),
+      });
+    } finally {
+      client.stop();
+      for (const socket of server.clients) socket.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("fails closed when the welcome does not advertise passcode support", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    server.on("connection", (socket) => {
+      socket.once("message", () => {
+        socket.send(
+          JSON.stringify({
+            v: 1,
+            type: "welcome",
+            session: "sess-1",
+            protocolVersion: 1,
+            hostOnline: true,
+            clients: [],
+            iceServers: [],
+            iceProvider: "stun",
+            transportPolicy: "all",
+            sessionTtlSeconds: 3600,
+          }),
+        );
+      });
+    });
+
+    const logger = new Logger({ level: "silent", write: () => {} });
+    const client = new RelayClient({
+      url: `ws://127.0.0.1:${port}/ws/sess-1`,
+      headers: { "X-Tokimeki-Session": "session-token" },
+      role: "host",
+      session: "sess-1",
+      clientId: "host-1",
+      heartbeatSeconds: 0,
+      capabilities: {},
+      passcodeVerifier: {
+        v: 1,
+        kdf: "pbkdf2-sha256",
+        salt: "c2FsdHNhbHRzYWx0c2FsdA",
+        iterations: 10_000,
+        hash: "a".repeat(43),
+      },
+      requireSessionSecurityPasscode: true,
+      logger,
+    });
+    const fatal = new Promise<RelayFatalError>((resolve) => client.onFatal(resolve));
+
+    try {
+      client.start();
+      const error = await fatal;
+      expect(error.code).toBe("not_implemented");
+      expect(error.message).toContain("session passcode");
+    } finally {
+      client.stop();
+      for (const socket of server.clients) socket.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

@@ -138,7 +138,7 @@ export class P2PPeer {
   }
 
   get isOpen(): boolean {
-    return this.#open && this.#dc !== null && this.#dc.isOpen();
+    return this.#open && this.#dc?.isOpen() === true;
   }
 
   get bufferedAmount(): number {

@@ -16,8 +16,13 @@
 > 硬上限（见 §8.5）。**Host JWT 最小切片已实现**（任务
 > `11-19-v1-2-cli-tokiapi-host-jwt`）：`X-Tokimeki-Token`（原
 > `X-Tokimeki-Master`，旧头不再识别）、`Authorization: Bearer`（仅 JWT 模式
-> web/代理）、ES256 离线验签 + JWKS 缓存。JWT `features`/`limits` 读取、
-> Session JWT、付费/白名单以及 per-namespace 日流量/签发次数聚合仍未实现。
+> web/代理）、ES256 离线验签 + JWKS 缓存。**Session JWT（v1.2-A）** 已实现：
+> `X-Tokimeki-Session` 的三段式值在 JWT 模式启用时按 `token_use=session`
+> 验签（attach/listen scope、session/namespace 复核、DO hash bypass）。
+> **可选 session passcode（v1.2-D）** 已实现：host 发送 PBKDF2 verifier，
+> viewer/listener 用 `X-Tokimeki-Passcode` 提交，5 次失败锁定 30s。JWT
+> `features`/`limits` 读取、付费/白名单以及 per-namespace 日流量/签发次数
+> 聚合仍未实现。
 >
 > 术语：**namespace** 是隔离、配额与会话前缀的作用域单位。hosted 中它对应
 > TokiAPI 用户/账户，OSS 中对应静态 namespace token；v1.2 JWT claim 已统一为

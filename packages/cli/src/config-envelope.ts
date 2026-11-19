@@ -48,6 +48,7 @@ const FIELDS: Readonly<Record<string, FieldMapping>> = {
   tunnel: { env: "TOKIMEKI_TUNNEL", kind: "string" },
   tunnelFec: { env: "TOKIMEKI_TUNNEL_FEC", kind: "string" },
   tunnelSecret: { env: "TOKIMEKI_TUNNEL_SECRET", kind: "string" },
+  passcode: { env: "TOKIMEKI_PASSCODE", kind: "string" },
   piTuiMode: { env: "TOKIMEKI_PI_TUI_MODE", kind: "string" },
   claudeBg: { env: "TOKIMEKI_CLAUDE_BG", kind: "boolean" },
 };
@@ -134,8 +135,11 @@ export function parseConfigEnvelope(raw: string): Record<string, string> {
   }
   const record = parsed as Record<string, unknown>;
   const version = record.version ?? record.v;
-  if (version !== undefined && version !== 1) {
-    throw new ConfigEnvelopeError("TOKIMEKI_CONFIG.version must be 1");
+  // v2 adds optional namespace/expiresAt/passcodeRequired fields used by the
+  // TokiAPI viewer config; unknown fields are ignored, so the CLI consumes the
+  // same keys as v1 and only accepts the newer version marker.
+  if (version !== undefined && version !== 1 && version !== 2) {
+    throw new ConfigEnvelopeError("TOKIMEKI_CONFIG.version must be 1 or 2");
   }
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(record)) {

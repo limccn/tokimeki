@@ -35,6 +35,17 @@ export interface HostExitRecord {
   readonly signal: string | null;
 }
 
+/** Host-computed PBKDF2 verifier plus viewer/listener lockout state. */
+export interface SessionPasscodeRecord {
+  readonly kdf: string;
+  readonly salt: string;
+  readonly iterations: number;
+  readonly hash: string;
+  readonly failedAttempts: number;
+  readonly lockedUntil: number | null;
+  readonly updatedAt: number;
+}
+
 export interface TurnCacheEntry {
   readonly payloadJson: string;
   readonly expiresAt: number;
@@ -60,6 +71,16 @@ const SCHEMA_STATEMENTS = [
     namespace_id TEXT,
     absolute_deadline INTEGER,
     relay_bytes INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE IF NOT EXISTS session_passcode (
+    session_id TEXT PRIMARY KEY,
+    kdf TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    iterations INTEGER NOT NULL,
+    hash TEXT NOT NULL,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until INTEGER,
+    updated_at INTEGER NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS session_lifecycle (
     session_id TEXT PRIMARY KEY,
@@ -370,6 +391,98 @@ export function clearHostExit(sql: SqlStorage): void {
   } catch {
     // Session was deleted concurrently; nothing to clear.
   }
+}
+
+/** Load the session passcode verifier and lockout counters, if configured. */
+export function loadSessionPasscode(sql: SqlStorage): SessionPasscodeRecord | null {
+  try {
+    const rows = sql
+      .exec<{
+        kdf: string;
+        salt: string;
+        iterations: number;
+        hash: string;
+        failed_attempts: number;
+        locked_until: number | null;
+        updated_at: number;
+      }>(
+        `SELECT kdf, salt, iterations, hash, failed_attempts, locked_until, updated_at
+           FROM session_passcode LIMIT 1`,
+      )
+      .toArray();
+    const row = rows[0];
+    if (row === undefined) return null;
+    return {
+      kdf: row.kdf,
+      salt: row.salt,
+      iterations: row.iterations,
+      hash: row.hash,
+      failedAttempts: row.failed_attempts,
+      lockedUntil: row.locked_until ?? null,
+      updatedAt: row.updated_at,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Store the verifier on the first host hello. `INSERT OR IGNORE` keeps a
+ * concurrent/replayed host hello from rotating the verifier silently; the
+ * caller compares the presented verifier against the stored one first.
+ */
+export function saveSessionPasscode(
+  sql: SqlStorage,
+  sessionId: string,
+  verifier: {
+    readonly kdf: string;
+    readonly salt: string;
+    readonly iterations: number;
+    readonly hash: string;
+  },
+  now: number,
+): void {
+  sql.exec(
+    `INSERT OR IGNORE INTO session_passcode
+       (session_id, kdf, salt, iterations, hash, failed_attempts, locked_until, updated_at)
+     VALUES (?, ?, ?, ?, ?, 0, NULL, ?)`,
+    sessionId,
+    verifier.kdf,
+    verifier.salt,
+    verifier.iterations,
+    verifier.hash,
+    now,
+  );
+}
+
+/** Persist a failed viewer/listener attempt and its optional lockout deadline. */
+export function recordPasscodeFailure(
+  sql: SqlStorage,
+  sessionId: string,
+  failedAttempts: number,
+  lockedUntil: number | null,
+  now: number,
+): void {
+  sql.exec(
+    `UPDATE session_passcode
+        SET failed_attempts = ?, locked_until = ?, updated_at = ?
+      WHERE session_id = ?`,
+    failedAttempts,
+    lockedUntil,
+    now,
+    sessionId,
+  );
+}
+
+/** Clear the lockout counters after a successful verification. */
+export function clearPasscodeFailures(sql: SqlStorage, sessionId: string, now: number): void {
+  sql.exec(
+    `UPDATE session_passcode
+        SET failed_attempts = 0, locked_until = NULL, updated_at = ?
+      WHERE session_id = ?`,
+    now,
+    sessionId,
+  );
 }
 
 /**

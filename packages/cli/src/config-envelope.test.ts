@@ -59,7 +59,8 @@ describe("parseConfigEnvelope", () => {
   it("rejects invalid JSON, non-objects, and unsupported versions", () => {
     expect(() => parseConfigEnvelope("{not json")).toThrow(ConfigEnvelopeError);
     expect(() => parseConfigEnvelope("[]")).toThrow(ConfigEnvelopeError);
-    expect(() => parseConfigEnvelope(configJson({ v: 2 }))).toThrow(ConfigEnvelopeError);
+    expect(() => parseConfigEnvelope(configJson({ v: 3 }))).toThrow(ConfigEnvelopeError);
+    expect(parseConfigEnvelope(configJson({ v: 2 }))).toEqual({});
   });
 });
 
