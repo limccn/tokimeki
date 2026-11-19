@@ -103,7 +103,8 @@ openssl rand -base64 32
 
 The relay URL will be `https://<worker-name>.<your-subdomain>.workers.dev`
 (`wss://...` for the CLI). See [Cloudflare deploy](docs/deploy-cloudflare.md)
-for custom domains, coturn, and Cloudflare TURN.
+for custom domains, namespace tokens, Host JWT verification, coturn, and
+Cloudflare TURN.
 
 ### 2. Host a session
 
@@ -117,7 +118,9 @@ tokimeki claude
 ```
 
 The host prints the **session name** and a **session token**. Share those with
-the viewer — never share the relay master token.
+the viewer — never share the relay master token. For shared relays, hosts use
+`TOKIMEKI_TOKEN` (a namespace token or TokiAPI Host JWT) with the required
+`TOKIMEKI_NAMESPACE` instead; see [docs/cli.md](docs/cli.md).
 
 ### 3. Attach from another machine
 

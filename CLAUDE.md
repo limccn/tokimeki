@@ -54,19 +54,27 @@ assets/              README icon
 
 - `packages/relay/src/index.ts`: public `/healthz` returns only
   `{ok, service, protocolVersion}`; authenticated `GET /auth/whoami`
-  (root master only, v1) returns `authMode` and TURN provider/configured with
+  accepts the host credential in `x-tokimeki-token` (plus, outside disabled
+  JWT mode, `Authorization: Bearer`) and returns `authMode` of
+  `jwt`/`namespace`/`master` (with JWT claims / namespace / TURN status) with
   no-store and no secrets; `/ws/<session>` requires a non-empty
-  `x-tokimeki-session`; optional `x-tokimeki-master` upgrades the role to
-  host; constant-time comparisons; master token equal to session token is
-  rejected; master/listener/namespace headers removed before forwarding.
-- Host auth precedence: root `TOKIMEKI_MASTER_TOKEN` first, then static
-  namespace tokens from `TOKIMEKI_NAMESPACE_TOKENS` (JSON
-  `{ "<namespace>": "<token>" }`; `namespace-tokens.ts` validates and matches
-  in constant time without early exit). Namespace hosts may only use
-  `<namespace>.<slug>` sessions (dot route); the Worker derives the namespace
-  from the token only and injects `x-tokimeki-namespace` (`*` for root).
-  Invalid/duplicate/short/oversized maps fail closed; unset keeps the
-  master-only behavior.
+  `x-tokimeki-session`; `x-tokimeki-token` upgrades the role to host;
+  constant-time comparisons; a host credential equal to the session token is
+  rejected; token/master/listener/namespace headers (and, outside disabled
+  JWT mode, `authorization`) are removed before forwarding.
+- Host auth dispatch by value shape in `x-tokimeki-token`: single-owner
+  fallback token `TOKIMEKI_MASTER_TOKEN` first (only while no valid namespace
+  tokens exist; disabled — like root `*` takeover — once
+  `TOKIMEKI_NAMESPACE_TOKENS` has a valid entry), then JWT-shaped values
+  (`jwt-auth.ts`: strict ES256 offline verification, per-isolate JWKS cache
+  with 30 s refresh gating, `503 jwks_unavailable`, fail-closed on invalid
+  config), then static namespace tokens from `TOKIMEKI_NAMESPACE_TOKENS`
+  (JSON `{ "<namespace>": "<token>" }`; `namespace-tokens.ts` validates and
+  matches in constant time without early exit). Namespace and JWT hosts may
+  only use `<namespace>.<slug>` sessions (dot route); the Worker derives the
+  namespace from the verified credential only and injects
+  `x-tokimeki-namespace` (`*` for the fallback root). Invalid/duplicate/short/
+  oversized maps fail closed; unset keeps the fallback-only behavior.
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
   host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
@@ -114,11 +122,17 @@ assets/              README icon
 
 - `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach` (`--listen` for
   read-only listener mode), `doctor`; all runtime config comes from env
-  (`.env.example` is the reference). Host auth accepts
-  `TOKIMEKI_MASTER_TOKEN` or `TOKIMEKI_NAMESPACE_TOKEN` +
-  `TOKIMEKI_NAMESPACE` (namespace wins with a warning when both are set);
-  namespace mode auto-prefixes `<namespace>.` sessions and rejects an explicit
-  `TOKIMEKI_SESSION` without it.
+  (`.env.example` is the reference) merged with a read-only
+  `~/.tokimeki/config.json` (`config-file.ts`: env > `TOKIMEKI_CONFIG` >
+  config.json > defaults; host credentials are selected per source layer; the
+  file is never written). Host auth accepts `TOKIMEKI_TOKEN` (opaque Host JWT
+  or namespace token; requires `TOKIMEKI_NAMESPACE`, auto-prefixes
+  `<namespace>.` sessions and rejects an explicit `TOKIMEKI_SESSION` without
+  it) or `TOKIMEKI_MASTER_TOKEN` (single-owner fallback). `TOKIMEKI_TOKEN`
+  wins with a warning when both are set; the retired
+  `TOKIMEKI_NAMESPACE_TOKEN` is a hard ConfigError (exit 2). The CLI always
+  sends `X-Tokimeki-Token` (never `Authorization`) via
+  `buildHostAuthHeaders`.
 - `host/`: node-pty, Windows ConPTY, headless xterm mirror, mode tracker,
   resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup, and a
   separate periodic listener snapshot timer (`TOKIMEKI_LISTENER_SNAPSHOT_MS`,
@@ -167,16 +181,18 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   `relay.tokiapi.app`, production coturn URLs/Key ID).
 - `npm run deploy` uses the root config; `npm run deploy:prod` uses the relay
   config. Keep shared fields in sync.
-- Worker secrets: `TOKIMEKI_MASTER_TOKEN` (required), optional
-  `TOKIMEKI_NAMESPACE_TOKENS` (static namespace host tokens, JSON object),
+- Worker secrets: `TOKIMEKI_MASTER_TOKEN` (single-owner fallback; disabled once
+  namespace tokens are active), optional `TOKIMEKI_NAMESPACE_TOKENS` (static
+  namespace host tokens, JSON object), optional `TOKIMEKI_JWT_JWKS_URL` /
+  `TOKIMEKI_JWT_ISSUER` (TokiAPI Host JWT verification; unset = JWT disabled),
   `TOKIMEKI_COTURN_SECRET`, `TOKIMEKI_TURN_API_TOKEN`,
   `TOKIMEKI_TURN_CREDENTIAL`. `.dev.vars.example` is the Deploy Button
   template; never commit real values.
 
 ## Security rules
 
-- Never log tokens, auth headers, TURN credentials, signal payloads, or
-  terminal content.
+- Never log tokens, auth headers, `Authorization` values, JWKS content, TURN
+  credentials, signal payloads, or terminal content.
 - Tokens travel in headers/stdin/0600 env files, never in argv, query strings,
   README examples, or committed files.
 - The relay can see terminal bytes by design; P2P/TURN change the transport,

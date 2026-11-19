@@ -90,55 +90,68 @@ mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0
 
 ## Relay 身份/namespace 路线（2026-11-19 确认）
 
-1. **master token 单用户**（现状）：一个全局 root，适合单管理员/break-glass。
+1. **master token 单人回退**（现状）：一个全局 root；仅在未配置有效
+   namespace token 时可用，不是通用 break-glass。
 2. **静态 multi-namespace 多用户**（OSS 主方案）：`TOKIMEKI_NAMESPACE_TOKENS`
    按 namespace 分发 host token，不要求 JWT/TokiAPI。
-3. **JWT 对接 TokiAPI 用户**（hosted）：relay 离线验签 Host/Session JWT，
-   读取 namespace/feature flags；v1.2 设计将重写。
+3. **JWT 对接 TokiAPI 用户**（hosted）：Host JWT/JWKS 已落地，relay 离线验签
+   Host JWT；Session JWT/feature flags 未来。当前对齐切片为 E
+   `11-19-v1-2-cli-tokiapi-host-jwt`。
 
 wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/<session>`
 斜杠路径。
 
-## v1.2（规划中，2026-11-18 立项；设计将重写）
+## v1.2（分阶段；E 当前，A–D 暂停）
 
-状态：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与四个子任务已创建，
-均为 planning，未启动实现。**2026-11-19 用户暂存 v1.2：设计将重写，当前 PRD/
-design/implement 仅作历史参考，不作为实现依据。** 等待 TokiAPI（cf-ai-gateway）
-前置修改（namespace 码签发、ES256/JWKS、session 创建、Web 代理）；恢复前不启动
-A/B/C/D。v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
+状态（2026-11-19）：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与
+**五个**子任务已创建。
 
-- **多 namespace**：namespace = TokiAPI 用户；TokiAPI 签发 **ES256 JWT** 并暴露 JWKS；
-  relay 缓存 JWKS、**离线验签**（不逐连接回调 TokiAPI）；Host JWT 证明
-  namespace/user/scope，Session JWT 证明 session 能力；`TOKIMEKI_MASTER_TOKEN`
-  保留为 root 回退（也可用 JWT 字符串，按 exp 失效）；**无 refresh**，
-  TTL 在签发时设置（默认 1 天，最长 90 天），过期即失效；无撤销列表，
-  紧急失效靠轮换签名密钥。网页端使用独立的 `web` scope；relay 仍按
-  `attach`/`listen` 决定 viewer/listener，TokiAPI Web 代理强制要求 `web`。
-  `TOKIMEKI_JWT_JWKS_URL` 未配置 = JWT 模式关闭；配置必须是 HTTPS JWKS URL，
-  格式/响应非法时 fail-closed。JWT 是 hosted/可选接入；OSS 小团队可用静态
-  namespace token（`TOKIMEKI_NAMESPACE_TOKENS`），不要求 TokiAPI。
-- **CLI/UX**：CLI 把 JWT 当**不透明字符串**（不解析、不刷新）；只读
-  `~/.tokimeki/config.json`（`TOKIMEKI_*` 键），环境变量优先，不创建/写回
-  任何 token 文件；host 调 TokiAPI 创建 session，使用返回的 `session`/
-  Session JWT/expiry；viewer config v2；doctor 通过 whoami 检查 claims。
-- **Web UI**：TokiAPI dashboard 申请 token 并代理 WebSocket；浏览器用 xterm.js
-  完整 viewer 控制（输入/resize/ACK/重连）；浏览器不接触 JWT；v1.2 仅 relay；
-  **不新增独立 web-client 包**，浏览器逻辑由 TokiAPI 实现。
-- **Passcode（可选）**：per-session passcode 作为第二因素；host 本地 PBKDF2
-  验证器，relay 用独立 header 验证并限速/锁定；passcode 不进入 JWT/invite/
-  URL/日志；Web UI 提示输入并由代理转发。
-- **TokiAPI 停机回退**：namespaceId 不再向 TokiAPI 获取；优先使用预置
-  `TOKIMEKI_SESSION` + `TOKIMEKI_SESSION_TOKEN`（跳过 TokiAPI），其次
-  `TOKIMEKI_OFFLINE_FALLBACK=opaque` 用 relay whoami 取 namespace + 本地 opaque
-  session token（Host JWT 认证），最后 master legacy；默认 `off` 不静默降级；
-  Web UI 在 TokiAPI 停机时不可用。
-- 子任务：
-  - A `.trellis/tasks/11-18-v1-2-namespace-auth` — JWT/JWKS 离线认证。
-  - B `.trellis/tasks/11-18-v1-2-cli-ux` — CLI/UX JWT 多 namespace 适配。
-  - C `.trellis/tasks/11-18-v1-2-web-ui` — TokiAPI JWT 签发与 Web viewer。
-  - D `.trellis/tasks/11-18-v1-2-passcode` — 可选 session passcode。
-- 边界：不引入 SQLite namespace 目录/introspection/per-viewer JWT/refresh token；
-  不独立发布 web-client 包；不做组织/团队模型、不做浏览器 P2P；
+- **E `11-19-v1-2-cli-tokiapi-host-jwt`**：当前权威切片，planning，未启动实现。
+  TokiAPI Host JWT/JWKS 已落地；E 负责 CLI + relay 最小 Host JWT 验签。
+- **A–D**（namespace-auth / cli-ux / web-ui / passcode）：**in_progress**；
+  PRD/design/implement 已按 E 的 Host JWT 模型重写，代码尚未开始。
+  A=Session JWT viewer/listener 验签；B=TokiAPI session 创建/Session JWT/
+  invite v2/offline fallback；C=Session JWT/Web viewer；D=可选 passcode。
+- TokiAPI Session JWT、session 创建、invite v2、Web viewer、passcode 仍需落地；
+  A–D 已恢复规划/实现准备。v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
+- **2026-11-19 审查结论**：E 实现前必须确认 TokiAPI 5 位 namespace 唯一性、
+  生产 `TOKIMEKI_NAMESPACE_TOKENS` 轮换/分发 preflight，并更新过期的
+  `docs/relay-exposure-policy.md`；A–D 已补充 `looksLikeJwt`、legacy NULL、
+  token 类型判定、Web `web` 校验/TURN 剥离、passcode secret 清单等安全契约。
+
+### E 已确认的凭证/路由
+
+- Host 凭证唯一 `TOKIMEKI_TOKEN`（Host JWT 或静态 namespace token；CLI 不解析）；
+  `TOKIMEKI_NAMESPACE` 必填；`X-Tokimeki-Token` 是唯一 host 头
+  （旧 `X-Tokimeki-Master` 拒绝）；`TOKIMEKI_NAMESPACE_TOKEN` 退役；
+  `TOKIMEKI_MASTER_TOKEN` 仅作单人回退，启用有效 `TOKIMEKI_NAMESPACE_TOKENS`
+  后失效（root `*` 接管同时失效）。
+- Host JWT：ES256；JWKS 在 **TokiAPI 管理台域** `/api/tokimeki/jwks.json`；
+  claims `iss/aud/sub/namespace/token_use=host/scope/iat/nbf/exp/jti`；
+  默认 TTL 30 天；relay 离线验签，不逐连接回调 TokiAPI。
+- `TOKIMEKI_JWT_JWKS_URL` 未配置 = JWT 关闭（不解析三段式、不拉 JWKS）；
+  配置非法 = JWT 凭证 fail-closed；JWKS 不可达且无缓存 = 503。
+- `Authorization: Bearer` 仅作为 JWT 模式 web/代理的 Host JWT 第二载体；
+  CLI 不发送；JWT 关闭时不解析/不剥离。
+- **破坏性变更**：header 更名；namespace token 启用后 fallback 失效。
+  CLI/relay 必须成对升级；生产部署前必须轮换/分发 namespace token，或清空
+  secret 保持 fallback 模式，否则 host 认证锁死。
+
+### A–D（in_progress，代码未开始）
+
+- A `11-18-v1-2-namespace-auth`：Session JWT viewer/listener 验签
+  （`X-Tokimeki-Session` 三段式、`token_use=session`、`attach`/`listen`、
+  `session`=路径、namespace 前缀、严格 `iss/aud/exp/nbf`；DO hash bypass；
+  listener 仍需 `X-Tokimeki-Listener: 1`；Session JWT 不作 host；无 invite）。
+- B `11-18-v1-2-cli-ux`：TokiAPI session 创建、Session JWT、invite v2、
+  offline fallback。
+- C `11-18-v1-2-web-ui`：TokiAPI Session JWT 签发、WS 代理、xterm.js viewer。
+- D `11-18-v1-2-passcode`：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`）。
+
+### 边界
+
+- 不引入 SQLite namespace 目录/introspection/per-viewer JWT/refresh token/
+  撤销列表；不独立发布 web-client 包；不做组织/团队模型、浏览器 P2P；
   wire version 保持 v1。
 
 ## v2（独立任务）
