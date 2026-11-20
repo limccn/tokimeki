@@ -1,0 +1,18 @@
+# Normalize text files to LF in the repository and on every checkout.
+# This overrides core.autocrlf so Biome/CI and Windows checkouts see the same
+# bytes. Binary assets and Windows batch scripts keep their required endings.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.pdf binary
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
