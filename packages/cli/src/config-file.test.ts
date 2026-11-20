@@ -31,6 +31,11 @@ function writeConfig(home: string, content: unknown): string {
   mkdirSync(dir, { recursive: true });
   const path = join(dir, "config.json");
   writeFileSync(path, typeof content === "string" ? content : JSON.stringify(content), "utf8");
+  // Credential-bearing fixtures must satisfy the POSIX 0600 check; tests that
+  // exercise insecure modes chmod explicitly afterwards.
+  if (process.platform !== "win32") {
+    chmodSync(path, 0o600);
+  }
   return path;
 }
 
