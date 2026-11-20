@@ -8,10 +8,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.3] - 2026-11-20
 
-No-jwt mainline: static multi-namespace host tokens, the additive
-`session_meta.namespace_id` migration, authenticated `/auth/whoami`, and
-opt-in session TTL/byte/message limits. The JWT/hosted-auth line is maintained
-separately as 0.2.0.
+Default/no-jwt mainline: static multi-namespace host tokens, the additive
+`session_meta.namespace_id` migration, authenticated `/auth/whoami`, opt-in
+session TTL/byte/message limits, and the optional Host JWT credential
+alignment (`TOKIMEKI_TOKEN` + `X-Tokimeki-Token`; JWT verification stays
+disabled unless configured). The Session JWT/share-link/passcode line is
+maintained separately as 0.1.4.
 
 
 ### Added
@@ -37,8 +39,8 @@ separately as 0.2.0.
   with the effective credential and reports `authMode=jwt|namespace|master`.
 - Static namespace host tokens for OSS multi-namespace hosting:
   `TOKIMEKI_NAMESPACE_TOKENS` maps a namespace to a host token, namespace
-  sessions use `<namespace>.<slug>`, and the CLI accepts
-  `TOKIMEKI_NAMESPACE_TOKEN`/`TOKIMEKI_NAMESPACE`. Includes an additive
+  sessions use `<namespace>.<slug>`, and the CLI uses `TOKIMEKI_TOKEN` +
+  `TOKIMEKI_NAMESPACE` (`TOKIMEKI_NAMESPACE_TOKEN` is retired). Includes an additive
   `session_meta.namespace_id` migration; unset preserves master-only behavior.
 - Authenticated `GET /auth/whoami` (root master in v1) exposes TURN
   provider/configured diagnostics while the public `/healthz` stays minimal.
