@@ -103,38 +103,6 @@ function codeFromUrl(url) {
   return url.slice(index + marker.length);
 }
 
-function waitForWebSocketMessage(ws, predicate, ms = timeoutMs) {
-  return new Promise((resolveMessage, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error("timed out waiting for a WebSocket frame"));
-    }, ms);
-    const onMessage = (data, isBinary) => {
-      let result;
-      try {
-        result = predicate(data, isBinary);
-      } catch {
-        return;
-      }
-      if (result !== undefined) {
-        cleanup();
-        resolveMessage(result);
-      }
-    };
-    const onClose = (code, reason) => {
-      cleanup();
-      reject(new Error(`proxy websocket closed (${code}) ${reason.toString()}`));
-    };
-    const cleanup = () => {
-      clearTimeout(timer);
-      ws.off("message", onMessage);
-      ws.off("close", onClose);
-    };
-    ws.on("message", onMessage);
-    ws.once("close", onClose);
-  });
-}
-
 async function main() {
   // 1. Anonymous host + invite (public endpoint, no session).
   const anon = await jsonFetch("/api/tokimeki/anon-host", {

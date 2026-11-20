@@ -297,7 +297,7 @@ JWT 模式非 disabled 时，`X-Tokimeki-Session` 的三段式值按 **Session J
 
 ### 5.1.2 Session passcode（v1.2-D）
 
-- Host 在 `hello.passcode` 中发送 `{v:1,kdf:"pbkdf2-sha256",salt,iterations,hash}`
+- Host 在 `hello.passcode` 中发送 `{v:1,kdf:"pbkdf2-sha256",salt,iterations,hash}`（passcode 限制为 6..128 个可见 ASCII 字符，排除 `$`/`%`/`!`/`&`/空白/引号，避免 header 与 shell 解析问题）
   （100k iterations、16-byte salt、32-byte hash；relay 接受 10k..200k）。
   明文 passcode 不进入 hello/URL/日志。
 - viewer/listener 通过 `X-Tokimeki-Passcode` 提交；SessionDO 用存储的

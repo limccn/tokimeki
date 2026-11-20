@@ -278,10 +278,14 @@ function loadPreNamespaceSessionMetadata(sql: SqlStorage): SessionMetadata | nul
   }
 }
 
-/** Insert or replace the session metadata row (a session has at most one). */
+/**
+ * Insert the session metadata row. `INSERT OR IGNORE` makes first-host
+ * creation atomic: two concurrent first hellos cannot overwrite each other's
+ * token hash/TTL/quotas; the loser re-reads and is rejected by the caller.
+ */
 export function insertSessionMetadata(sql: SqlStorage, meta: SessionMetadata): void {
   sql.exec(
-    `INSERT OR REPLACE INTO session_meta
+    `INSERT OR IGNORE INTO session_meta
        (session_id, created_at, last_activity_at, host_token_hash,
         session_ttl_seconds, max_clients, host_offline_deadline, namespace_id,
         absolute_deadline, relay_bytes)
@@ -421,8 +425,14 @@ export function loadSessionPasscode(sql: SqlStorage): SessionPasscodeRecord | nu
       lockedUntil: row.locked_until ?? null,
       updatedAt: row.updated_at,
     };
-  } catch {
-    return null;
+  } catch (error) {
+    // A legacy session may not have the table yet; anything else is a real
+    // storage failure and must fail closed rather than admit a viewer.
+    const message = error instanceof Error ? error.message : "";
+    if (message.includes("no such table: session_passcode")) {
+      return null;
+    }
+    throw error;
   }
 }
 

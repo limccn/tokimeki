@@ -21,6 +21,7 @@ import {
 import { ConfigEnvelopeError, parseConfigEnvelope } from "./config-envelope.js";
 import { INVITE_KEYS, type InviteKey } from "./invite.js";
 import { isLogLevel, LOG_LEVELS, type LogLevel } from "./logger.js";
+import { PASSCODE_PATTERN } from "./passcode.js";
 import { parseTuiCommandList, WINDOW_MODES, type WindowMode } from "./window-policy.js";
 
 export class ConfigError extends Error {
@@ -596,8 +597,10 @@ function parsePasscode(env: NodeJS.ProcessEnv): string | null {
       `TOKIMEKI_PASSCODE must be ${MIN_PASSCODE_LENGTH}..${MAX_PASSCODE_LENGTH} characters`,
     );
   }
-  if (/[\0\r\n]/.test(raw)) {
-    throw new ConfigError("TOKIMEKI_PASSCODE must not contain line breaks");
+  if (!PASSCODE_PATTERN.test(raw)) {
+    throw new ConfigError(
+      "TOKIMEKI_PASSCODE must use visible ASCII letters/digits and ._~@#*+=:- only",
+    );
   }
   return raw;
 }
@@ -819,12 +822,12 @@ export function loadDoctorConfig(
     if (
       passcodeRaw.length >= MIN_PASSCODE_LENGTH &&
       passcodeRaw.length <= MAX_PASSCODE_LENGTH &&
-      !/[\0\r\n]/.test(passcodeRaw)
+      PASSCODE_PATTERN.test(passcodeRaw)
     ) {
       hasPasscode = true;
     } else {
       warnings.push(
-        `TOKIMEKI_PASSCODE must be ${MIN_PASSCODE_LENGTH}..${MAX_PASSCODE_LENGTH} characters without line breaks`,
+        `TOKIMEKI_PASSCODE must be ${MIN_PASSCODE_LENGTH}..${MAX_PASSCODE_LENGTH} visible ASCII characters (._~@#*+=:-)`,
       );
     }
   }

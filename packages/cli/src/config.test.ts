@@ -722,7 +722,7 @@ describe("session passcode config", () => {
       });
       expect(config.passcode).toBeNull();
     }
-    for (const value of ["12345", "x".repeat(129), "12345\n6"]) {
+    for (const value of ["12345", "x".repeat(129), "12345\n6", "密码123456", "abc$123"]) {
       expect(() =>
         loadHostConfig({
           env: baseHostEnv({ TOKIMEKI_PASSCODE: value }),

@@ -140,6 +140,32 @@ tokimeki attach
 
 `tokimeki doctor` checks the local PTY and relay configuration.
 
+### v1.2: hosted auth, share links, and the web viewer
+
+The relay on `develop` (not yet part of the published `0.1.2` package) accepts:
+
+- **Host JWT** via `TOKIMEKI_TOKEN` + `TOKIMEKI_NAMESPACE` (issued by TokiAPI
+  or any ES256/JWKS issuer). Static namespace tokens and the single-owner
+  `TOKIMEKI_MASTER_TOKEN` fallback still work when the relay is not in JWT
+  mode.
+- **Session JWT** via `TOKIMEKI_SESSION_TOKEN` for viewers/listeners. The CLI
+  treats it as an opaque value; the relay verifies it offline and skips the
+  opaque session-token hash. Listener mode additionally sends
+  `X-Tokimeki-Listener: 1`.
+- Optional **session passcode** via `TOKIMEKI_PASSCODE` (6–128 visible ASCII
+  chars). The host sends only a PBKDF2-SHA256 verifier; viewers submit the
+  plaintext and the relay locks verification for 30 s after five failures.
+  This is separate from a 6-digit session access code.
+
+[TokiAPI](https://github.com/limccn/TokiAPI) can drive the whole flow:
+`/tokimeki` generates the host command and a one-time share link,
+`/#t-<code>` opens the browser viewer, and `/api/tokimeki/attach/cli` issues a
+CLI Session JWT. The browser never receives a JWT; the TokiAPI proxy injects
+it and strips TURN credentials. See
+[docs/web-viewer.md](docs/web-viewer.md) for the cross-repo contract and the
+e2e harnesses (`scripts/e2e/v1.2-cross-repo.mjs`,
+`scripts/e2e/v1.2-passcode-e2e.mjs`).
+
 ## CLI at a glance
 
 | Command | What it does |
@@ -231,6 +257,11 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
   `TOKIMEKI_TUNNEL_SECRET`; the default `session-token` key mode is derivable
   by the relay.
 - Use a dedicated relay/session and rotate the master token if it leaks.
+- Host JWTs and Session JWTs have no revocation list: they remain valid until
+  `exp` (Host JWT default 30 days; CLI Session JWT up to 24 hours). Revoking a
+  TokiAPI invite only blocks new redemptions.
+- A 6-digit session access code is a low-entropy shared viewer credential;
+  prefer a 16-character invite link and rotate the session if it leaks.
 - Report vulnerabilities via [SECURITY.md](SECURITY.md), not public issues.
 
 ## Documentation
@@ -238,6 +269,7 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 - [CLI usage](docs/cli.md)
 - [Cloudflare relay deploy + TURN](docs/deploy-cloudflare.md)
 - [Wire protocol](docs/protocol.md)
+- [Web viewer / TokiAPI proxy contract](docs/web-viewer.md)
 - [Production deployment notes](docs/deployment.md)
 - [Technical guide for AI assistants](CLAUDE.md)
 - [Performance baselines](docs/perf/)
@@ -245,7 +277,9 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 
 ## Status
 
-`0.1.2` — current release. Install from
+`0.1.2` — current published release. `develop` additionally contains the
+unreleased v1.2 authentication work (Host/Session JWT, passcode, share-link
+and web-viewer integration). Install from
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to GitHub
 Packages; see [docs/release.md](docs/release.md)) or read the
 [v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2).

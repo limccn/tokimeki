@@ -558,7 +558,9 @@ class HostSession {
       return null;
     }
     if (this.#passcodeVerifierCache === null) {
-      this.#passcodeVerifierCache = createPasscodeVerifier(this.#config.passcode);
+      this.#passcodeVerifierCache = createPasscodeVerifier(this.#config.passcode, {
+        sessionId: this.#config.session,
+      });
     }
     return this.#passcodeVerifierCache;
   }

@@ -214,7 +214,11 @@ function waitForJson(ws, predicate, ms = timeoutMs) {
   });
 }
 
-async function webConnect(code, passcodeValue) {
+async function webConnect(
+  code,
+  passcodeValue,
+  { gate = false, expectFlag = true, sendHello = true } = {},
+) {
   const attach = await jsonFetch("/api/tokimeki/attach", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -223,8 +227,11 @@ async function webConnect(code, passcodeValue) {
   if (attach.response.status !== 200) {
     throw new Error(`web attach failed: HTTP ${attach.response.status}\n${attach.text}`);
   }
-  if (attach.body?.passcodeRequired !== true) {
+  if (expectFlag && attach.body?.passcodeRequired !== true) {
     throw new Error("attach did not report passcodeRequired=true");
+  }
+  if (!expectFlag && attach.body?.passcodeRequired !== false) {
+    throw new Error("attach did not report passcodeRequired=false");
   }
   const cookie = (attach.response.headers.getSetCookie?.() ?? [])
     .map((entry) => entry.split(";")[0])
@@ -232,12 +239,16 @@ async function webConnect(code, passcodeValue) {
   if (cookie.length === 0) throw new Error("no ticket cookie");
   const wsUrl = new URL("/api/tokimeki/ws", tokiApiBase);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+  if (gate) wsUrl.searchParams.set("gate", "1");
   const ws = new WebSocket(wsUrl, { headers: { Origin: tokiApiBase, Cookie: cookie } });
   await new Promise((resolveOpen, rejectOpen) => {
     ws.once("open", resolveOpen);
     ws.once("error", rejectOpen);
   });
-  ws.send(JSON.stringify({ v: 1, type: "passcode", value: passcodeValue }));
+  if (passcodeValue !== null) {
+    ws.send(JSON.stringify({ v: 1, type: "passcode", value: passcodeValue }));
+  }
+  if (!sendHello) return ws;
   ws.send(
     JSON.stringify({
       v: 1,
@@ -359,6 +370,29 @@ async function main() {
     throw new Error(`unexpected wrong-passcode error: ${JSON.stringify(errorFrame)}`);
   }
   console.log(`[ok] web viewer with a wrong passcode was rejected (${errorFrame.code})`);
+
+  // 6. Invite flag false + host passcode: the first hello is rejected, then the
+  //    browser retries with ?gate=1 and the passcode as the first frame.
+  const codeNoFlag = randomCode(16);
+  secrets.add(codeNoFlag);
+  insertInvite({
+    namespace,
+    session: currentSession,
+    codeHash: createHash("sha256").update(codeNoFlag).digest("hex"),
+    passcodeRequired: false,
+  });
+  const noFlagWs = await webConnect(codeNoFlag, null, { expectFlag: false });
+  const noFlagError = await waitForJson(noFlagWs, (message) => message.type === "error", 15_000);
+  if (noFlagError.code !== "passcode_required") {
+    throw new Error(
+      `expected passcode_required without a gate, got ${JSON.stringify(noFlagError)}`,
+    );
+  }
+  noFlagWs.close();
+  const retryWs = await webConnect(codeNoFlag, passcode, { expectFlag: false, gate: true });
+  await waitForJson(retryWs, (message) => message.type === "welcome");
+  console.log("[ok] flag-false invite recovered through the ?gate=1 passcode retry");
+  retryWs.close();
 
   okWs.close();
   badWs.close();

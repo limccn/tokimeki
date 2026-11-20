@@ -406,6 +406,12 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
   private readonly messageTimestamps: number[] = [];
   /** Last activity-driven idle alarm reschedule; throttled to avoid write amplification. */
   private lastIdleScheduleAt = 0;
+  /**
+   * Serializes passcode verification/updates. PBKDF2 awaits would otherwise
+   * let concurrent hellos read the same failure counter and overwrite each
+   * other, defeating the lockout.
+   */
+  #passcodeQueue: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
@@ -838,7 +844,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     // The token check yields to the runtime. Re-read session state and recheck
     // duplicates/capacity synchronously before saving the attachment so two
     // concurrent hellos cannot both pass the pre-await checks (SEC-02).
-    const latestMeta = loadSessionMetadata(this.ctx.storage.sql);
+    let latestMeta = loadSessionMetadata(this.ctx.storage.sql);
     if (latestMeta !== null && meta !== null && latestMeta.hostTokenHash !== meta.hostTokenHash) {
       this.closeWithError(
         ws,
@@ -875,7 +881,58 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       await this.purgeSession("absolute_ttl");
       return;
     }
-    if (!(await this.handlePasscode(ws, role, hello, pending, now))) {
+    if (!(await this.serializePasscode(() => this.handlePasscode(ws, role, hello, pending, now)))) {
+      return;
+    }
+
+    // The passcode check awaits PBKDF2. Another host can create the session in
+    // that window, so re-read and re-run every host check against fresh state
+    // before deciding whether to insert. Otherwise a host credential holder
+    // without this session token could overwrite a brand-new session's hash,
+    // TTL, and quotas with `INSERT OR REPLACE`.
+    latestMeta = loadSessionMetadata(this.ctx.storage.sql);
+    if (latestMeta !== null && meta !== null && latestMeta.hostTokenHash !== meta.hostTokenHash) {
+      this.closeWithError(
+        ws,
+        "unauthorized",
+        "session token changed during hello",
+        CLOSE_CODES.unauthorized,
+      );
+      return;
+    }
+    if (role === "host" && meta === null && latestMeta !== null) {
+      const tokenMatches = await constantTimeEqualHex(latestMeta.hostTokenHash, pending.tokenHash);
+      if (!tokenMatches) {
+        this.closeWithError(
+          ws,
+          "unauthorized",
+          "session token does not match",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+    }
+    if (
+      latestMeta !== null &&
+      role === "host" &&
+      pending.namespaceId !== "*" &&
+      latestMeta.namespaceId !== pending.namespaceId
+    ) {
+      this.closeWithError(
+        ws,
+        "invalid_session",
+        "session namespace changed during hello",
+        CLOSE_CODES.unauthorized,
+      );
+      return;
+    }
+    if (
+      sessionMaxTtlSeconds(this.env) > 0 &&
+      latestMeta !== null &&
+      latestMeta.absoluteDeadline !== null &&
+      latestMeta.absoluteDeadline <= now
+    ) {
+      await this.purgeSession("absolute_ttl");
       return;
     }
 
@@ -883,16 +940,6 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     let replacedSocket: ActiveSocket | null = null;
 
     if (role === "host") {
-      if (meta === null && latestMeta !== null) {
-        // Another host created the session while this hello was awaiting.
-        this.closeWithError(
-          ws,
-          "duplicate_client_id",
-          "a host is already online for this session",
-          CLOSE_CODES.invalidMessage,
-        );
-        return;
-      }
       if (latestMeta !== null) {
         const onlineHost = this.findHost();
         if (onlineHost !== null && onlineHost.att.clientId !== hello.clientId) {
@@ -977,6 +1024,28 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           absoluteDeadline: maxTtl > 0 ? now + maxTtl * 1000 : null,
           relayBytes: 0,
         });
+        // `INSERT OR IGNORE`: if another first host won the race, verify the
+        // persisted hash before this socket becomes an active host.
+        const created = loadSessionMetadata(this.ctx.storage.sql);
+        if (created === null) {
+          this.closeWithError(
+            ws,
+            "internal",
+            "failed to create session metadata",
+            CLOSE_CODES.internalError,
+          );
+          return;
+        }
+        if (!(await constantTimeEqualHex(created.hostTokenHash, pending.tokenHash))) {
+          this.closeWithError(
+            ws,
+            "unauthorized",
+            "session token does not match",
+            CLOSE_CODES.unauthorized,
+          );
+          return;
+        }
+        latestMeta = created;
       } else if (replacedSocket !== null) {
         this.supersedeSocket(
           replacedSocket,
@@ -2270,6 +2339,20 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
    * hello). Five failures lock all viewer/listener verification for 30 s.
    * No passcode, verifier, or hash is ever logged.
    */
+  private async serializePasscode<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.#passcodeQueue;
+    let release!: () => void;
+    this.#passcodeQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
   private async handlePasscode(
     ws: WebSocket,
     role: Role,
@@ -2277,7 +2360,18 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     pending: PendingAttachment,
     now: number,
   ): Promise<boolean> {
-    const stored = loadSessionPasscode(this.ctx.storage.sql);
+    let stored: ReturnType<typeof loadSessionPasscode>;
+    try {
+      stored = loadSessionPasscode(this.ctx.storage.sql);
+    } catch {
+      this.closeWithError(
+        ws,
+        "internal",
+        "passcode store is unavailable",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
     if (role === "host") {
       const presented = hello.passcode;
       if (presented === undefined) {

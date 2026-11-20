@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { connectWorker, helloFor, MASTER_TOKEN, SESSION_TOKEN, type TestSocket } from "./helpers";
+import {
+  connectWorker,
+  helloFor,
+  MASTER_TOKEN,
+  SESSION_TOKEN,
+  sleep,
+  type TestSocket,
+} from "./helpers";
 
 /**
  * Session passcode integration tests (v1.2-D).
@@ -163,6 +170,40 @@ describe("worker session passcode", () => {
     const mismatch = await rotated.waitForType("error");
     expect(mismatch.code).toBe("passcode_mismatch");
     rotated.close();
+  });
+
+  it("serializes concurrent wrong passcodes so a burst cannot bypass lockout", async () => {
+    const host = await openPasscodeHost("passcode-race");
+    const viewers = await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        openViewer("passcode-race", `race-${index}`, "000000"),
+      ),
+    );
+    const codes = await Promise.all(
+      viewers.map(async (viewer) => (await viewer.waitForType("error")).code),
+    );
+    expect(codes.filter((code) => code === "passcode_locked").length).toBeGreaterThan(0);
+    expect(codes.filter((code) => code === "passcode_invalid").length).toBeLessThanOrEqual(5);
+    for (const viewer of viewers) viewer.close();
+    host.close();
+    await sleep(100);
+  });
+
+  it("rejects a competing first-host hello that raced past the pre-passcode check", async () => {
+    const session = "passcode-first-host-race";
+    const verifier = await makeVerifier();
+    const a = await connectWorker(session, { hostToken: MASTER_TOKEN, token: "token-a" });
+    const b = await connectWorker(session, { hostToken: MASTER_TOKEN, token: "token-b" });
+    a.send(helloFor(session, "host", "host-a", { cols: 80, rows: 24, passcode: verifier }));
+    b.send(helloFor(session, "host", "host-b", { cols: 80, rows: 24, passcode: verifier }));
+    const results = await Promise.allSettled([
+      a.waitForType("welcome", 5_000),
+      b.waitForType("welcome", 5_000),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    a.close();
+    b.close();
+    await sleep(100);
   });
 
   it("keeps sessions without a passcode unchanged", async () => {
