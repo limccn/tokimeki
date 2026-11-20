@@ -21,6 +21,12 @@ The browser never sees a Host JWT or a Session JWT. Every reconnect must first
 expires after 60 s. A 410 means the link is invalid/expired/revoked; stop
 reconnecting.
 
+The ticket cookie is origin-wide (`Path=/api/tokimeki/ws`), so opening two
+different share links in the same browser profile can overwrite the pending
+ticket and consume the wrong one. Treat one active share link per browser
+profile as the supported v1 behavior; a per-invite cookie/query slot is a
+future hardening item.
+
 ## 2. Proxy frame policy
 
 - **Binary terminal frames**: pass through unchanged (INPUT/OUTPUT/SNAPSHOT_TO
