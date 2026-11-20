@@ -44,6 +44,18 @@ export interface RelayEnv {
   readonly TOKIMEKI_TURN_API_TOKEN?: string;
   readonly TOKIMEKI_TURN_TTL_SECONDS?: string;
   readonly TOKIMEKI_ICE_TRANSPORT_POLICY?: string;
+  /**
+   * Host JWT verification (all optional; unset `TOKIMEKI_JWT_JWKS_URL` =
+   * JWT mode disabled). The JWKS lives on the TokiAPI dashboard origin
+   * (`https://<dashboard>/api/tokimeki/jwks.json`), never on the relay.
+   */
+  readonly TOKIMEKI_JWT_JWKS_URL?: string;
+  /** Required when the JWKS URL is set; compared exactly against `iss`. */
+  readonly TOKIMEKI_JWT_ISSUER?: string;
+  /** Defaults to `tokimeki-relay` when the JWKS URL is set. */
+  readonly TOKIMEKI_JWT_AUDIENCE?: string;
+  readonly TOKIMEKI_JWT_JWKS_TTL_SECONDS?: string;
+  readonly TOKIMEKI_JWT_CLOCK_SKEW_SECONDS?: string;
   readonly TOKIMEKI_LOG_LEVEL?: string;
 }
 

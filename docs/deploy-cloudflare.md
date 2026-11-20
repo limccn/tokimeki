@@ -39,11 +39,16 @@ npm install
 npx wrangler login
 
 # Required: host authentication. Use a strong random value.
+# (Single-owner fallback credential; disabled once namespace tokens are active.)
 npx wrangler secret put TOKIMEKI_MASTER_TOKEN
 
 # Optional: static multi-namespace host tokens (OSS multi-user).
 # Paste the JSON object when prompted; never commit it.
 npx wrangler secret put TOKIMEKI_NAMESPACE_TOKENS
+
+# Optional: TokiAPI Host JWT verification (both values are public; vars also work)
+npx wrangler secret put TOKIMEKI_JWT_JWKS_URL   # e.g. https://tokiapi.app/api/tokimeki/jwks.json
+npx wrangler secret put TOKIMEKI_JWT_ISSUER     # e.g. https://tokiapi.app
 
 # Optional TURN secrets (choose what you use)
 npx wrangler secret put TOKIMEKI_COTURN_SECRET       # coturn REST
@@ -76,17 +81,55 @@ set with `wrangler secret put` (or the Deploy Button prompt).
 
 ### Authentication
 
+Host credentials travel in the `X-Tokimeki-Token` header (**breaking change**:
+the old `X-Tokimeki-Master` header is no longer accepted; upgrade the CLI and
+relay together). The relay decides the credential kind by value shape, in this
+order:
+
+1. the single-owner fallback token (`TOKIMEKI_MASTER_TOKEN`) — only while no
+   valid namespace tokens are configured; it can take over any session
+   (root `*`);
+2. a three-segment Host JWT (only while JWT mode is enabled) — verified
+   offline against the JWKS;
+3. a static namespace token — scoped to `<namespace>.<slug>` sessions.
+
 | Name | Kind | Required | Meaning |
 |---|---|---|---|
-| `TOKIMEKI_MASTER_TOKEN` | secret | yes | Root host authentication / break-glass. Unset/blank rejects all root hosts (fail-closed). Never give it to viewers. |
-| `TOKIMEKI_NAMESPACE_TOKENS` | secret | no | Static namespace host tokens as a JSON object `{ "<namespace>": "<token>" }`. Each token must be unique, >=32 bytes, and differ from the master token; namespaces match `^[a-z0-9][a-z0-9_-]{0,31}$` (max 64 entries, raw JSON <=16 KiB). A namespace host may only use `<namespace>.<slug>` sessions. Invalid/duplicate entries fail closed (namespace auth disabled; the root master still works). |
+| `TOKIMEKI_MASTER_TOKEN` | secret | no | Single-owner fallback credential (one person exclusively owning a relay). Unset/blank rejects all fallback hosts (fail-closed). **Disabled once `TOKIMEKI_NAMESPACE_TOKENS` has at least one valid entry** — including root `*` takeover; migrate hosts to `TOKIMEKI_TOKEN`. The relay logs a `fallback_token_disabled` warning while both are set. |
+| `TOKIMEKI_NAMESPACE_TOKENS` | secret | no | Static namespace host tokens as a JSON object `{ "<namespace>": "<token>" }`. Each token must be unique, >=32 bytes, and differ from the master token; namespaces match `^[a-z0-9][a-z0-9_-]{0,31}$` (max 64 entries, raw JSON <=16 KiB). A namespace host may only use `<namespace>.<slug>` sessions. Invalid/duplicate entries fail closed (namespace auth disabled; the fallback token stays usable). |
+
+> **Preflight before deploying the header rename / fallback gating**: if you
+> already set `TOKIMEKI_NAMESPACE_TOKENS` but no longer know its values (the
+> secret is write-only), deploying this relay disables the fallback token with
+> no usable namespace token — host authentication is locked out. Rotate and
+> distribute the namespace tokens first, or clear the secret to stay in
+> fallback mode.
+
+| Name | Kind | Required | Meaning |
+|---|---|---|---|
+| `TOKIMEKI_JWT_JWKS_URL` | var/secret | no | Enables Host JWT verification: absolute `https://` JWKS URL on the **TokiAPI dashboard origin** (the `BETTER_AUTH_URL` origin), e.g. `https://tokiapi.app/api/tokimeki/jwks.json`. No userinfo, no fragment. Unset/blank = JWT mode disabled: no JWT parsing, no Authorization handling, no JWKS traffic. |
+| `TOKIMEKI_JWT_ISSUER` | var/secret | with URL | Required when the JWKS URL is set; compared exactly against the `iss` claim (max 512 chars). A malformed URL or missing issuer fails closed for JWT credentials (401) while fallback/namespace tokens keep working. |
+| `TOKIMEKI_JWT_AUDIENCE` | var | no | Expected `aud` claim; default `tokimeki-relay`. |
+| `TOKIMEKI_JWT_JWKS_TTL_SECONDS` | var | no | JWKS cache lifetime; default `3600`, clamped to 60–86400. Per-isolate memory cache with in-flight dedupe; an unknown `kid` triggers one refresh per 30 s. |
+| `TOKIMEKI_JWT_CLOCK_SKEW_SECONDS` | var | no | Allowed clock skew for `iat`/`nbf`/`exp`; default `60`, clamped to 0–300. |
+
+Only `alg=ES256` tokens with `token_use=host`, a `scope` containing `host`, a
+valid `namespace` claim, and a matching `<namespace>.<slug>` session are
+admitted. Invalid JWTs return `401`; an unreachable JWKS with no usable cache
+returns `503 jwks_unavailable`. Verification is offline at the edge — the relay
+never calls TokiAPI per connection. There is no revocation list: a Host JWT is
+valid until `exp` (TokiAPI default 30 days), so rotate the signing key in
+TokiAPI to invalidate outstanding tokens.
 
 `GET /healthz` is public and intentionally minimal. `GET /auth/whoami` is the
-authenticated operations probe: it accepts only the root master token in
-`X-Tokimeki-Master` and returns the auth mode plus TURN provider/configured
-state. It never returns tokens, TURN credentials, secrets, or ICE URLs.
-Namespace tokens are accepted only on `/ws/<session>`; the Worker derives the
-namespace from the token and strips any client-supplied namespace header.
+authenticated operations probe: it reads `X-Tokimeki-Token` (plus, only while
+JWT mode is enabled, `Authorization: Bearer`) and returns the detected
+`authMode` — `jwt` (with namespace, sub, tokenUse, scopes, expiresAt),
+`namespace` (with namespace), or `master` — plus the TURN provider/configured
+state. It never returns tokens, TURN credentials, secrets, ICE URLs, or JWKS
+content. A JWT-disabled deployment neither parses nor strips `Authorization`.
+The Worker derives the namespace from the verified credential and strips any
+client-supplied namespace header.
 
 ### Sessions
 
@@ -190,23 +233,24 @@ unless you own the domain.
 curl -s https://<your-worker>.workers.dev/healthz
 # {"ok":true,"service":"tokimeki-relay","protocolVersion":1}
 
-# Send the master token from your secret store; never commit a real value.
-curl -s -H "X-Tokimeki-Master: $TOKIMEKI_MASTER_TOKEN" \
+# Send the token from your secret store; never commit a real value.
+curl -s -H "X-Tokimeki-Token: $TOKIMEKI_MASTER_TOKEN" \
   https://<your-worker>.workers.dev/auth/whoami
 # {"ok":true,"service":"tokimeki-relay","protocolVersion":1,"authMode":"master",
 #  "turn":{"provider":"stun","configured":false}}
 ```
 
 `/healthz` is public and minimal by design (no TURN/JWT/namespace details).
-`/auth/whoami` requires the root master token, returns `401` without a valid
-one, `405` for non-GET requests, and sets `no-store`. Its response never
-contains the token, TURN credentials, secrets, or ICE URLs. After configuring
-TURN, `turn.provider` becomes `coturn`, `static`, or `cloudflare` and
-`turn.configured` becomes `true`; if it stays `stun`, a required var or secret
-is missing.
+`/auth/whoami` requires a valid host credential on `X-Tokimeki-Token`, returns
+`401` without one (or with an invalid one), `503 jwks_unavailable` when JWT
+mode is configured but the JWKS is unreachable, `405` for non-GET requests, and
+sets `no-store`. Its response never contains the token, TURN credentials,
+secrets, or ICE URLs. After configuring TURN, `turn.provider` becomes `coturn`,
+`static`, or `cloudflare` and `turn.configured` becomes `true`; if it stays
+`stun`, a required var or secret is missing.
 
 External monitors should check `/healthz` for HTTP 200 only, or use
-`/auth/whoami` with the master token for TURN diagnostics.
+`/auth/whoami` with a host credential for TURN diagnostics.
 
 ## Edge rate limiting (recommended)
 
@@ -240,8 +284,8 @@ back by a Worker rollback; the schema is additive and lazy.
 
 ## Security notes
 
-- Keep `TOKIMEKI_MASTER_TOKEN` and TURN secrets out of git, logs, screenshots,
-  and issue reports.
+- Keep host credentials (`TOKIMEKI_TOKEN`, `TOKIMEKI_MASTER_TOKEN`) and TURN
+  secrets out of git, logs, screenshots, and issue reports.
 - `.dev.vars` is ignored by git; `.dev.vars.example` only contains placeholders.
 - The relay carries terminal bytes when P2P/TURN are unavailable. Treat the
   relay operator as trusted infrastructure; this is not end-to-end encryption.

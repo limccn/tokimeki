@@ -14,8 +14,8 @@ describe("parseConfigEnvelope", () => {
         relayUrl: "wss://relay.example",
         session: "demo",
         sessionToken: "token-1234",
+        token: "host-token-1234",
         masterToken: "master-1234",
-        namespaceToken: "namespace-token-1234",
         namespace: "team-a",
         window: { cols: 100, rows: 30 },
         windowTui: ["claude", "omp"],
@@ -29,8 +29,8 @@ describe("parseConfigEnvelope", () => {
       TOKIMEKI_RELAY_URL: "wss://relay.example",
       TOKIMEKI_SESSION: "demo",
       TOKIMEKI_SESSION_TOKEN: "token-1234",
+      TOKIMEKI_TOKEN: "host-token-1234",
       TOKIMEKI_MASTER_TOKEN: "master-1234",
-      TOKIMEKI_NAMESPACE_TOKEN: "namespace-token-1234",
       TOKIMEKI_NAMESPACE: "team-a",
       TOKIMEKI_WINDOW_SIZE: "100x30",
       TOKIMEKI_WINDOW_TUI: "claude,omp",
@@ -120,7 +120,7 @@ describe("TOKIMEKI_CONFIG integration", () => {
     expect(config.windowMode).toBe("tui");
   });
 
-  it("loads a namespace host from the JSON envelope", () => {
+  it("loads a host token from the JSON envelope", () => {
     const config = loadHostConfig({
       env: {
         TOKIMEKI_CONFIG: configJson({
@@ -128,16 +128,33 @@ describe("TOKIMEKI_CONFIG integration", () => {
           relayUrl: "https://relay.example",
           session: "team-a.demo",
           sessionToken: "session-token-1234",
-          namespaceToken: "namespace-token-1234",
+          token: "host-token-1234",
           namespace: "team-a",
         }),
       },
     });
-    expect(config.authMode).toBe("namespace");
-    expect(config.hostToken).toBe("namespace-token-1234");
+    expect(config.authMode).toBe("token");
+    expect(config.hostToken).toBe("host-token-1234");
     expect(config.namespace).toBe("team-a");
     expect(config.websocketUrl).toBe("wss://relay.example/ws/team-a.demo");
-    expect(config.secrets).toContain("namespace-token-1234");
+    expect(config.secrets).toContain("host-token-1234");
+  });
+
+  it("rejects the retired namespaceToken envelope field with a rename hint", () => {
+    expect(() =>
+      loadHostConfig({
+        env: {
+          TOKIMEKI_CONFIG: configJson({
+            v: 1,
+            relayUrl: "https://relay.example",
+            session: "team-a.demo",
+            sessionToken: "session-token-1234",
+            namespaceToken: "namespace-token-1234",
+            namespace: "team-a",
+          }),
+        },
+      }),
+    ).toThrow(/retired/);
   });
 
   it("reports invalid envelopes as configuration errors", () => {

@@ -37,8 +37,8 @@ const SSH_ENV_VARS = ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"] as const;
  * attached viewer.
  */
 const HOST_SECRET_ENV_VARS = [
+  "TOKIMEKI_TOKEN",
   "TOKIMEKI_MASTER_TOKEN",
-  "TOKIMEKI_NAMESPACE_TOKEN",
   // Relay-side secret map: a self-hoster may run the Worker and the host CLI
   // from the same shell, and this map holds every namespace host token.
   "TOKIMEKI_NAMESPACE_TOKENS",

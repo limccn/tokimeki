@@ -195,17 +195,13 @@ describe("tokimeki CLI wiring", () => {
     const runHost = makeRunHost();
     const hostPi = harness({}, { runHost });
     expect(await main(["node", "tokimeki", "pi", "--model", "x"], hostPi.deps)).toBe(2);
-    expect(hostPi.stderr()).toContain(
-      "TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required",
-    );
+    expect(hostPi.stderr()).toContain("TOKIMEKI_TOKEN or TOKIMEKI_MASTER_TOKEN is required");
 
     const hostRun = harness({}, { runHost });
     expect(await main(["node", "tokimeki", "run", "--", "node", "script.mjs"], hostRun.deps)).toBe(
       2,
     );
-    expect(hostRun.stderr()).toContain(
-      "TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required",
-    );
+    expect(hostRun.stderr()).toContain("TOKIMEKI_TOKEN or TOKIMEKI_MASTER_TOKEN is required");
     expect(runHost).not.toHaveBeenCalled();
   });
 
@@ -329,7 +325,8 @@ describe("tokimeki CLI wiring", () => {
       relayUrl: "ws://localhost:8787",
       session: "sess-1",
       hasSessionToken: true,
-      hasMasterToken: false,
+      masterToken: null,
+      authMode: null,
     });
   });
 
@@ -340,7 +337,22 @@ describe("tokimeki CLI wiring", () => {
     const code = await main(["node", "tokimeki", "claude"], deps);
     expect(code).toBe(2);
     expect(runHost).not.toHaveBeenCalled();
-    expect(stderr()).toContain("TOKIMEKI_MASTER_TOKEN or TOKIMEKI_NAMESPACE_TOKEN is required");
+    expect(stderr()).toContain("TOKIMEKI_TOKEN or TOKIMEKI_MASTER_TOKEN is required");
+  });
+
+  it("exits 2 when the retired TOKIMEKI_NAMESPACE_TOKEN is set", async () => {
+    const runHost = makeRunHost();
+    const { deps, stderr } = harness(
+      { ...hostEnv, TOKIMEKI_NAMESPACE_TOKEN: "old-token" },
+      { runHost },
+    );
+
+    const code = await main(["node", "tokimeki", "claude"], deps);
+    expect(code).toBe(2);
+    expect(runHost).not.toHaveBeenCalled();
+    expect(stderr()).toContain("retired");
+    expect(stderr()).toContain("TOKIMEKI_TOKEN");
+    expect(stderr()).not.toContain("old-token");
   });
 
   it("exits 2 when attach configuration is incomplete", async () => {

@@ -1,10 +1,28 @@
 # 部署指南
 
-> 状态：v1 已部署到生产 Cloudflare。生产 URL 为 `https://relay.tokiapi.app`
-> （Worker `tokimeki-relay`，当前 100% 流量版本
-> `1104916c-f188-4cc5-8df6-e34ca557ffae`，2026-11-16 发布，含 v1.1 F2
-> 只读 listener 角色；上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
-> 可作为回滚参考，含 host relay 重连修复）。
+> 状态：v1.2 Host 认证切片已部署到生产 Cloudflare。生产 URL 为
+> `https://relay.tokiapi.app`（Worker `tokimeki-relay`，当前 100% 流量版本
+> `5cda681f-7a42-40a8-9ea9-cf708808ba0a`，2026-11-19 发布：
+> `X-Tokimeki-Token` 头更名、回退 token 与 namespace token 互斥、Host JWT
+> 边缘验签；生产未配置 `TOKIMEKI_JWT_*`，当前为 no-JWT。协议与 DO schema
+> 不变）。
+>
+> 2026-11-19 生产认证状态：`TOKIMEKI_NAMESPACE_TOKENS` 已轮换为已知的
+> `e2e` namespace token（值不入库、不写入文档）；`TOKIMEKI_MASTER_TOKEN`
+> 仍保留，但因 namespace 模式生效已不再认证 host（relay 记录一次
+> `fallback_token_disabled` warning，迁移完成后应移除该 secret）。旧
+> `X-Tokimeki-Master` 客户端不再能认证 host，CLI 与 relay 必须成对升级。
+>
+> 同日生产 live e2e（relay-only、no-JWT、namespace `e2e`）通过三组：
+> 基础 host/viewer/重连/Ctrl-C；host secret 不进入 hosted PTY；只读
+> listener。`/healthz` 正常，`/auth/whoami` 返回
+> `authMode=namespace`/`namespace=e2e`，TURN provider 为 coturn。真实
+> TokiAPI Host JWT↔relay live e2e 仍 pending（生产未配置 JWKS/issuer）。
+>
+> 历史（2026-11-16）：v1 生产版本 `1104916c-f188-4cc5-8df6-e34ca557ffae`，
+> 含 v1.1 F2 只读 listener 角色；上一版本
+> `ee53cf15-2acb-45a7-b08f-dd67d70e06d6` 可作为回滚参考，含 host relay
+> 重连修复。
 > `TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_COTURN_SECRET` 与 `TOKIMEKI_TURN_API_TOKEN`
 > 已通过 `wrangler secret put` 上传；`TOKIMEKI_TURN_KEY_ID` 为 vars（Cloudflare TURN
 > 验证用，当前 provider=coturn 时不生效）。当前 `TOKIMEKI_TURN_PROVIDER=coturn`，
@@ -57,15 +75,43 @@ npx wrangler secret put TOKIMEKI_MASTER_TOKEN --config packages/relay/wrangler.j
 npx wrangler secret put TOKIMEKI_COTURN_SECRET --config packages/relay/wrangler.jsonc
 # 可选兜底：Cloudflare Realtime TURN；API token 用 secret，Key ID 可放 vars
 npx wrangler secret put TOKIMEKI_TURN_API_TOKEN --config packages/relay/wrangler.jsonc
+# 可选：TokiAPI Host JWT 验签（JWKS/issuer 也可以放 vars；都是非 secret 公开值）
+npx wrangler secret put TOKIMEKI_JWT_JWKS_URL --config packages/relay/wrangler.jsonc
+npx wrangler secret put TOKIMEKI_JWT_ISSUER --config packages/relay/wrangler.jsonc
 ```
 
 `TOKIMEKI_COTURN_URLS`、`TOKIMEKI_TURN_PROVIDER`、`TOKIMEKI_TURN_KEY_ID` 不是必须加密，
 可放 `wrangler.jsonc` 的 `vars`；所有 `*_SECRET` / `*_TOKEN` 用 secret。
 
 `wrangler.jsonc` 已声明 SessionDO binding 与 SQLite migration。Worker 的认证实现是
-fail-closed：master token 未配置时，所有 host 认证都会被拒绝（不会变成“允许所有 host”）。
-因此生产部署前必须设置该 secret。当前安装的 Wrangler 4.106.0 会忽略 `secrets.required`
-字段（仅警告），所以这一约束靠运行时 fail-closed 与部署检查保证。
+fail-closed：回退 token 未配置且没有 namespace token / JWT 时，所有 host 认证都会被
+拒绝（不会变成“允许所有 host”）。当前安装的 Wrangler 4.106.0 会忽略
+`secrets.required` 字段（仅警告），所以这一约束靠运行时 fail-closed 与部署检查保证。
+
+Host 认证（v1.2）：
+
+- Host 凭证统一在 `X-Tokimeki-Token` 头内判定（**breaking change**：旧
+  `X-Tokimeki-Master` 头不再识别，CLI 与 relay 必须成对升级）。判定顺序：
+  回退 token（仅回退模式）→ 三段式 Host JWT（仅 JWT 模式非 disabled）→
+  静态 namespace token。
+- `TOKIMEKI_MASTER_TOKEN` 是**单人独占 relay 的回退凭证**：一个 token 满足
+  owner 的全部 host 需求，可接管任意 session（root `*`）。一旦
+  `TOKIMEKI_NAMESPACE_TOKENS` 有至少一条有效条目，回退 token 立即失效
+  （即使值匹配也 401），root `*` 接管同时失效；relay 会记录一次
+  `fallback_token_disabled` warning 提示移除该 secret。
+- JWT 模式由 `TOKIMEKI_JWT_JWKS_URL` 开启：JWKS 必须是 TokiAPI 管理台域
+  （`BETTER_AUTH_URL` 的 origin）上的 `https://` URL，例如
+  `https://tokiapi.app/api/tokimeki/jwks.json`；`TOKIMEKI_JWT_ISSUER` 必填
+  （与 `iss` 精确比较），`TOKIMEKI_JWT_AUDIENCE` 默认 `tokimeki-relay`。
+  JWT 模式额外接受 `Authorization: Bearer <Host JWT>`（web/代理 attach），
+  且在转发 DO 前删除该头；未配置 JWT 时 `Authorization` 不解析、不剥离。
+  relay 只做边缘离线验签（JWKS 内存缓存 + 未知 kid 30 秒限流刷新），不逐
+  连接回调 TokiAPI；JWKS 不可达且无缓存返回 503 `jwks_unavailable`。
+- 部署前检查（生产 preflight，**重要**）：2026-11-19 已完成一次轮换——
+  `TOKIMEKI_NAMESPACE_TOKENS` 现为已知的 `e2e` namespace token（值仅保存在
+  部署者的 0600 文件中，不写入仓库）。以后每次轮换仍须先更新/分发
+  namespace token 再部署 relay，或清空该 secret 回到 fallback 模式；否则
+  新代码会禁用回退且无人能认证 host（secret 只写，无法读回旧值）。
 
 认证补充（2026-11-13 安全修复）：
 
@@ -360,26 +406,41 @@ export TOKIMEKI_RELAY_URL=wss://relay.tokiapi.app
 curl -sS https://relay.tokiapi.app/healthz
 # {"ok":true,"service":"tokimeki-relay","protocolVersion":1}
 
-# 认证的运维探针：只接受 root master，返回 TURN 状态（不含 token/凭据）。
-curl -sS -H "X-Tokimeki-Master: $TOKIMEKI_MASTER_TOKEN" \
+# 认证的运维探针：按 X-Tokimeki-Token 内的凭证形态返回 authMode
+# （jwt/namespace/master）与安全字段（不含 token/凭据/JWKS）。
+# 从 0600 env 文件读取凭证；curl --config 让 token 不进入 argv。
+set -a; . ~/.tokimeki/e2e-prod.env; set +a
+curl -sS --config <(printf 'header = "X-Tokimeki-Token: %s"\n' "$TOKIMEKI_TOKEN") \
   https://relay.tokiapi.app/auth/whoami
 # {"ok":true,"service":"tokimeki-relay","protocolVersion":1,
-#  "authMode":"master","turn":{"provider":"coturn","configured":true}}
+#  "authMode":"namespace","namespace":"e2e",
+#  "turn":{"provider":"coturn","configured":true}}
 ```
 
 `/healthz` 是公开的最小探活，不包含 TURN/JWT/namespace 详情；外部监控只应检查
-HTTP 200。`/auth/whoami` 对缺失/错误的 master 返回 401，非 GET 返回 405，响应为
-`no-store`，且不包含 token、TURN 凭据、secret 或 ICE URL。上面的生产示例仅适用于
-部署本源码之后；当前线上版本（`1104916c`）仍返回旧的 healthz 字段。
+HTTP 200。`/auth/whoami` 对缺失/错误的凭证返回 401，JWT 模式下 JWKS 不可达返回
+503 `jwks_unavailable`，非 GET 返回 405，响应为
+`no-store`，且不包含 token、TURN 凭据、secret、ICE URL 或 JWKS 内容。生产已于
+2026-11-19 部署本源码，`/healthz` 返回最小字段。
 
-**当前部署状态（2026-11-16）**：
+**当前部署状态（2026-11-19）**：
 
 - Worker `tokimeki-relay` 已部署，URL `https://relay.tokiapi.app`。当前 100% 流量版本
-  `1104916c-f188-4cc5-8df6-e34ca557ffae`（2026-11-16 发布，含 v1.1 F2 只读
-  listener 角色）。上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
-  （2026-11-13，含 host relay 重连修复）可作为回滚参考；更早的
-  `ee0e0f3c-9f99-4647-9604-91e2abddc20e`（Cloudflare 验证配置）与
-  `da0dde29-66e0-425e-85c0-49d053316186` 也保留。secret 不回滚。
+  `5cda681f-7a42-40a8-9ea9-cf708808ba0a`（2026-11-19 发布，含 `X-Tokimeki-Token`
+  头更名、Host JWT 边缘验签、回退/namespace 互斥；未配置任何 `TOKIMEKI_JWT_*`，
+  当前 no-JWT）。历史版本 `575a53f4-…`、`1104916c-…`（v1.1 F2 只读 listener）与
+  `ee53cf15-…`（host relay 重连修复）可作为回滚参考；更早的
+  `ee0e0f3c-…`（Cloudflare 验证配置）与 `da0dde29-…` 也保留。secret 不回滚。
+- 2026-11-19 已按 §3 preflight 通过 `wrangler secret put`（stdin）轮换
+  `TOKIMEKI_NAMESPACE_TOKENS`（namespace `e2e`），随后部署新 relay；新 token
+  仅保存在部署者的 0600 env 文件，未写入仓库、日志或命令 argv。
+  `TOKIMEKI_MASTER_TOKEN` 仍保留但已被 namespace 模式禁用（`fallback_token_disabled`），
+  迁移完成后应移除。
+- 2026-11-19 生产 no-JWT live e2e（`E2E_P2P_MODE=off`，namespace `e2e`）
+  三组通过：基础 host/viewer/重连/Ctrl-C、host secret 不进 PTY、只读
+  listener；`/auth/whoami` 返回 `authMode=namespace`。跨仓库 TokiAPI↔relay 的
+  live e2e（真实 Host JWT + 已配置 JWKS 的 relay）仍为 **pending**，不在本次
+  验收内。
 - 2026-11-16 的发布为纯代码部署（`npm run deploy:prod`），**未轮换**
   `TOKIMEKI_MASTER_TOKEN`；生产 token 继续保存在仓库外受控位置，不写入仓库、日志或
   命令历史。
@@ -415,7 +476,24 @@ npm run dev:relay
 
 所有配置走环境变量，模板见仓库根 `.env.example`。
 
-Host（托管终端）：
+Host（托管终端；共享 relay 用 TOKIMEKI_TOKEN + TOKIMEKI_NAMESPACE）：
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.tokiapi.app
+export TOKIMEKI_TOKEN='<namespace token 或 TokiAPI Host JWT>'
+export TOKIMEKI_NAMESPACE=team-a
+export TOKIMEKI_SESSION=team-a.proj-a   # 显式 session 必须以 "<namespace>." 开头
+export TOKIMEKI_TERM=xterm-256color
+export TOKIMEKI_COLORTERM=truecolor
+export TOKIMEKI_RESIZE_POLICY=latest
+export TOKIMEKI_P2P=auto
+export TOKIMEKI_ICE_TRANSPORT_POLICY=all
+
+npx @limccn/tokimeki claude
+```
+
+Host（单人独占 relay 的回退模式；`TOKIMEKI_MASTER_TOKEN` 在 relay 启用
+namespace token 后立即失效）：
 
 ```bash
 export TOKIMEKI_RELAY_URL=wss://relay.tokiapi.app
@@ -446,17 +524,19 @@ TURN provider 由 Worker 选择，客户端从 `welcome` / `ice` 获取 `iceServ
 不需要配置 coturn 地址或共享密钥。测试 TURN 路径时可设
 `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` 强制走 TURN（仍需 Worker 已配置可用 provider）。
 
-令牌只放在 `X-Tokimeki-Master` / `X-Tokimeki-Session` header，不要放进 URL query。
+令牌只放在 `X-Tokimeki-Token` / `X-Tokimeki-Session` header（CLI 不发送
+`Authorization`），不要放进 URL query。
 日志与错误信息不得回显令牌。Host 启动 PTY 时会从子进程环境中剔除
-`TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_SESSION_TOKEN`、`TOKIMEKI_TUNNEL_SECRET`、
+`TOKIMEKI_TOKEN`、`TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_SESSION_TOKEN`、`TOKIMEKI_TUNNEL_SECRET`、
 `TOKIMEKI_COTURN_SECRET`、`TOKIMEKI_TURN_API_TOKEN`、`TOKIMEKI_TURN_CREDENTIAL`，
 避免共享终端的 viewer 通过 `env`/`printenv` 读取接入凭据。Windows 上按大小写不敏感
 匹配并删除所有变体（例如 `Tokimeki_Master_Token`）；POSIX 只删除规范大写名，保留
-用户自己的小写变量。`TOKIMEKI_MASTER_TOKEN` 与 `TOKIMEKI_SESSION_TOKEN` 必须不同。
+用户自己的小写变量。Host 凭证与 `TOKIMEKI_SESSION_TOKEN` 必须不同。
 
-`tokimeki doctor` 会检查 PTY、配置与 `/healthz` 连通性；配置了
-`TOKIMEKI_MASTER_TOKEN` 时还会探测 `/auth/whoami`（旧 relay 无该端点时只警告，
-不判失败，也不打印 token）。缺失必需环境变量时 CLI 会在启动
+`tokimeki doctor` 会检查 PTY、配置文件与 `/healthz` 连通性；配置了
+`TOKIMEKI_TOKEN` 或 `TOKIMEKI_MASTER_TOKEN` 时还会用生效凭证（`X-Tokimeki-Token`）
+探测 `/auth/whoami` 并按响应报告 `authMode=jwt|namespace|master`（旧 relay 无该端点时
+只警告，不判失败，也不打印 token）。缺失必需环境变量时 CLI 会在启动
 PTY 前给出可操作错误。TLS 代理场景请确认 `TOKIMEKI_RELAY_URL` 使用 `wss://`/`https://`；
 本机回环测试可用 `ws://`/`http://`。
 

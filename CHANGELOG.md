@@ -16,6 +16,25 @@ separately as 0.2.0.
 
 ### Added
 
+- Minimal TokiAPI Host JWT verification (task `11-19-v1-2-cli-tokiapi-host-jwt`):
+  the relay optionally verifies ES256 Host JWTs offline (`TOKIMEKI_JWT_JWKS_URL`,
+  `TOKIMEKI_JWT_ISSUER`, `TOKIMEKI_JWT_AUDIENCE`, `TOKIMEKI_JWT_JWKS_TTL_SECONDS`,
+  `TOKIMEKI_JWT_CLOCK_SKEW_SECONDS`) with a per-isolate JWKS cache, strict
+  claims validation (`token_use=host`, `scope` containing `host`, namespace
+  claim + `<namespace>.<slug>` session prefix), fail-closed invalid config,
+  and `503 jwks_unavailable` when the JWKS is unreachable. Unset JWKS URL
+  keeps JWT mode fully disabled (no parsing, no Authorization handling, no
+  JWKS traffic).
+- `Authorization: Bearer <Host JWT>` as a second carrier, accepted only while
+  JWT mode is enabled and only when `X-Tokimeki-Token` is absent/empty;
+  stripped before the SessionDO in non-disabled modes. The CLI never sends it.
+- CLI host credential `TOKIMEKI_TOKEN`: one opaque value for a TokiAPI Host
+  JWT or a static namespace token, always sent on `X-Tokimeki-Token`, with a
+  required `TOKIMEKI_NAMESPACE` (paired error messages, auto-prefixed
+  sessions). Read-only `~/.tokimeki/config.json` support with
+  env > `TOKIMEKI_CONFIG` > file precedence, host credentials selected per
+  source layer, and POSIX 0600 enforcement. `doctor` probes `/auth/whoami`
+  with the effective credential and reports `authMode=jwt|namespace|master`.
 - Static namespace host tokens for OSS multi-namespace hosting:
   `TOKIMEKI_NAMESPACE_TOKENS` maps a namespace to a host token, namespace
   sessions use `<namespace>.<slug>`, and the CLI accepts
@@ -30,6 +49,17 @@ separately as 0.2.0.
 
 ### Changed
 
+- **Breaking**: the host header was renamed `X-Tokimeki-Master` →
+  `X-Tokimeki-Token`. The old header is no longer accepted; CLI and relay must
+  be upgraded together.
+- **Breaking**: `TOKIMEKI_NAMESPACE_TOKEN` is retired. A non-empty value exits
+  2 with a hint to rename it to `TOKIMEKI_TOKEN`; no compatibility fallback.
+- **Breaking**: enabling a valid `TOKIMEKI_NAMESPACE_TOKENS` map immediately
+  disables `TOKIMEKI_MASTER_TOKEN` and root `*` takeover (fallback hosts 401
+  even when the value matches); only namespace tokens and Host JWTs
+  authenticate hosts in that mode. Relay logs `fallback_token_disabled` while
+  the master secret is still set. `/auth/whoami` now reports
+  `authMode=jwt|namespace|master` accordingly.
 - Renamed the private relay workspace package to `@limccn/tokimeki-relay` for
   npm scope consistency. Relay deployment and the public npm packages are
   unchanged.

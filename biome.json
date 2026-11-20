@@ -12,6 +12,9 @@
       "!**/.trellis",
       "!**/.claude",
       "!**/.cursor",
+      "!**/.codebuddy",
+      "!**/.opencode",
+      "!**/.pi",
       "!**/package-lock.json",
       "!**/*.md"
     ]

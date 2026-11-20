@@ -6,14 +6,18 @@
 > v1.2 JWT/JWKS（namespace 模型）、`docs/multi-namespace-design.md`（规划）。
 >
 > 已部分实现（2026-11-19，`11-19-relay-exposure-hardening`、
-> `11-19-relay-namespace-tokens` 与 `11-19-relay-quotas-ttl` 分支；未提交、
-> 未部署）：listener TURN 门禁、最小化 `/healthz` + 认证 `/auth/whoami`
-> （v1 仅 root master）、TURN 凭据默认 TTL 900s、边缘 per-IP 限速文档化、
-> 静态 namespace token（`TOKIMEKI_NAMESPACE_TOKENS` + CLI
-> `TOKIMEKI_NAMESPACE_TOKEN`/`TOKIMEKI_NAMESPACE`，点号
-> `<namespace>.<slug>` 路由）、per-session 绝对/空闲 TTL 与字节/消息速率
-> 硬上限（见 §8.5）。JWT/JWKS、JWT `features`/`limits` 读取、付费/白名单
-> 以及 per-namespace 日流量/签发次数聚合仍未实现。
+> `11-19-relay-namespace-tokens` 与 `11-19-relay-quotas-ttl` 已进入
+> `develop`；生产 relay 于 2026-11-19 部署，`TOKIMEKI_NAMESPACE_TOKENS`
+> 已设置）：listener TURN 门禁、最小化 `/healthz` + 认证 `/auth/whoami`
+> （v1.2 起接受 Host JWT / 静态 namespace token / 单人回退 token）、TURN
+> 凭据默认 TTL 900s、边缘 per-IP 限速文档化、静态 namespace token
+> （relay `TOKIMEKI_NAMESPACE_TOKENS` + CLI `TOKIMEKI_TOKEN`/`TOKIMEKI_NAMESPACE`，
+> 点号 `<namespace>.<slug>` 路由）、per-session 绝对/空闲 TTL 与字节/消息速率
+> 硬上限（见 §8.5）。**Host JWT 最小切片已实现**（任务
+> `11-19-v1-2-cli-tokiapi-host-jwt`）：`X-Tokimeki-Token`（原
+> `X-Tokimeki-Master`，旧头不再识别）、`Authorization: Bearer`（仅 JWT 模式
+> web/代理）、ES256 离线验签 + JWKS 缓存。JWT `features`/`limits` 读取、
+> Session JWT、付费/白名单以及 per-namespace 日流量/签发次数聚合仍未实现。
 >
 > 术语：**namespace** 是隔离、配额与会话前缀的作用域单位。hosted 中它对应
 > TokiAPI 用户/账户，OSS 中对应静态 namespace token；v1.2 JWT claim 已统一为
@@ -54,24 +58,26 @@ tokimeki relay 只有两个公网入口：`/healthz` 与 `/ws/<session>`。真�
 |---|---|---|---|
 | L0 Public | 任何人 | 无 | `/healthz`、STUN |
 | L1 Invite | session 参与者 | Session JWT / legacy opaque token | viewer/listener、relay 数据面、P2P/TUN、控制面信令 |
-| L2 Namespace host | hosted：TokiAPI 用户；OSS：namespace token 持有者 | Host JWT / 静态 namespace token / root master | 创建/托管 session；基础配额 |
+| L2 Namespace host | hosted：TokiAPI 用户；OSS：namespace token 持有者 | Host JWT / 静态 namespace token / 单人回退 token | 创建/托管 session；基础配额 |
 | L3 Feature flags | 付费/白名单（TokiAPI 管理） | Host JWT payload 开关（预留） | TURN、更高配额 |
-| L4 Ops | relay 运维 | master / 内部端点 | 全局配置、诊断、紧急关闭 |
+| L4 Ops | relay 运维 | 单人回退 token / 内部端点 | 全局配置、诊断、紧急关闭 |
 
 - L0 不包含任何会话创建或数据面。
 - L1 的 invite 由 host 分发；viewer 不需要 TokiAPI 账户。
 - L2 是 host 最低门槛：hosted 必须 Host JWT；OSS 用静态 namespace token
-  或 root master。
+  或单人回退 token（仅在未启用 namespace token 时可用）。
 - L3 不自动授予；TURN 默认关闭，需 JWT feature flag（hosted）或部署配置
   （OSS）+ 会话显式开启。tokimeki 不管理付费/白名单。
-- L4 的 master token 只用于运维/break-glass，不向用户分发。
+- L4 的回退 token 是**单人独占 relay 的凭证**（一人一 token 即可满足全部
+  host 需求），不是通用 break-glass；relay 启用有效 namespace token 后立即
+  失效，且不向用户分发。
 
 ## 3. 暴露面清单
 
 | 路径/能力 | 数据经 relay | relay 可计量 | 成本 | 主要风险 | 策略 |
 |---|---|---|---|---|---|
 | `GET /healthz` | 否 | — | 极低 | 信息暴露 | L0，字段最小化 |
-| `/ws/<session>` host | 是（控制/数据） | 是 | 低–中 | 通用字节管道、长会话占用 | L2（hosted Host JWT / OSS namespace token）/ L4（root master） |
+| `/ws/<session>` host | 是（控制/数据） | 是 | 低–中 | 通用字节管道、长会话占用 | L2（hosted Host JWT / OSS namespace token）/ L4（单人回退 token，仅回退模式） |
 | `/ws/<session>` viewer | 是 | 是 | 低–中 | 数据面滥用、连接放大 | L1 invite + 配额 |
 | `/ws/<session>` listener | 是（仅快照） | 是 | 低 | 快照 fan-out | L1 invite + 独立上限 |
 | `hello`/`welcome` ICE 签发 | 否（仅签发） | 仅签发次数 | 低 | 凭据外泄 | 仅 host/viewer；L3 TURN |
@@ -89,7 +95,7 @@ tokimeki relay 只有两个公网入口：`/healthz` 与 `/ws/<session>`。真�
 | 能力 | hosted（relay.tokiapi.app） | OSS 默认 |
 |---|---|---|
 | `/healthz` | 公开，最小化字段 | 公开 |
-| host 创建/托管 session | 必须 TokiAPI Host JWT | 必须静态 namespace token 或 root master |
+| host 创建/托管 session | 必须 TokiAPI Host JWT | 必须静态 namespace token，或单人回退 token（仅未启用 namespace token 的回退模式） |
 | viewer/listener 接入 | invite，无需账户 | invite，无需账户 |
 | relay 数据面 | namespace 基础配额 + 限速 | 运维策略；不匿名开放 host |
 | listener | invite + 会话/namespace 上限 | invite + 上限 |
@@ -163,11 +169,13 @@ TURN（coturn REST / static / Cloudflare）凭据的签发必须同时满足：
 
 - hosted：host 必须 Host JWT；Worker 验签、校验 namespace/session 前缀与
   scope，不逐连接回调 TokiAPI。
-- OSS：host 必须静态 namespace token 或 root master；Worker 常量时间匹配
-  token、校验 `<namespace>.<slug>` 前缀；不提供匿名 host。
+- OSS：host 必须静态 namespace token，或单人回退 token（仅回退模式）；
+  Worker 常量时间匹配 token、校验 `<namespace>.<slug>` 前缀；不提供匿名
+  host。
 - viewer/listener：只需 Session JWT 或 legacy opaque token；不要求账户。
 - listener 必须 `listen` scope；viewer 必须 `attach` scope。
-- master token 仅 break-glass；hosted 不向用户分发。
+- 单人回退 token 仅在未启用 namespace token 时可用（一人独占 relay 的
+  凭证，非通用 break-glass）；hosted 不向用户分发。
 
 ### 6.2 通用字节管道风险
 
@@ -379,11 +387,16 @@ Provider（coturn / Cloudflare TURN）
 
 ### 12.1 Relay 身份/namespace 路线（2026-11-19 确认）
 
-1. **master token 单用户（现状）**：一个全局 root，适合单管理员/break-glass。
+1. **单人回退 token**：`TOKIMEKI_MASTER_TOKEN` 一人独占 relay 的凭证；仅在
+   未启用有效 `TOKIMEKI_NAMESPACE_TOKENS` 时可用（启用后立即失效，root `*`
+   接管同时失效），不是通用 break-glass。
 2. **静态 multi-namespace 多用户**：`TOKIMEKI_NAMESPACE_TOKENS`，OSS 小团队
    主方案；不要求 JWT/TokiAPI。
-3. **JWT 对接 TokiAPI 用户**：hosted；v1.2 设计后续重写，relay 只验签并读取
-   namespace/feature flags；当前 v1.2 文档仅作历史参考。
+3. **JWT 对接 TokiAPI 用户**：hosted；**最小切片已实现**（任务
+   `11-19-v1-2-cli-tokiapi-host-jwt`）：ES256 Host JWT 离线验签、JWKS 缓存、
+   `X-Tokimeki-Token` + `Authorization: Bearer`、CLI `TOKIMEKI_TOKEN` +
+   必填 `TOKIMEKI_NAMESPACE`。Session JWT/feature flags 仍待 v1.2 后续切片
+   （A–D）。
 
 - wire 路由使用点号 `<namespace>.<slug>`（2026-11-19 确认），不使用
   `/ws/<namespace>/<session>` 斜杠形式。
@@ -441,11 +454,11 @@ Provider（coturn / Cloudflare TURN）
 | U0 匿名公网访客 | L0 | 无 | `GET /healthz`、使用公开 STUN | 任何会话/数据面 |
 | U1 受邀 viewer | L1 | Session JWT / opaque session token | relay 数据面、P2P 直连/TURN、INPUT、resize、resync、ACK、TUN | 创建 session、管理 host、listener-only 能力 |
 | U2 受邀 listener | L1 | Session JWT + `X-Tokimeki-Listener: 1` | 接收周期快照、控制面事件 | INPUT/resize/resync/ACK/signal/transport/P2P/TURN |
-| U3 OSS namespace host | L2 | 静态 namespace token（或 root master） | 创建/托管 session、relay/P2P 直连、基础配额；TURN 由部署配置 | 跨 namespace、超配额、未授权 TURN、匿名 |
+| U3 OSS namespace host | L2 | 静态 namespace token | 创建/托管 session、relay/P2P 直连、基础配额；TURN 由部署配置 | 跨 namespace、超配额、未授权 TURN、匿名 |
 | U4 Hosted JWT host | L2/L3 | Host JWT（TokiAPI）+ Session JWT | 创建/托管 session；按 JWT payload feature flag 获得 TURN/更高配额（预留） | 付费/白名单管理、跨 namespace、超配额 |
 | U5 TURN 会话受邀 viewer | L1 | Session JWT（无需账户） | 同 U1；若 session 开启 TURN，可用 p2p-turn | 自行开启 TURN、超 session 配额 |
 | U6 TokiAPI Web 用户 | L1 | TokiAPI 代理注入 Session JWT（`web` + `attach`/`listen`） | 浏览器 xterm.js 完整/只读 viewer（v1.2 relay-only） | 接触 JWT、P2P/TURN、自行改 scope |
-| U7 OSS 运维/root | L4 | `X-Tokimeki-Master` + opaque session token | 自托管 host、全局配置、break-glass | 向用户分发 master、匿名开放 TURN |
+| U7 OSS 运维/root | L4 | `X-Tokimeki-Token`（单人回退 token）+ opaque session token | 自托管 host、全局配置；仅回退模式可用 | 向用户分发凭证、匿名开放 TURN；namespace 模式下使用回退 token |
 
 ### 16.2 U1 受邀 viewer（当前可用）
 
@@ -508,10 +521,10 @@ listener                          relay / DO                           host
 
 ```text
 CLI host (OSS)                    Worker/DO
-  |-- env: TOKIMEKI_NAMESPACE_TOKEN=<team-a token>
+  |-- env: TOKIMEKI_TOKEN=<team-a token>
   |         TOKIMEKI_NAMESPACE=team-a
   |         TOKIMEKI_SESSION=team-a.laptop-work
-  |-- WS upgrade: X-Tokimeki-Master: <namespace token>
+  |-- WS upgrade: X-Tokimeki-Token: <namespace token>
   |               X-Tokimeki-Session: <session token> -->
   |-- hello {role:"host", session:"team-a.laptop-work", ...} -->
   |<-- welcome {hostOnline:true, iceProvider:"stun"|"coturn"} --
@@ -524,8 +537,8 @@ CLI host (OSS)                    Worker/DO
   开头，否则 401；不能创建/占用 `team-b.*`。
 - TURN 仅在 `TOKIMEKI_TURN_NAMESPACES` 包含 team-a 且 session 显式开启时
   签发；否则只有 STUN。
-- 配额来自 `TOKIMEKI_NAMESPACE_LIMITS`；root master 仍可跨 namespace
-  break-glass。
+- 配额来自 `TOKIMEKI_NAMESPACE_LIMITS`；启用 namespace token 后不存在跨
+  namespace 接管（单人回退 token 已失效）。
 - CLI 若只给 token 不给 `TOKIMEKI_NAMESPACE`，无法构造正确 session 前缀，
   应直接报配置错误。
 
@@ -589,56 +602,63 @@ browser ──HTTPS──> TokiAPI dashboard ──WS proxy──> relay
 ### 16.8 U7 OSS 运维/root（当前可用）
 
 ```text
-root host:      X-Tokimeki-Master: <TOKIMEKI_MASTER_TOKEN>
-namespace host: X-Tokimeki-Master: <namespace token>
+root host:      X-Tokimeki-Token: <TOKIMEKI_MASTER_TOKEN>   # 仅回退模式
+namespace host: X-Tokimeki-Token: <namespace token>
+hosted host:    X-Tokimeki-Token: <TokiAPI Host JWT>
 viewer:         X-Tokimeki-Session: <opaque session token>
 ```
 
-- master 是 L4 break-glass，只给运维持有；不向团队分发。
+- 单人回退 token 是 L4 单人独占 relay 的凭证（一人一 token），只给运维持有；
+  relay 启用有效 namespace token 后它立即失效（root `*` 接管同时失效）。
 - namespace token 是 OSS 小团队的 host 凭据，按 namespace 隔离。
+- hosted Host JWT 由 TokiAPI 签发，relay 离线验签（JWKS 缓存）。
 - TURN 由运维 env 显式配置；默认 `stun`/`none`，禁止匿名开放 TURN。
-- 无 TokiAPI/账户体系；配额默认保持 v1.1 行为，可按需启用。
+- 无 TokiAPI/账户体系时配额默认保持 v1.1 行为，可按需启用。
 
 ### 16.9 自部署无 JWT 时的 host 身份（重要）
 
-**结论：无 JWT 时，host 身份有两个来源：root master（全局）或
-namespace token（namespace 作用域）。**
+**结论：无 JWT 时，host 身份有两个来源：单人回退 token（全局，仅回退
+模式）或 namespace token（namespace 作用域）。**
 
-- **root master**：`TOKIMEKI_MASTER_TOKEN` 命中 → 可创建任意合法 session，
-  用于运维/break-glass。它是全局 token，不是 per-user 身份。
+- **单人回退 token**：`TOKIMEKI_MASTER_TOKEN` 命中 → 可创建任意合法
+  session（root `*`）。它只适合一人独占 relay 的场景，不是 per-user 身份；
+  **relay 启用至少一条有效 `TOKIMEKI_NAMESPACE_TOKENS` 后立即失效**（即使
+  值匹配也 401），运维应尽快移除该 secret。
 - **namespace token**：`TOKIMEKI_NAMESPACE_TOKENS` 中的 token 命中 →
   得到该 namespace 的 host 能力；session 必须是 `<namespace>.<slug>`，
   Worker 与 DO 都校验前缀。这是 OSS 小团队的主方案。
   - token 唯一、≥32 字节随机；重复/非法 key/解析失败 → fail-closed；
   - 匹配用 SHA-256 后常量时间比较，不早退；条目数受限（建议 ≤64）；
-  - 未配置该 env 时保持现有 master-only 行为；root master 始终可
-    break-glass。
-- relay 未设置 master 且未配置 namespace token 时，host 认证是**关闭**的：
-  所有 host 尝试都 401，不会变成“允许所有人 host”（fail-closed）。
-- 只有 session token、没有 master/namespace token 的 viewer **不能** host：
+  - 未配置该 env 时保持回退模式（master-only）；**配置后回退立即关闭**。
+- relay 未设置 master 且未配置 namespace token（且未配置 JWT）时，host
+  认证是**关闭**的：所有 host 尝试都 401，不会变成“允许所有人 host”
+  （fail-closed）。
+- 只有 session token、没有 host 凭证的 viewer **不能** host：
   Worker 根据 host 头分配角色；`hello.role:"host"` 与认证角色不一致会被拒绝。
-- 只有 master/namespace token、不知道某会话 session token 的人，可以创建
+- 只有 host 凭证、不知道某会话 session token 的人，可以创建
   **新** session，但不能接管已有 session：DO 首次 host 时保存
   `sha256(sessionToken)`，后续 host 必须匹配。
-- 同时知道 host token 和 session token 的人可以 host/接管该 session。
-- CLI 的 `claude` / `pi` / `run` 接受 `TOKIMEKI_NAMESPACE_TOKEN` +
-  `TOKIMEKI_NAMESPACE`（隐式 `<namespace>.<slug>` session）或
-  `TOKIMEKI_MASTER_TOKEN`；两者同时配置时 namespace token 优先并告警。
-  `TOKIMEKI_SESSION_TOKEN` 未提供时由 CLI 随机生成。
-- 轮换 master 会让所有 host 同时失效；轮换 namespace token 只影响该
+- 同时知道 host 凭证和 session token 的人可以 host/接管该 session。
+- CLI 的 `claude` / `pi` / `run` 接受 `TOKIMEKI_TOKEN` +
+  `TOKIMEKI_NAMESPACE`（必填成对，隐式 `<namespace>.<slug>` session）或
+  `TOKIMEKI_MASTER_TOKEN`（单人回退）；两者同时配置时 `TOKIMEKI_TOKEN`
+  优先并告警。`TOKIMEKI_NAMESPACE_TOKEN` 已退役：非空值 exit 2 并提示改名
+  为 `TOKIMEKI_TOKEN`。`TOKIMEKI_SESSION_TOKEN` 未提供时由 CLI 随机生成。
+- 轮换 master 会让所有回退 host 同时失效；轮换 namespace token 只影响该
   namespace 的新连接。两者都没有单用户撤销。
 - v1.2 未配置 `TOKIMEKI_JWT_JWKS_URL` 时就是此模型；配置 JWKS 后可用
   任意兼容 issuer 的 Host JWT，不一定是 TokiAPI。
 
 **多 namespace 自部署的建议：**
 
-1. 每个团队/项目一个 namespace token；master 只留运维 break-glass。
+1. 每个团队/项目一个 namespace token；`TOKIMEKI_MASTER_TOKEN` 尽快移除
+   （启用 namespace token 后它已失效）。
 2. 需要 per-user host 身份时，启用 JWT/JWKS（自建 issuer 也可），不要把
    共享 namespace token 当用户 token 分发。
 3. 不同信任域用不同 namespace，必要时用不同 relay 部署；前缀校验是硬边界，
    但仍建议网络/部署隔离。
-4. master 和 namespace token 只放在 0600 env/secret 中，不进 argv、URL、
-   日志或提交。
+4. host 凭证只放在 0600 env/secret（或 `chmod 600 ~/.tokimeki/config.json`）
+   中，不进 argv、URL、日志或提交。
 
 ### 16.10 能力矩阵（按类型）
 

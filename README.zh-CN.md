@@ -95,8 +95,8 @@ openssl rand -base64 32
 ```
 
 relay URL 形如 `https://<worker-name>.<your-subdomain>.workers.dev`（CLI 用
-`wss://...`）。自定义域、coturn、Cloudflare TURN 见
-[Cloudflare 部署](docs/deploy-cloudflare.md)。
+`wss://...`）。自定义域、namespace token、Host JWT 验签、coturn、Cloudflare
+TURN 见 [Cloudflare 部署](docs/deploy-cloudflare.md)。
 
 ### 2. Host 一个会话
 
@@ -110,7 +110,9 @@ tokimeki claude
 ```
 
 host 会打印 **session name** 和 **session token**。把这两个值给 viewer；
-**不要分享 relay master token**。
+**不要分享 relay master token**。共享 relay 的 host 使用 `TOKIMEKI_TOKEN`
+（namespace token 或 TokiAPI Host JWT）并必填 `TOKIMEKI_NAMESPACE`，见
+[docs/cli.md](docs/cli.md)。
 
 ### 3. 从另一台机器接入
 

@@ -4,10 +4,17 @@
  *
  * Required environment:
  *   TOKIMEKI_RELAY_URL      wss://... or ws://... (worker root, no /ws suffix)
- *   TOKIMEKI_MASTER_TOKEN   must match the deployed/local Worker secret
+ *   Host credential, one of:
+ *     TOKIMEKI_TOKEN + TOKIMEKI_NAMESPACE  opaque host token (Host JWT or
+ *                                          static namespace token) + its
+ *                                          namespace; explicit sessions must
+ *                                          start with `<namespace>.`
+ *     TOKIMEKI_MASTER_TOKEN                single-owner fallback credential
+ *                                          (must match the Worker secret)
  *
  * Optional:
- *   TOKIMEKI_SESSION         default: e2e-<epoch>
+ *   TOKIMEKI_SESSION         default: e2e-<epoch>, or
+ *                            <namespace>.e2e-<epoch> in TOKIMEKI_TOKEN mode
  *   TOKIMEKI_SESSION_TOKEN  default: random
  *   REQUIRE_P2P=1            fail when no p2p-direct/p2p-turn transport is seen
  *   E2E_P2P_MODE             default: auto (use "off" for the relay-only run)
@@ -49,7 +56,7 @@
  * The test starts a host CLI in a PTY and two attach CLIs, then checks:
  * snapshot restore, bidirectional input, broadcast, resize, reconnect, and
  * Ctrl-C propagation. It never writes tokens to stdout; failure diagnostics
- * redact the session/master tokens and the viewer-config base64 payload.
+ * redact the host/session tokens and the viewer-config base64 payload.
  */
 
 import { randomBytes } from "node:crypto";
@@ -72,7 +79,12 @@ const dumpDir = process.env.E2E_DUMP_DIR;
 
 const relayUrl = process.env.TOKIMEKI_RELAY_URL;
 const masterToken = process.env.TOKIMEKI_MASTER_TOKEN;
-const session = process.env.TOKIMEKI_SESSION ?? `e2e-${Date.now()}`;
+const hostToken = process.env.TOKIMEKI_TOKEN;
+const hostNamespace = process.env.TOKIMEKI_NAMESPACE;
+const useHostToken = typeof hostToken === "string" && hostToken.length > 0;
+const session =
+  process.env.TOKIMEKI_SESSION ??
+  (useHostToken ? `${hostNamespace}.e2e-${Date.now()}` : `e2e-${Date.now()}`);
 const sessionToken = process.env.TOKIMEKI_SESSION_TOKEN ?? randomBytes(32).toString("base64url");
 const requireP2p = process.env.REQUIRE_P2P === "1";
 const requireP2pFallback = process.env.REQUIRE_P2P_FALLBACK === "1";
@@ -105,7 +117,7 @@ function viewerConfigJson(cols, rows) {
   });
 }
 
-const redactionValues = new Set([masterToken, sessionToken]);
+const redactionValues = new Set([masterToken, hostToken, sessionToken]);
 for (const size of [windowSize, { cols: 120, rows: 40 }, { cols: 100, rows: 30 }]) {
   redactionValues.add(
     Buffer.from(viewerConfigJson(size.cols, size.rows), "utf8").toString("base64"),
@@ -132,9 +144,23 @@ function parseSize(raw) {
   return { cols: Number(match[1]), rows: Number(match[2]) };
 }
 
-if (!relayUrl || !masterToken) {
-  console.error("TOKIMEKI_RELAY_URL and TOKIMEKI_MASTER_TOKEN are required");
+if (!relayUrl || (!useHostToken && !masterToken)) {
+  console.error(
+    "TOKIMEKI_RELAY_URL and either TOKIMEKI_TOKEN+TOKIMEKI_NAMESPACE or TOKIMEKI_MASTER_TOKEN are required",
+  );
   process.exit(2);
+}
+if (useHostToken) {
+  if (typeof hostNamespace !== "string" || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(hostNamespace)) {
+    console.error(
+      "TOKIMEKI_NAMESPACE is required with TOKIMEKI_TOKEN (^[a-z0-9][a-z0-9_-]{0,31}$)",
+    );
+    process.exit(2);
+  }
+  if (!session.startsWith(`${hostNamespace}.`)) {
+    console.error(`TOKIMEKI_SESSION must start with "${hostNamespace}." with TOKIMEKI_TOKEN`);
+    process.exit(2);
+  }
 }
 if (flowControl && p2pMode !== "off") {
   console.error("E2E_FLOW_CONTROL=1 requires E2E_P2P_MODE=off so output uses the relay");
@@ -202,6 +228,9 @@ function commonEnv() {
   for (const key of [
     "TOKIMEKI_RELAY_URL",
     "TOKIMEKI_MASTER_TOKEN",
+    "TOKIMEKI_TOKEN",
+    "TOKIMEKI_NAMESPACE",
+    "TOKIMEKI_NAMESPACE_TOKEN",
     "TOKIMEKI_SESSION",
     "TOKIMEKI_SESSION_TOKEN",
     "TOKIMEKI_P2P",
@@ -222,7 +251,9 @@ function commonEnv() {
   return {
     ...env,
     TOKIMEKI_RELAY_URL: relayUrl,
-    TOKIMEKI_MASTER_TOKEN: masterToken,
+    ...(useHostToken
+      ? { TOKIMEKI_TOKEN: hostToken, TOKIMEKI_NAMESPACE: hostNamespace }
+      : { TOKIMEKI_MASTER_TOKEN: masterToken }),
     TOKIMEKI_SESSION: session,
     TOKIMEKI_SESSION_TOKEN: sessionToken,
     TOKIMEKI_TERM: "xterm-256color",
@@ -273,7 +304,12 @@ function configHostEnv() {
     delete env[key];
   }
   // Explicit env wins over the envelope; the wrong JSON session proves it.
-  env.TOKIMEKI_MASTER_TOKEN = masterToken;
+  if (useHostToken) {
+    env.TOKIMEKI_TOKEN = hostToken;
+    env.TOKIMEKI_NAMESPACE = hostNamespace;
+  } else {
+    env.TOKIMEKI_MASTER_TOKEN = masterToken;
+  }
   env.TOKIMEKI_SESSION = session;
   env.TOKIMEKI_LOG_LEVEL = "debug";
   env.TOKIMEKI_CONFIG = JSON.stringify({

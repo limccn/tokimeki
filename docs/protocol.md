@@ -245,25 +245,50 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
 
 | 角色 | URL/头 |
 |---|---|
-| host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Master: <root master 或 namespace token>`，`X-Tokimeki-Session: <session token>` |
+| host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Token: <Host JWT / namespace token / 单人回退 token>`，`X-Tokimeki-Session: <session token>` |
+| host（web/代理，JWT 模式） | 同上，但主头缺失/为空时可携带 `Authorization: Bearer <Host JWT>` |
 | viewer | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>` |
 | listener（v1.1） | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`，`X-Tokimeki-Listener: 1` |
 | observer/agent | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`（DO 支持，Worker 入口保留） |
 
-角色不放在 URL 中：Worker 依据认证头设置内部角色，并由 `hello.role` 与认证角色交叉校验。URL 只承载公开的会话名。v1.1 Worker 分配 `host` / `viewer` /
-`listener` 三个入口角色；`X-Tokimeki-Master` 优先，存在时忽略
+角色不放在 URL 中：Worker 依据认证头设置内部角色，并由 `hello.role` 与认证角色交叉校验。URL 只承载公开的会话名。v1.2 Worker 分配 `host` / `viewer` /
+`listener` 三个入口角色；host 凭证优先，存在时忽略
 `X-Tokimeki-Listener`。`observer` / `agent` 的 DO 路由、SQLite 表与协议 schema 已实现并通过直连测试，但生产 Worker 尚未提供选择这两个角色的入口，属于为后续协调层保留的能力。更早的 v1 relay 对 `listener` 返回 `not_implemented`。
 
-`X-Tokimeki-Master` 可以是 root master（`TOKIMEKI_MASTER_TOKEN`）或
-namespace host token（`TOKIMEKI_NAMESPACE_TOKENS`）。namespace token 只认证
-其 namespace，session 必须为 `<namespace>.<slug>`；Worker 删除客户端自带的
-`x-tokimeki-namespace`，只注入从 token 推导的内部头。未配置 namespace
-token 时仅 root master 生效。
+> **Breaking change（v1.2）**：host 头已从 `X-Tokimeki-Master` 更名为
+> `X-Tokimeki-Token`；旧头不再被识别为凭证，CLI 与 relay 必须成对升级。
+
+host 凭证在 `X-Tokimeki-Token` 内按值形态判定（顺序固定）：
+
+1. **回退 token**（`TOKIMEKI_MASTER_TOKEN`，单人独占 relay 的凭证）：仅当
+   relay 未启用有效 `TOKIMEKI_NAMESPACE_TOKENS` 时可用，可接管任意 session
+   （root `*`）。namespace 模式启用后即使值匹配也 401。
+2. **三段式 Host JWT**（仅 JWT 模式非 disabled，即配置了
+   `TOKIMEKI_JWT_JWKS_URL`）：ES256 离线验签（JWKS 缓存），claims 必须满足
+   `token_use=host`、`scope` 含 `host`、`namespace` 合法，session 必须为
+   `<claim-namespace>.<slug>`。JWT 模式关闭时不做 JWT 解析；配置非法时 JWT
+   凭证 fail-closed（401）；JWKS 不可达返回 503 `jwks_unavailable`。
+3. **静态 namespace token**（`TOKIMEKI_NAMESPACE_TOKENS`）：只认证其
+   namespace，session 必须为 `<namespace>.<slug>`。
+
+`Authorization: Bearer <Host JWT>` 仅在 JWT 模式非 disabled 时作为第二载体
+（web/代理 attach），只在主头缺失/为空时生效；主头与 Bearer 不同返回 401；
+非 disabled 模式下 `Authorization` 在转发 DO 前删除，`disabled` 模式下不解析、
+不剥离。Bearer 永远只承载 Host JWT，不作为回退或 namespace token 的载体。
+CLI 只发送 `X-Tokimeki-Token`，从不发送 `Authorization`。
+
+Worker 删除客户端自带的 `x-tokimeki-token` / `x-tokimeki-master` /
+`x-tokimeki-listener` / `x-tokimeki-namespace`（以及非 disabled 模式下的
+`authorization`），只注入从验证后的凭证推导的内部头。未配置 namespace
+token 且未配置 JWT 时仅回退 token 生效。
 
 规则：
 
 1. `session` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`。
-2. Worker 校验 host 的 root master 或 namespace token（常量时间比较）、session 格式与 namespace 前缀，覆盖内部 `x-tokimeki-role` 头，并移除客户端自带 master、listener 与 namespace 头后再转发到 DO。
+2. Worker 校验 host 凭证（回退 token 常量时间比较、Host JWT 离线验签或
+   namespace token 常量时间比较）、session 格式与 namespace 前缀，覆盖内部
+   `x-tokimeki-role` 头，并移除客户端自带 token、master、listener、namespace
+   头（及非 disabled 模式下的 `authorization`）后再转发到 DO。
 3. DO 首次创建会话时保存 `sha256(sessionToken)`；已有会话校验 hash。viewer/observer/agent/listener 不做 master 校验。
 4. 认证失败返回 HTTP 401 或 `error{code:"unauthorized"}` 后关闭。
 5. WebSocket 打开后，客户端第一条消息必须是 `hello`。`hello.session` 必须等于 URL session，`hello.role` 必须等于认证角色；`protocolVersion` 若提供必须为 1，缺省按 1 处理。
@@ -271,7 +296,8 @@ token 时仅 root master 生效。
 7. 成功认证后 DO 返回 `welcome`，其中包含在线客户端、ICE servers、provider、TTL 与协商 capabilities。
 8. token、TURN secret、credential 不得进入 `hello`、URL、日志或错误消息。
 9. 每个连接必须携带非空 `X-Tokimeki-Session`；缺失/空值在 Worker 层直接返回 HTTP 401，不会到达 DO。
-10. `X-Tokimeki-Master` 不得与 `X-Tokimeki-Session` 相同；相等时 Worker 返回 HTTP 401。
+10. host 凭证不得与 `X-Tokimeki-Session` 相同（`X-Tokimeki-Token` 或 Bearer
+    值均可）；相等时 Worker 返回 HTTP 401。
 11. DO 对非空 token 仍做防御性校验（空 token → 401），并把每个会话的 OPEN socket 数限制为 `maxClients * 2`（含 pending；超限 HTTP 429）。schema 只在该会话首次 host `hello` 时创建。
 12. listener 仍计入 `maxClients`，并额外受 `TOKIMEKI_MAX_LISTENERS`（默认 8）限制；超限返回 `session_full` 并关闭。listener 必须先有 host 会话，不能创建 schema。
 

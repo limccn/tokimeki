@@ -11,7 +11,7 @@
     "build": "tsc -b tsconfig.json",
     "typecheck": "tsc -b tsconfig.json",
     "typecheck:tests": "tsc -p tsconfig.test.json --pretty false",
-    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.quotas.config.ts"
+    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.namespace.config.ts && vitest run --config vitest.jwt.config.ts && vitest run --config vitest.quotas.config.ts"
   },
   "dependencies": {
     "@limccn/tokimeki-protocol": "0.1.3"

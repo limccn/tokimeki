@@ -30,7 +30,7 @@ import {
   buildInviteOverlayLines,
   formatViewerConfigJson,
 } from "../client-info.js";
-import type { HostConfig } from "../config.js";
+import { buildHostAuthHeaders, type HostConfig } from "../config.js";
 import { inviteKeyLabel } from "../invite.js";
 import { formatError, type Logger } from "../logger.js";
 import { TerminalMirror } from "../terminal/mirror.js";
@@ -554,9 +554,10 @@ class HostSession {
     const client = new RelayClient({
       url: this.#config.websocketUrl,
       headers: {
-        // Namespace tokens travel in the same host header; the relay derives
-        // the namespace from the token and never trusts a client header.
-        "X-Tokimeki-Master": this.#config.hostToken,
+        // Host JWTs and static namespace tokens travel in the same host
+        // header; the relay derives the namespace from the token and never
+        // trusts a client header. The CLI never sends Authorization.
+        ...buildHostAuthHeaders(this.#config.hostToken),
         "X-Tokimeki-Session": this.#config.sessionToken,
       },
       role: "host",

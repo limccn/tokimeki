@@ -1,4 +1,4 @@
-import { decodeFrame, encodeFrame } from "@limccn/tokimeki-protocol";
+﻿import { decodeFrame, encodeFrame } from "@limccn/tokimeki-protocol";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -33,7 +33,7 @@ describe("host relay reconnection", () => {
     const viewer = await openViewer(sessionId, "viewer-1");
 
     const replacement = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     replacement.send(helloFor(sessionId, "host", "host-1", { cols: 80, rows: 24 }));
@@ -93,7 +93,7 @@ describe("host relay reconnection", () => {
     const viewer2 = await openViewer(sessionId, "viewer-2");
 
     const replacement = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     replacement.send(helloFor(sessionId, "host", "host-1"));
@@ -123,7 +123,7 @@ describe("host relay reconnection", () => {
     const viewer = await openViewer(sessionId, "viewer-1");
 
     const impostor = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: "different-session-token",
     });
     impostor.send(helloFor(sessionId, "host", "host-1"));
@@ -156,7 +156,7 @@ describe("host relay reconnection", () => {
     const viewer = await openViewer(sessionId, "viewer-1");
 
     const impostor = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     impostor.send(helloFor(sessionId, "host", "viewer-1"));
