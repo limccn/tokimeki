@@ -1,6 +1,6 @@
 # 路线图
 
-> 本文件区分 v1 交付、v1.1 增强与 v2 兼容性工作。
+> 本文件区分 v1 交付、v1.1 增强与 v2.0 兼容性工作。
 > **v1.1 与 v2 不属于当前 v1 验收（AC1–AC10）**，未完成不会阻塞 v1 归档。
 
 ## v1（已交付基线）
@@ -18,7 +18,8 @@ TypeScript/Node + npm workspaces：
   预留项在 v1 只返回 `not_implemented`，不实现行为。
 - Agent 协调只建 SQLite schema 与 `agent.*` 协议扩展点，不实现 runner。
 
-当前状态：**v1 实现完成（Phase 6）；v1.1 已立项并进入规划（2026-11-16）**。
+当前状态：**v1 实现完成（Phase 6）；v1.1 五个子任务已完成本地实现并归档，
+生产/跨机器验证待执行（2026-11-18）**。
 relay、PTY/TUI、共享控制、快照重连与 P2P/TURN/relay 回退已落地；本机 live e2e
 1–5 组场景通过（第 5 组为 host 1006 重连，见 `docs/deployment.md` §7.2）。生产
 Worker 已部署，2026-11-13 已完成本机 NAT ↔ 日本/美国 VPS 的跨机器 relay、直连
@@ -39,7 +40,8 @@ v1 基线历史限制（F0 已在 `b8c9ec4` 解决）：v1 本身不做 DataChan
 
 ## v1.1（独立任务，不阻塞 v1）
 
-状态（2026-11-16）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建。F0 已实现、
+状态（2026-11-18）：父任务 `.trellis/tasks/11-15-tokimeki-v1-1` 已创建并于
+2026-11-16 归档为 completed。F0 已实现、
 本地验证并归档（提交 `b8c9ec4`：typecheck/lint/276 tests/75 relay tests/build、
 P2P 快照 e2e、live-e2e 1–4、host 重连）；F0 新能力的真实跨公网 NAT/TURN 复测与
 生产部署尚未执行。F2 listener snapshot-only 已实现、提交（`147974f`）并归档；
@@ -86,7 +88,105 @@ mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0
   AEAD（先定密钥威胁模型）→ unreliable DataChannel ARQ → FEC（F1.1 已完成 XOR
   单丢包）→ LAN 选路 → peer fan-out（仅设计/实验开关）。
 
+## Relay 身份/namespace 路线（2026-11-19 确认）
+
+1. **master token 单人回退**（现状）：一个全局 root；仅在未配置有效
+   namespace token 时可用，不是通用 break-glass。
+2. **静态 multi-namespace 多用户**（OSS 主方案）：`TOKIMEKI_NAMESPACE_TOKENS`
+   按 namespace 分发 host token，不要求 JWT/TokiAPI。
+3. **JWT 对接 TokiAPI 用户**（hosted）：Host JWT/JWKS 已落地，relay 离线验签
+   Host JWT；Session JWT/feature flags 未来。当前对齐切片为 E
+   `11-19-v1-2-cli-tokiapi-host-jwt`。
+
+wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/<session>`
+斜杠路径。
+
+## v1.2（分阶段；E 当前，A–D 暂停）
+
+状态（2026-11-19）：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与
+**五个**子任务已创建。
+
+- **E `11-19-v1-2-cli-tokiapi-host-jwt`**：当前权威切片，代码已实现（relay
+  Host JWT 最小验签 + CLI `TOKIMEKI_TOKEN`/只读 config.json），单测与 Worker
+  集成测试通过；2026-11-19 已轮换 namespace token 并部署生产
+  （`5cda681f`，no-JWT），生产 no-JWT live e2e（基础/secret 清洗/listener）
+  通过；待合并，真实 TokiAPI↔relay live e2e 仍 **pending**（需已部署 JWKS 的
+  relay 与真实 Host JWT）。
+  TokiAPI Host JWT/JWKS 已落地；E 负责 CLI + relay 最小 Host JWT 验签。
+- **A–D**（namespace-auth / cli-ux / web-ui / passcode）：**in_progress**；
+  PRD/design/implement 已按 E 的 Host JWT 模型重写，代码尚未开始。
+  A=Session JWT viewer/listener 验签；B=TokiAPI session 创建/Session JWT/
+  invite v2/offline fallback；C=Session JWT/Web viewer；D=可选 passcode。
+- TokiAPI Session JWT、session 创建、invite v2、Web viewer、passcode 仍需落地；
+  A–D 已恢复规划/实现准备。v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
+- **2026-11-19 审查结论**：E 合并/部署前必须确认 TokiAPI 5 位 namespace 唯一性、
+  生产 `TOKIMEKI_NAMESPACE_TOKENS` 轮换/分发 preflight，并更新过期的
+  `docs/relay-exposure-policy.md`；A–D 已补充 `looksLikeJwt`、legacy NULL、
+  token 类型判定、Web `web` 校验/TURN 剥离、passcode secret 清单等安全契约。
+
+### E 已确认的凭证/路由
+
+- Host 凭证唯一 `TOKIMEKI_TOKEN`（Host JWT 或静态 namespace token；CLI 不解析）；
+  `TOKIMEKI_NAMESPACE` 必填；`X-Tokimeki-Token` 是唯一 host 头
+  （旧 `X-Tokimeki-Master` 拒绝）；`TOKIMEKI_NAMESPACE_TOKEN` 退役；
+  `TOKIMEKI_MASTER_TOKEN` 仅作单人回退，启用有效 `TOKIMEKI_NAMESPACE_TOKENS`
+  后失效（root `*` 接管同时失效）。
+- Host JWT：ES256；JWKS 在 **TokiAPI 管理台域** `/api/tokimeki/jwks.json`；
+  claims `iss/aud/sub/namespace/token_use=host/scope/iat/nbf/exp/jti`；
+  默认 TTL 30 天；relay 离线验签，不逐连接回调 TokiAPI。
+- `TOKIMEKI_JWT_JWKS_URL` 未配置 = JWT 关闭（不解析三段式、不拉 JWKS）；
+  配置非法 = JWT 凭证 fail-closed；JWKS 不可达且无缓存 = 503。
+- `Authorization: Bearer` 仅作为 JWT 模式 web/代理的 Host JWT 第二载体；
+  CLI 不发送；JWT 关闭时不解析/不剥离。
+- **破坏性变更**：header 更名；namespace token 启用后 fallback 失效。
+  CLI/relay 必须成对升级；生产部署前必须轮换/分发 namespace token，或清空
+  secret 保持 fallback 模式，否则 host 认证锁死。
+
+### A–D（in_progress，代码未开始）
+
+- A `11-18-v1-2-namespace-auth`：Session JWT viewer/listener 验签
+  （`X-Tokimeki-Session` 三段式、`token_use=session`、`attach`/`listen`、
+  `session`=路径、namespace 前缀、严格 `iss/aud/exp/nbf`；DO hash bypass；
+  listener 仍需 `X-Tokimeki-Listener: 1`；Session JWT 不作 host；无 invite）。
+- B `11-18-v1-2-cli-ux`：TokiAPI session 创建、Session JWT、invite v2、
+  offline fallback。
+- C `11-18-v1-2-web-ui`：TokiAPI Session JWT 签发、WS 代理、xterm.js viewer。
+- D `11-18-v1-2-passcode`：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`）。
+
+### 边界
+
+- 不引入 SQLite namespace 目录/introspection/per-viewer JWT/refresh token/
+  撤销列表；不独立发布 web-client 包；不做组织/团队模型、浏览器 P2P；
+  wire version 保持 v1。
+
 ## v2（独立任务）
+
+### v2.0 前置决策：弱网注入可靠传输 A/B 验证（已押后）
+
+状态（2026-11-18）：规划任务 `11-18-v2-0-weaknet-ab-validation` 已创建，当前为
+planning。用户已决定**押后（postponed）**，暂不启动，恢复时间待定。恢复后该
+验证仍是 v2.0 transport 选择的前置条件；在结论出来前，不把 TUN 应用层
+ARQ/FEC 当作 v2.0 的既定实现。
+
+- **目的**：在可控丢包/乱序/重复/抖动/限速环境下，比较：
+  - A：v1 reliable/ordered DataChannel（SCTP 可靠 + 有序）；
+  - B：reliable/unordered DataChannel（SCTP 可靠、无 SCTP 排序；仅 harness
+    参考路径，除非结论建议提升为产品路径）；
+  - C：unreliable/unordered + TUN selective-repeat ARQ（当前 F1）；
+  - D：unreliable/unordered + TUN SR-ARQ + XOR FEC（当前 F1.1）；
+  - R：relay 回退基线（只测失败/回退正确性与恢复时间）。
+- **注入**：主环境为 Linux VM / network namespace + `tc netem`，在真实 UDP 路径
+  注入 loss/reorder/duplicate/jitter/rate；Windows/macOS 工具只做 sanity。
+  跨公网 WAN 作为外部有效性补充，不作为主矩阵。
+- **指标**：字节级正确性、p50/p95/p99 完成时间或 RTT、goodput、HOL/停顿、
+  重传/FEC 恢复、tunnel 失败与 relay 回退时间、CPU/RSS、ACK 字节占比。
+- **预注册决策门槛（待 PRD 确认）**：所有变体必须 100% 字节正确；TUN 只有在
+  目标丢包档位下显著改善 p99/恢复时间，且 CPU/ACK 开销可接受时才保留；否则
+  v2.0 优先 reliable DataChannel 方案，移除或降级应用层 ARQ/FEC。
+- **产物**：`scripts/perf/weaknet/`（可复现 harness）、
+  `docs/perf/weaknet-ab.md`（报告与决策）、任务 PRD/design/implement。
+- **不阻塞**：v2.0 的 wire 信封/relay 兼容工作可以并行；只阻塞 transport
+  可靠性方案的最终选型。
 
 - Go/Rust 纯二进制实现，复用 v1 wire protocol、加密封装、帧类型与 Worker 中继。
 - 不假设 KCP/FEC 跨语言 wire 兼容：要么用 golden vectors + 互操作测试验证同一方言，

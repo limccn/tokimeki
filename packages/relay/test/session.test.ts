@@ -1,4 +1,4 @@
-import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+﻿import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { decodeFrame, encodeFrame, MAX_SIGNAL_PAYLOAD_BYTES } from "@limccn/tokimeki-protocol";
 import { describe, expect, it } from "vitest";
 
@@ -55,7 +55,7 @@ describe("SessionDurableObject", () => {
 
   it("accepts unknown capabilities from newer clients", async () => {
     const socket = await connectWorker("unknown-capabilities", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     socket.send(
@@ -80,7 +80,7 @@ describe("SessionDurableObject", () => {
   it("echoes client identity and display capabilities in welcome and presence", async () => {
     const sessionId = "client-display-echo";
     const host = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     host.send(
@@ -149,7 +149,7 @@ describe("SessionDurableObject", () => {
   it("rejects a second host while the first is online", async () => {
     const host = await openHost("duplicate-host");
     const second = await connectWorker("duplicate-host", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     second.send(helloFor("duplicate-host", "host", "host-2"));
@@ -204,6 +204,56 @@ describe("SessionDurableObject", () => {
     host.close();
     listener.close();
     sized.close();
+  });
+
+  it("never issues TURN credentials to a listener", async () => {
+    const sessionId = "listener-turn-gate";
+    // The test env has coturn configured, so hosts/viewers get TURN.
+    const host = await openHost(sessionId);
+    expect(host.controls.find((message) => message.type === "welcome")?.iceProvider).toBe("coturn");
+    const viewer = await openViewer(sessionId, "viewer-1");
+    expect(viewer.controls.find((message) => message.type === "welcome")?.iceProvider).toBe(
+      "coturn",
+    );
+
+    const listener = await openListener(sessionId, "listener-1");
+    const welcome = listener.controls.find((message) => message.type === "welcome");
+    expect(welcome?.iceProvider).toBe("stun");
+    expect(welcome?.iceExpiresAt).toBeNull();
+    // Control messages arrive as untyped JSON in this harness; narrow the
+    // listener welcome's ICE server list for the TURN assertions.
+    const servers = (welcome?.iceServers ?? []) as Array<{
+      urls: string | string[];
+      username?: string;
+      credential?: string;
+    }>;
+    expect(servers.length).toBeGreaterThan(0);
+    for (const server of servers) {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      expect(urls.every((url) => url.startsWith("stun:"))).toBe(true);
+      expect(server.username).toBeUndefined();
+      expect(server.credential).toBeUndefined();
+    }
+    const serialized = JSON.stringify(welcome);
+    expect(serialized).not.toContain("test-coturn-secret");
+    expect(serialized).not.toContain("turn:coturn.test.invalid");
+
+    listener.send({ v: 1, type: "ice-refresh" });
+    const error = await listener.waitFor(
+      (message) => message.type === "error" && String(message.message).includes("TURN"),
+    );
+    expect(error.code).toBe("invalid_role");
+    await sleep(100);
+    expect(listener.controls.some((message) => message.type === "ice")).toBe(false);
+
+    // Host/viewer ICE refresh behavior is unchanged.
+    viewer.send({ v: 1, type: "ice-refresh" });
+    const refreshed = await viewer.waitForType("ice");
+    expect(refreshed.iceProvider).toBe("coturn");
+
+    host.close();
+    viewer.close();
+    listener.close();
   });
 
   it("rejects a listener without a host session and does not create the schema", async () => {
@@ -611,7 +661,7 @@ describe("SessionDurableObject", () => {
     host.close();
     await viewer.waitFor((message) => message.type === "host" && message.online === false);
     const reconnected = await connectWorker("host-reconnect", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     reconnected.send(helloFor("host-reconnect", "host", "host-1"));
@@ -628,7 +678,7 @@ describe("SessionDurableObject", () => {
     host.close();
     await viewer.waitFor((message) => message.type === "host" && message.online === false);
     const reconnected = await connectWorker("host-token-change", {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: "different-session-token",
     });
     reconnected.send(helloFor("host-token-change", "host", "host-1"));
@@ -1077,7 +1127,7 @@ describe("SessionDurableObject", () => {
     const squatter = await openViewer(sessionId, "host-1");
 
     const replacement = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
     });
     replacement.send(helloFor(sessionId, "host", "host-1"));
@@ -1101,5 +1151,26 @@ describe("SessionDurableObject", () => {
 
     replacement.close();
     viewer.close();
+  });
+
+  it("derives a namespace for root-created <namespace>.<slug> sessions", async () => {
+    const named = await openHost("team-a.root-derived");
+    const plain = await openHost("plain-root");
+    const namedStub = env.SESSIONS.get(env.SESSIONS.idFromName("team-a.root-derived"));
+    const plainStub = env.SESSIONS.get(env.SESSIONS.idFromName("plain-root"));
+    const namedMeta = await runInDurableObject(namedStub, async (_instance, state) => {
+      return state.storage.sql
+        .exec<{ namespace_id: string | null }>("SELECT namespace_id FROM session_meta LIMIT 1")
+        .toArray();
+    });
+    const plainMeta = await runInDurableObject(plainStub, async (_instance, state) => {
+      return state.storage.sql
+        .exec<{ namespace_id: string | null }>("SELECT namespace_id FROM session_meta LIMIT 1")
+        .toArray();
+    });
+    expect(namedMeta[0]?.namespace_id).toBe("team-a");
+    expect(plainMeta[0]?.namespace_id).toBeNull();
+    named.close();
+    plain.close();
   });
 });

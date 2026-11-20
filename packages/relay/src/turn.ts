@@ -49,7 +49,14 @@ export interface IssueIceConfigOptions {
   readonly now?: number;
 }
 
-const DEFAULT_TURN_TTL_SECONDS = 86_400;
+/**
+ * Default TURN credential lifetime (15 minutes).
+ *
+ * TURN usage cannot be metered by the relay, so short-lived credentials limit
+ * the blast radius of a leaked bearer token. `TOKIMEKI_COTURN_TTL_SECONDS` and
+ * `TOKIMEKI_TURN_TTL_SECONDS` override it per provider.
+ */
+const DEFAULT_TURN_TTL_SECONDS = 900;
 const MAX_CLOUDFLARE_TURN_TTL_SECONDS = 172_800;
 const CLOUDFLARE_CACHE_REFRESH_WINDOW_MS = 5 * 60 * 1000;
 /** ICE is negotiated during `hello`; a stalled TURN API must not hold it up. */

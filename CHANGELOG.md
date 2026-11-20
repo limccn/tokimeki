@@ -6,6 +6,95 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-20
+
+Default/no-jwt mainline: static multi-namespace host tokens, the additive
+`session_meta.namespace_id` migration, authenticated `/auth/whoami`, opt-in
+session TTL/byte/message limits, and the optional Host JWT credential
+alignment (`TOKIMEKI_TOKEN` + `X-Tokimeki-Token`; JWT verification stays
+disabled unless configured). The Session JWT/share-link/passcode line is
+maintained separately as 0.1.4.
+
+
+### Added
+
+- Minimal TokiAPI Host JWT verification (task `11-19-v1-2-cli-tokiapi-host-jwt`):
+  the relay optionally verifies ES256 Host JWTs offline (`TOKIMEKI_JWT_JWKS_URL`,
+  `TOKIMEKI_JWT_ISSUER`, `TOKIMEKI_JWT_AUDIENCE`, `TOKIMEKI_JWT_JWKS_TTL_SECONDS`,
+  `TOKIMEKI_JWT_CLOCK_SKEW_SECONDS`) with a per-isolate JWKS cache, strict
+  claims validation (`token_use=host`, `scope` containing `host`, namespace
+  claim + `<namespace>.<slug>` session prefix), fail-closed invalid config,
+  and `503 jwks_unavailable` when the JWKS is unreachable. Unset JWKS URL
+  keeps JWT mode fully disabled (no parsing, no Authorization handling, no
+  JWKS traffic).
+- `Authorization: Bearer <Host JWT>` as a second carrier, accepted only while
+  JWT mode is enabled and only when `X-Tokimeki-Token` is absent/empty;
+  stripped before the SessionDO in non-disabled modes. The CLI never sends it.
+- CLI host credential `TOKIMEKI_TOKEN`: one opaque value for a TokiAPI Host
+  JWT or a static namespace token, always sent on `X-Tokimeki-Token`, with a
+  required `TOKIMEKI_NAMESPACE` (paired error messages, auto-prefixed
+  sessions). Read-only `~/.tokimeki/config.json` support with
+  env > `TOKIMEKI_CONFIG` > file precedence, host credentials selected per
+  source layer, and POSIX 0600 enforcement. `doctor` probes `/auth/whoami`
+  with the effective credential and reports `authMode=jwt|namespace|master`.
+- Static namespace host tokens for OSS multi-namespace hosting:
+  `TOKIMEKI_NAMESPACE_TOKENS` maps a namespace to a host token, namespace
+  sessions use `<namespace>.<slug>`, and the CLI uses `TOKIMEKI_TOKEN` +
+  `TOKIMEKI_NAMESPACE` (`TOKIMEKI_NAMESPACE_TOKEN` is retired). Includes an additive
+  `session_meta.namespace_id` migration; unset preserves master-only behavior.
+- Authenticated `GET /auth/whoami` (root master in v1) exposes TURN
+  provider/configured diagnostics while the public `/healthz` stays minimal.
+- Opt-in session limits: absolute/idle TTL and per-session byte/message hard
+  caps via `TOKIMEKI_SESSION_MAX_TTL_SECONDS`,
+  `TOKIMEKI_SESSION_IDLE_TTL_SECONDS`, `TOKIMEKI_SESSION_MAX_BYTES`, and
+  `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND`.
+
+### Changed
+
+- **Breaking**: the host header was renamed `X-Tokimeki-Master` →
+  `X-Tokimeki-Token`. The old header is no longer accepted; CLI and relay must
+  be upgraded together.
+- **Breaking**: `TOKIMEKI_NAMESPACE_TOKEN` is retired. A non-empty value exits
+  2 with a hint to rename it to `TOKIMEKI_TOKEN`; no compatibility fallback.
+- **Breaking**: enabling a valid `TOKIMEKI_NAMESPACE_TOKENS` map immediately
+  disables `TOKIMEKI_MASTER_TOKEN` and root `*` takeover (fallback hosts 401
+  even when the value matches); only namespace tokens and Host JWTs
+  authenticate hosts in that mode. Relay logs `fallback_token_disabled` while
+  the master secret is still set. `/auth/whoami` now reports
+  `authMode=jwt|namespace|master` accordingly.
+- Renamed the private relay workspace package to `@limccn/tokimeki-relay` for
+  npm scope consistency. Relay deployment and the public npm packages are
+  unchanged.
+- Replaced the repository banner artwork with the new 1024×512 illustration
+  and removed the unused `banner-paint.png`, `icon-1254.png`, and `icon.svg`
+  sources. Both READMEs continue to use `assets/icon.png`.
+- Listener connections are STUN-only and can no longer obtain TURN
+  credentials; listener `ice-refresh` returns `invalid_role`.
+- Public `/healthz` now returns only `{ok, service, protocolVersion}`; use the
+  authenticated `/auth/whoami` for TURN details.
+- TURN credential default TTL is 15 minutes (900s); explicit env overrides and
+  the Cloudflare 172800s cap are unchanged.
+- Session absolute TTL defaults to 24h; idle/byte/rate caps default off.
+
+### Fixed
+
+- Doctor sanitizes the relay-provided TURN provider string before printing and
+  treats a missing whoami endpoint on older relays as a warning.
+
+### Documentation
+
+- README (English and Chinese) now documents v1.1 configuration: read-only
+  listeners (`tokimeki attach --listen`, `TOKIMEKI_LISTENER_SNAPSHOT_MS`,
+  relay `TOKIMEKI_MAX_LISTENERS`), the opt-in P2P TUN profile
+  (`TOKIMEKI_TUNNEL`, `TOKIMEKI_TUNNEL_FEC`, `TOKIMEKI_TUNNEL_SECRET`), LAN
+  diagnostics and reserved routing variables, and automatic P2P behavior.
+- Added `docs/tunnel-reliability.md` (SR-ARQ vs SCTP trade-offs) and the v2.0
+  weak-network A/B validation plan. That validation is currently postponed.
+- Added `docs/relay-exposure-policy.md` (public surface, namespace gating, TURN
+  limits, and the master -> static namespace token -> JWT/TokiAPI route) and
+  updated CLI/protocol/deployment docs for `/auth/whoami`, the listener TURN
+  gate, the 900s TURN default, namespace tokens, and session limits.
+
 ## [0.1.2] - 2026-11-16
 
 ### Added
@@ -152,7 +241,8 @@ First public release.
 > P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
 > recovery. The 0.1.0 limitation above is kept as the release-time record.
 
-[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/limccn/tokimeki/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/limccn/tokimeki/releases/tag/v0.1.2
 [0.1.1]: https://github.com/limccn/tokimeki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0

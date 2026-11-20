@@ -50,8 +50,18 @@
   ]
   // Non-secret runtime configuration lives in `vars` above; secrets are set with
   // `wrangler secret put` and never committed:
-  //   TOKIMEKI_MASTER_TOKEN            (secret, required) host authentication; unset rejects all hosts
+  //   TOKIMEKI_MASTER_TOKEN            (secret) single-owner fallback credential; disabled once TOKIMEKI_NAMESPACE_TOKENS has a valid entry
+  //   TOKIMEKI_NAMESPACE_TOKENS        (secret) static namespace host tokens, JSON { "<namespace>": "<token>" }
+  //   TOKIMEKI_JWT_JWKS_URL            (secret or var) https JWKS URL on the TokiAPI dashboard origin; unset = JWT mode disabled
+  //   TOKIMEKI_JWT_ISSUER              (secret or var) required with the JWKS URL; compared exactly against `iss`
+  //   TOKIMEKI_JWT_AUDIENCE            expected `aud`; default "tokimeki-relay"
+  //   TOKIMEKI_JWT_JWKS_TTL_SECONDS    JWKS cache lifetime; default 3600 (clamped 60..86400)
+  //   TOKIMEKI_JWT_CLOCK_SKEW_SECONDS  claim clock skew; default 60 (clamped 0..300)
   //   TOKIMEKI_SESSION_TTL_SECONDS     default 86400 host-offline grace
+  //   TOKIMEKI_SESSION_MAX_TTL_SECONDS default 86400 absolute lifetime from creation; 0 disables
+  //   TOKIMEKI_SESSION_IDLE_TTL_SECONDS default 0 (off) inactivity lifetime from last activity
+  //   TOKIMEKI_SESSION_MAX_BYTES       default 0 (off) relay bytes per session; approximate (1 MiB flush)
+  //   TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND default 0 (off) inbound WS messages per active session
   //   TOKIMEKI_MAX_CLIENTS_PER_SESSION default 8
   //   TOKIMEKI_MAX_LISTENERS           default 8 read-only snapshot-only clients
   //   TOKIMEKI_ICE_TRANSPORT_POLICY    all | relay (default all)
@@ -59,12 +69,12 @@
   //   TOKIMEKI_TURN_PROVIDER           auto | coturn | cloudflare | none (default auto)
   //   TOKIMEKI_COTURN_URLS             JSON array or legacy comma-separated turn:/turns: URLs
   //   TOKIMEKI_COTURN_SECRET           (secret) coturn static-auth-secret
-  //   TOKIMEKI_COTURN_TTL_SECONDS      default 86400
+  //   TOKIMEKI_COTURN_TTL_SECONDS      default 900 (15 min), recommended 600..3600
   //   TOKIMEKI_TURN_URLS               static TURN URLs
   //   TOKIMEKI_TURN_USERNAME           static TURN username
   //   TOKIMEKI_TURN_CREDENTIAL         (secret) static TURN credential
   //   TOKIMEKI_TURN_KEY_ID             Cloudflare Realtime TURN key id
   //   TOKIMEKI_TURN_API_TOKEN          (secret) Cloudflare Realtime TURN API token
-  //   TOKIMEKI_TURN_TTL_SECONDS        default 86400, Cloudflare clamps to 172800
+  //   TOKIMEKI_TURN_TTL_SECONDS        default 900, Cloudflare clamps to 172800
   //   TOKIMEKI_LOG_LEVEL               debug | info | warn | error | silent (default info)
 }

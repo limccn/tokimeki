@@ -2,9 +2,25 @@
 # Copy to `.dev.vars` for local `wrangler dev`; set real values with
 # `wrangler secret put` for deployed Workers. Never commit `.dev.vars`.
 
-# Required: authenticates hosts. Unset/blank rejects all hosts.
+# Single-owner fallback credential (one person exclusively owning a relay).
+# Unset/blank rejects all fallback hosts (fail-closed). Once
+# TOKIMEKI_NAMESPACE_TOKENS below has a valid entry, this token and root "*"
+# takeover stop working — migrate hosts to TOKIMEKI_TOKEN instead.
 # Replace change-me with a strong random value before deploying.
 TOKIMEKI_MASTER_TOKEN=change-me
+
+# Optional: static namespace host tokens as a JSON object.
+# Each value must be a unique random token >= 32 bytes and differ from the
+# master token. Namespace hosts may only use "<namespace>.<slug>" sessions.
+# Example: {"team-a":"<32+ byte random>","team-b":"<32+ byte random>"}
+TOKIMEKI_NAMESPACE_TOKENS=
+
+# Optional: TokiAPI Host JWT verification. The JWKS lives on the TokiAPI
+# dashboard origin; issuer is required with the URL. Unset = JWT disabled.
+# Example: TOKIMEKI_JWT_JWKS_URL=https://tokiapi.app/api/tokimeki/jwks.json
+#          TOKIMEKI_JWT_ISSUER=https://tokiapi.app
+TOKIMEKI_JWT_JWKS_URL=
+TOKIMEKI_JWT_ISSUER=
 
 # Optional: coturn REST shared secret (must match coturn static-auth-secret).
 TOKIMEKI_COTURN_SECRET=

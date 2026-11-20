@@ -12,22 +12,78 @@ import {
 } from "./helpers";
 
 describe("relay worker", () => {
-  it("reports health without secrets", async () => {
+  it("reports minimal health without secrets", async () => {
     const response = await SELF.fetch("https://relay.test/healthz");
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
     const body = await response.json<Record<string, unknown>>();
-    expect(body).toMatchObject({
+    // Public healthz must not expose TURN/JWT/namespace details.
+    expect(body).toEqual({
       ok: true,
       service: "tokimeki-relay",
       protocolVersion: 1,
-      turnProvider: "coturn",
-      turnConfigured: true,
     });
     const text = JSON.stringify(body);
     expect(text).not.toContain(MASTER_TOKEN);
+    expect(text).not.toContain(SESSION_TOKEN);
     expect(text).not.toContain("test-coturn-secret");
     expect(text).not.toContain("test-turn-api-token");
+  });
+
+  it("reports authenticated ops details from /auth/whoami", async () => {
+    const response = await SELF.fetch("https://relay.test/auth/whoami", {
+      headers: { "x-tokimeki-token": MASTER_TOKEN },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.json<Record<string, unknown>>();
+    expect(body).toEqual({
+      ok: true,
+      service: "tokimeki-relay",
+      protocolVersion: 1,
+      authMode: "master",
+      turn: { provider: "coturn", configured: true },
+    });
+    const text = JSON.stringify(body);
+    expect(text).not.toContain(MASTER_TOKEN);
+    expect(text).not.toContain(SESSION_TOKEN);
+    expect(text).not.toContain("test-coturn-secret");
+    expect(text).not.toContain("test-turn-api-token");
+    expect(text).not.toContain("turn:coturn.test.invalid");
+  });
+
+  it("rejects missing and wrong fallback tokens on /auth/whoami", async () => {
+    const cases: Array<Record<string, string>> = [
+      {},
+      { "x-tokimeki-token": "wrong-master-token" },
+      { "x-tokimeki-token": "" },
+    ];
+    for (const headers of cases) {
+      const response = await SELF.fetch("https://relay.test/auth/whoami", { headers });
+      expect(response.status).toBe(401);
+      const body = await response.json<Record<string, unknown>>();
+      expect(body).toMatchObject({ ok: false, error: "unauthorized" });
+    }
+  });
+
+  it("fails closed on /auth/whoami when no master token is configured", async () => {
+    const worker = (await import("../src/index")).default;
+    const response = await worker.fetch(
+      new Request("https://relay.test/auth/whoami", {
+        headers: { "x-tokimeki-token": "any-token" },
+      }),
+      { ...env, TOKIMEKI_MASTER_TOKEN: undefined },
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects non-GET /auth/whoami requests", async () => {
+    const response = await SELF.fetch("https://relay.test/auth/whoami", {
+      method: "POST",
+      headers: { "x-tokimeki-token": MASTER_TOKEN },
+    });
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("GET");
   });
 
   it("rejects non-websocket requests to the session route", async () => {
@@ -42,29 +98,73 @@ describe("relay worker", () => {
     expect(response.status).toBe(400);
   });
 
-  it("rejects an incorrect master token", async () => {
+  it("rejects an incorrect fallback token", async () => {
     const response = await SELF.fetch("https://relay.test/ws/session-1", {
       headers: {
         Upgrade: "websocket",
-        "x-tokimeki-master": "wrong-master-token",
+        "x-tokimeki-token": "wrong-master-token",
         "x-tokimeki-session": SESSION_TOKEN,
       },
     });
     expect(response.status).toBe(401);
   });
 
-  it("rejects a master token that equals the session token", async () => {
+  it("rejects a fallback token that equals the session token", async () => {
     // Both headers carry the real master token: without the equality guard the
     // Worker would accept this as an authenticated host (101), so this asserts
     // the guard itself rather than master-token validation.
     const response = await SELF.fetch("https://relay.test/ws/equal-tokens", {
       headers: {
         Upgrade: "websocket",
-        "x-tokimeki-master": MASTER_TOKEN,
+        "x-tokimeki-token": MASTER_TOKEN,
         "x-tokimeki-session": MASTER_TOKEN,
       },
     });
     expect(response.status).toBe(401);
+  });
+
+  it("does not accept the renamed-away X-Tokimeki-Master header as a credential", async () => {
+    // The old host header is not a credential: whoami sees no credential and
+    // the session route treats the connection as a viewer.
+    const whoami = await SELF.fetch("https://relay.test/auth/whoami", {
+      headers: { "x-tokimeki-master": MASTER_TOKEN },
+    });
+    expect(whoami.status).toBe(401);
+
+    const response = await SELF.fetch("https://relay.test/ws/old-header-viewer", {
+      headers: {
+        Upgrade: "websocket",
+        "x-tokimeki-master": MASTER_TOKEN,
+        "x-tokimeki-session": SESSION_TOKEN,
+      },
+    });
+    expect(response.status).toBe(101);
+    response.webSocket?.accept();
+    response.webSocket?.close(1000, "test");
+  });
+
+  it("ignores Authorization when JWT mode is disabled", async () => {
+    // JWT mode is off in this configuration: Authorization is neither parsed
+    // nor treated as a host credential.
+    const whoami = await SELF.fetch("https://relay.test/auth/whoami", {
+      headers: { authorization: `Bearer ${MASTER_TOKEN}` },
+    });
+    expect(whoami.status).toBe(401);
+
+    const worker = (await import("../src/index")).default;
+    const forwarded = await worker.fetch(
+      new Request("https://relay.test/ws/authz-forwarded", {
+        headers: {
+          Upgrade: "websocket",
+          "x-tokimeki-session": SESSION_TOKEN,
+          authorization: `Bearer ${MASTER_TOKEN}`,
+        },
+      }),
+      env,
+    );
+    expect(forwarded.status).toBe(101);
+    forwarded.webSocket?.accept();
+    forwarded.webSocket?.close(1000, "test");
   });
 
   it("does not let a viewer create a session", async () => {
@@ -141,7 +241,7 @@ describe("relay worker", () => {
   it("lets the master token win over the listener header", async () => {
     const sessionId = "listener-header-host";
     const socket = await connectWorker(sessionId, {
-      master: MASTER_TOKEN,
+      hostToken: MASTER_TOKEN,
       token: SESSION_TOKEN,
       listener: true,
     });
@@ -164,5 +264,61 @@ describe("relay worker", () => {
         .map((row) => row.name);
     });
     expect(tables).not.toContain("session_meta");
+  });
+
+  it("lets the fallback token host named and plain sessions (root takeover)", async () => {
+    const named = await openHost("team-b.root-created");
+    expect(named.controls.find((message) => message.type === "welcome")?.session).toBe(
+      "team-b.root-created",
+    );
+    const plain = await openHost("plain-root-session");
+    expect(plain.controls.find((message) => message.type === "welcome")?.session).toBe(
+      "plain-root-session",
+    );
+    named.close();
+    plain.close();
+  });
+
+  it("fails closed on an invalid namespace map while the fallback token still works", async () => {
+    const worker = (await import("../src/index")).default;
+    const invalidEnv = { ...env, TOKIMEKI_NAMESPACE_TOKENS: '{"team-a":"too-short"}' };
+    const blocked = await worker.fetch(
+      new Request("https://relay.test/ws/team-a.desk", {
+        headers: {
+          Upgrade: "websocket",
+          "x-tokimeki-token": "test-namespace-token-team-a-0123456789",
+          "x-tokimeki-session": SESSION_TOKEN,
+        },
+      }),
+      invalidEnv,
+    );
+    expect(blocked.status).toBe(401);
+
+    const root = await worker.fetch(
+      new Request("https://relay.test/ws/root-still-works", {
+        headers: {
+          Upgrade: "websocket",
+          "x-tokimeki-token": MASTER_TOKEN,
+          "x-tokimeki-session": SESSION_TOKEN,
+        },
+      }),
+      invalidEnv,
+    );
+    expect(root.status).toBe(101);
+    root.webSocket?.accept();
+    root.webSocket?.close(1000, "test");
+  });
+
+  it("compares a JWT-shaped token value as a fallback/namespace token when JWT is disabled", async () => {
+    // JWT mode is off: a three-segment value is never sent to a JWKS and is
+    // compared against the configured credentials (none match) -> 401.
+    const response = await SELF.fetch("https://relay.test/ws/jwt-shape-disabled", {
+      headers: {
+        Upgrade: "websocket",
+        "x-tokimeki-token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImtkMSJ9.eyJzdWIiOiJ1In0.AAAAAAAA",
+        "x-tokimeki-session": SESSION_TOKEN,
+      },
+    });
+    expect(response.status).toBe(401);
   });
 });

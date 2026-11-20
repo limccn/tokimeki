@@ -1,7 +1,10 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 
 export const MASTER_TOKEN = "test-master-token-abc";
 export const SESSION_TOKEN = "test-session-token-xyz";
+/** Must match the `TOKIMEKI_NAMESPACE_TOKENS` binding in `vitest.namespace.config.ts`. */
+export const TEAM_A_TOKEN = "test-namespace-token-team-a-0123456789";
+export const TEAM_B_TOKEN = "test-namespace-token-team-b-0123456789";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -193,9 +196,14 @@ function wrapSocket(ws: WebSocket): TestSocket {
 export interface ConnectOptions {
   readonly role?: string;
   readonly token?: string | null;
-  readonly master?: string;
+  /** Host credential sent as `X-Tokimeki-Token` (master/JWT/namespace token). */
+  readonly hostToken?: string;
+  /** Raw `Authorization` header value (Bearer carrier, JWT mode only). */
+  readonly authorization?: string;
   /** Set `X-Tokimeki-Listener: 1` (Worker-assigned listener role). */
   readonly listener?: boolean;
+  /** Forged internal namespace header; the Worker must delete it. */
+  readonly namespaceHeader?: string;
 }
 
 export async function connectWorker(
@@ -206,8 +214,14 @@ export async function connectWorker(
   if (options.token !== null) {
     headers["x-tokimeki-session"] = options.token ?? SESSION_TOKEN;
   }
-  if (options.master !== undefined) {
-    headers["x-tokimeki-master"] = options.master;
+  if (options.hostToken !== undefined) {
+    headers["x-tokimeki-token"] = options.hostToken;
+  }
+  if (options.authorization !== undefined) {
+    headers.authorization = options.authorization;
+  }
+  if (options.namespaceHeader !== undefined) {
+    headers["x-tokimeki-namespace"] = options.namespaceHeader;
   }
   if (options.listener === true) {
     headers["x-tokimeki-listener"] = "1";
@@ -238,6 +252,28 @@ export async function connectDirect(
   return wrapSocket(response.webSocket);
 }
 
+/**
+ * Test-only: override bindings on the live SessionDO instance.
+ *
+ * `cloudflare:test`'s `env` mutations are not visible to a Durable Object, and
+ * each DO instance owns its own runtime binding object, so quota/TTL tests
+ * patch the instance directly. Use a session id unique to the test: overrides
+ * never leak to another DO.
+ */
+export async function setDoEnv(
+  sessionId: string,
+  overrides: Record<string, string | undefined>,
+): Promise<void> {
+  const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+  await runInDurableObject(stub, (instance) => {
+    // Test-only cast: the base class holds the runtime binding object.
+    const target = instance as unknown as { env: Record<string, unknown> };
+    for (const [key, value] of Object.entries(overrides)) {
+      target.env[key] = value;
+    }
+  });
+}
+
 export function helloFor(
   sessionId: string,
   role: string,
@@ -261,7 +297,7 @@ export async function openHost(
   options: ConnectOptions = {},
 ): Promise<TestSocket> {
   const socket = await connectWorker(sessionId, {
-    master: MASTER_TOKEN,
+    hostToken: MASTER_TOKEN,
     token: SESSION_TOKEN,
     ...options,
   });

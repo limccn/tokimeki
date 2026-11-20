@@ -21,6 +21,7 @@ import {
   loadDoctorConfig,
   loadHostConfig,
 } from "./config.js";
+import { resolveConfigEnv } from "./config-file.js";
 import { type HostCommandKind, runHostSession } from "./host/host-session.js";
 import { buildLocalCommand, isLocalHelpPassthrough } from "./host/pty-command.js";
 import { createRedactor, formatError, isLogLevel, Logger, type LogLevel } from "./logger.js";
@@ -34,6 +35,8 @@ export interface CliDeps {
   readonly platform?: NodeJS.Platform;
   readonly cwd?: string;
   readonly hostname?: string;
+  /** Override the home directory used to locate `~/.tokimeki/config.json`. */
+  readonly homeDir?: string;
   readonly runHost?: (
     config: HostConfig,
     command: string,
@@ -92,6 +95,7 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
   const cwd = deps.cwd ?? process.cwd();
   const runLocal = deps.runLocal ?? defaultRunLocal;
   const bootstrapRedact = createRedactor([
+    env.TOKIMEKI_TOKEN,
     env.TOKIMEKI_MASTER_TOKEN,
     env.TOKIMEKI_SESSION_TOKEN,
     env.TOKIMEKI_TUNNEL_SECRET,
@@ -135,6 +139,15 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
     }
   }
 
+  // The config file is read only inside real command actions: a broken file
+  // never breaks local `claude|pi --help|--version` passthrough. Test-injected
+  // env objects skip the file unless a homeDir override opts in.
+  const configEnvOptions = {
+    homeDir: deps.homeDir,
+    platform,
+    enabled: deps.env === undefined || deps.homeDir !== undefined,
+  };
+
   const hostAction = async (
     kind: HostCommandKind,
     baseCommand: string,
@@ -151,14 +164,17 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
     }
 
     let config: HostConfig;
+    let logger: Logger;
     try {
-      config = loadHostConfig({ env, cwd, hostname: deps.hostname });
+      const resolved = resolveConfigEnv(env, configEnvOptions);
+      config = loadHostConfig({ env: resolved.env, cwd, hostname: deps.hostname });
+      logger = makeLogger(config.logLevel, config.secrets);
+      for (const warning of resolved.warnings) logger.warn(warning);
+      for (const warning of config.warnings) logger.warn(warning);
     } catch (error) {
       printError(error);
       return 2;
     }
-    const logger = makeLogger(config.logLevel, config.secrets);
-    for (const warning of config.warnings) logger.warn(warning);
     if (kind === "claude" && config.claudeBg) {
       logger.warn(
         "TOKIMEKI_CLAUDE_BG is experimental and is not implemented in v1; starting claude normally",
@@ -186,14 +202,17 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
 
   const attachAction = async (listener: boolean): Promise<number> => {
     let config: AttachConfig;
+    let logger: Logger;
     try {
-      config = loadAttachConfig(env, { listener });
+      const resolved = resolveConfigEnv(env, configEnvOptions);
+      config = loadAttachConfig(resolved.env, { listener });
+      logger = makeLogger(config.logLevel, config.secrets);
+      for (const warning of resolved.warnings) logger.warn(warning);
+      for (const warning of config.warnings) logger.warn(warning);
     } catch (error) {
       printError(error);
       return 2;
     }
-    const logger = makeLogger(config.logLevel, config.secrets);
-    for (const warning of config.warnings) logger.warn(warning);
     const runAttach =
       deps.runAttach ??
       ((attachConfig, attachLogger) =>
@@ -214,14 +233,17 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
 
   const doctorAction = async (): Promise<number> => {
     let config: DoctorConfig;
+    let logger: Logger;
     try {
-      config = loadDoctorConfig(env);
+      const resolved = resolveConfigEnv(env, configEnvOptions);
+      config = loadDoctorConfig(resolved.env, { configFile: resolved.file });
+      logger = makeLogger(readLogLevel(resolved.env), config.secrets);
+      for (const warning of resolved.warnings) logger.warn(warning);
+      for (const warning of config.warnings) logger.warn(warning);
     } catch (error) {
       printError(error);
       return 2;
     }
-    const logger = makeLogger(readLogLevel(env), config.secrets);
-    for (const warning of config.warnings) logger.warn(warning);
     const runDoctorCommand =
       deps.runDoctor ??
       ((doctorConfig, reportStream) => runDoctor(doctorConfig, { stdout: reportStream }));

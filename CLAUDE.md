@@ -18,12 +18,12 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.2)
+## Release identity (0.1.3)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.2`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.2`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.3`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.3`; the CLI
   depends on it. Publish protocol **before** the CLI.
-- Relay package `@tokimeki/relay` is private; deploy with Wrangler, not npm.
+- Relay package `@limccn/tokimeki-relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
 - `npm run release:bump -- <version>` updates the root/workspace versions,
   exact protocol dependencies, and `package-lock.json`; `npm run
@@ -52,25 +52,60 @@ assets/              README icon
 
 ## Relay / SessionDO notes
 
-- `packages/relay/src/index.ts`: `/healthz`; `/ws/<session>`; mandatory
-  `x-tokimeki-session`; optional `x-tokimeki-master` upgrades the role to
-  host; constant-time comparisons; master token equal to session token is
-  rejected; master header removed before forwarding to the DO.
+- `packages/relay/src/index.ts`: public `/healthz` returns only
+  `{ok, service, protocolVersion}`; authenticated `GET /auth/whoami`
+  accepts the host credential in `x-tokimeki-token` (plus, outside disabled
+  JWT mode, `Authorization: Bearer`) and returns `authMode` of
+  `jwt`/`namespace`/`master` (with JWT claims / namespace / TURN status) with
+  no-store and no secrets; `/ws/<session>` requires a non-empty
+  `x-tokimeki-session`; `x-tokimeki-token` upgrades the role to host;
+  constant-time comparisons; a host credential equal to the session token is
+  rejected; token/master/listener/namespace headers (and, outside disabled
+  JWT mode, `authorization`) are removed before forwarding.
+- Host auth dispatch by value shape in `x-tokimeki-token`: single-owner
+  fallback token `TOKIMEKI_MASTER_TOKEN` first (only while no valid namespace
+  tokens exist; disabled — like root `*` takeover — once
+  `TOKIMEKI_NAMESPACE_TOKENS` has a valid entry), then JWT-shaped values
+  (`jwt-auth.ts`: strict ES256 offline verification, per-isolate JWKS cache
+  with 30 s refresh gating, `503 jwks_unavailable`, fail-closed on invalid
+  config), then static namespace tokens from `TOKIMEKI_NAMESPACE_TOKENS`
+  (JSON `{ "<namespace>": "<token>" }`; `namespace-tokens.ts` validates and
+  matches in constant time without early exit). Namespace and JWT hosts may
+  only use `<namespace>.<slug>` sessions (dot route); the Worker derives the
+  namespace from the verified credential only and injects
+  `x-tokimeki-namespace` (`*` for the fallback root). Invalid/duplicate/short/
+  oversized maps fail closed; unset keeps the fallback-only behavior.
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
   host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
   reserved `TUNNEL` returns `not_implemented`; lazy schema only on
   authenticated host hello.
+- `session_meta.namespace_id` is additive (idempotent `ALTER TABLE ... ADD
+  COLUMN` in `ensureRelaySchema`, plus a legacy SELECT fallback). Hosts write
+  it on create (root derives it from a dotted session id), namespace hosts
+  must match it, and `NULL` legacy rows stay root/master-only. viewers and
+  listeners get a defensive session-prefix check. `welcome` has no namespace
+  field (the session id carries it).
 - Listeners are read-only snapshot-only clients: `X-Tokimeki-Listener: 1` at
   the Worker selects the role (master token still wins as host), they are
   capped by `TOKIMEKI_MAX_LISTENERS` (default 8) on top of `maxClients`, receive
   relay `SNAPSHOT_TO` only, and are excluded from `OUTPUT`, ACK/unacked bytes,
   pause/resume, slow-consumer, resize, and P2P. INPUT/resize/resync/ack/signal/
-  transport from a listener returns `invalid_role`.
+  transport/ice-refresh from a listener returns `invalid_role`. Listeners never
+  receive TURN credentials: their `welcome` is STUN-only (`iceProvider:"stun"`,
+  `iceExpiresAt: null`).
 - Flow control: ACK-driven `unackedBytes` high water 1 MiB, low water 256 KiB,
   hard limit 8 MiB, ACK ring 256; `pause`/`resume` control messages; slow
   consumers close with code 4000. Listeners never enter this accounting.
   Resize is throttled (250 ms trailing) and resync is throttled (500 ms).
+- Session limits: `TOKIMEKI_SESSION_MAX_TTL_SECONDS` (default 86400, `0` off)
+  is an absolute lifetime from creation that a host reconnect cannot extend;
+  `TOKIMEKI_SESSION_IDLE_TTL_SECONDS`, `TOKIMEKI_SESSION_MAX_BYTES`, and
+  `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND` default 0 (off). TTL expiry closes
+  with `host_exited`/4004, quota breaches with `session_full`/4002 — no new
+  error codes, and the shared PTY is never paused. Byte accounting covers
+  relay-delivered `OUTPUT`/`SNAPSHOT_TO`/`INPUT` frames only (once per frame)
+  and is approximate (1 MiB flush window); P2P/TUN bytes are not counted.
 - Snapshots: host sends `SNAPSHOT_TO` at `seq=N`, then resumes `>N`; viewers
   clear and apply the snapshot; P2P switch snapshots also use relay
   `SNAPSHOT_TO` in v1.
@@ -79,13 +114,25 @@ assets/              README icon
 - TURN: `TOKIMEKI_TURN_PROVIDER=auto|coturn|cloudflare|none`; coturn REST
   (HMAC) preferred, then static TURN, then Cloudflare Realtime TURN, then
   STUN-only. The CLI (libjuice) uses TURN UDP; include a
-  `turn:...?transport=udp` URL.
+  `turn:...?transport=udp` URL. Credential TTL defaults to 900s (15 min);
+  `TOKIMEKI_COTURN_TTL_SECONDS` / `TOKIMEKI_TURN_TTL_SECONDS` override it and
+  Cloudflare still clamps to 172800s.
 
 ## CLI notes
 
 - `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach` (`--listen` for
   read-only listener mode), `doctor`; all runtime config comes from env
-  (`.env.example` is the reference).
+  (`.env.example` is the reference) merged with a read-only
+  `~/.tokimeki/config.json` (`config-file.ts`: env > `TOKIMEKI_CONFIG` >
+  config.json > defaults; host credentials are selected per source layer; the
+  file is never written). Host auth accepts `TOKIMEKI_TOKEN` (opaque Host JWT
+  or namespace token; requires `TOKIMEKI_NAMESPACE`, auto-prefixes
+  `<namespace>.` sessions and rejects an explicit `TOKIMEKI_SESSION` without
+  it) or `TOKIMEKI_MASTER_TOKEN` (single-owner fallback). `TOKIMEKI_TOKEN`
+  wins with a warning when both are set; the retired
+  `TOKIMEKI_NAMESPACE_TOKEN` is a hard ConfigError (exit 2). The CLI always
+  sends `X-Tokimeki-Token` (never `Authorization`) via
+  `buildHostAuthHeaders`.
 - `host/`: node-pty, Windows ConPTY, headless xterm mirror, mode tracker,
   resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup, and a
   separate periodic listener snapshot timer (`TOKIMEKI_LISTENER_SNAPSHOT_MS`,
@@ -134,15 +181,18 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   `relay.tokiapi.app`, production coturn URLs/Key ID).
 - `npm run deploy` uses the root config; `npm run deploy:prod` uses the relay
   config. Keep shared fields in sync.
-- Worker secrets: `TOKIMEKI_MASTER_TOKEN` (required), optional
+- Worker secrets: `TOKIMEKI_MASTER_TOKEN` (single-owner fallback; disabled once
+  namespace tokens are active), optional `TOKIMEKI_NAMESPACE_TOKENS` (static
+  namespace host tokens, JSON object), optional `TOKIMEKI_JWT_JWKS_URL` /
+  `TOKIMEKI_JWT_ISSUER` (TokiAPI Host JWT verification; unset = JWT disabled),
   `TOKIMEKI_COTURN_SECRET`, `TOKIMEKI_TURN_API_TOKEN`,
   `TOKIMEKI_TURN_CREDENTIAL`. `.dev.vars.example` is the Deploy Button
   template; never commit real values.
 
 ## Security rules
 
-- Never log tokens, auth headers, TURN credentials, signal payloads, or
-  terminal content.
+- Never log tokens, auth headers, `Authorization` values, JWKS content, TURN
+  credentials, signal payloads, or terminal content.
 - Tokens travel in headers/stdin/0600 env files, never in argv, query strings,
   README examples, or committed files.
 - The relay can see terminal bytes by design; P2P/TURN change the transport,
@@ -175,11 +225,15 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 - Cross-NAT WAN flow-control pause/resume was not observed in the 2026-11-14
   tests (delivery worked); link-quality work beyond the F1/F1.1 tunnel
   (fragmentation-independent ARQ tuning, Reed-Solomon/multi-loss FEC) is future.
+  A v2.0 lossy-network A/B validation (SCTP reliable vs TUN SR-ARQ/FEC) is
+  planned; see `docs/roadmap.md` and `docs/tunnel-reliability.md`.
 
 ## Documentation
 
 - User docs: `README.md`, `docs/cli.md`, `docs/deploy-cloudflare.md`.
 - Wire protocol: `docs/protocol.md`.
+- TUN reliability trade-off (SR-ARQ vs SCTP; v2.0 A/B plan):
+  `docs/tunnel-reliability.md`.
 - Production deployment: `docs/deployment.md`.
 - Release: `docs/release.md`.
 - Performance: `docs/perf/`.

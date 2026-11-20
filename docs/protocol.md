@@ -115,7 +115,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 |---|---|---|---|
 | `hello` | client → DO | `role`, `session`, `clientId` | `protocolVersion`（默认 1）、`client`、`capabilities`（默认 `{}`）、`cols`, `rows` |
 | `welcome` | DO → client | `session`, `hostOnline`, `iceProvider`, `sessionTtlSeconds` | `protocolVersion`（默认 1）、`clients`（默认 `[]`）、`iceServers`（默认 `[]`）、`iceExpiresAt`、`transportPolicy`（默认 `all`）、`capabilities` |
-| `ice-refresh` | client → DO | 无 | `provider` |
+| `ice-refresh` | host/viewer → DO | 无 | `provider` |
 | `ice` | DO → client | `iceServers`, `iceProvider` | `iceExpiresAt` |
 | `peer-joined` | DO → host | `clientId` | `role`（v1.1；缺省视为 viewer）、`capabilities`（默认 `{}`） |
 | `peer-left` | DO → host | `clientId` | — |
@@ -245,19 +245,50 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
 
 | 角色 | URL/头 |
 |---|---|
-| host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Master: <master token>`，`X-Tokimeki-Session: <session token>` |
+| host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Token: <Host JWT / namespace token / 单人回退 token>`，`X-Tokimeki-Session: <session token>` |
+| host（web/代理，JWT 模式） | 同上，但主头缺失/为空时可携带 `Authorization: Bearer <Host JWT>` |
 | viewer | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>` |
 | listener（v1.1） | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`，`X-Tokimeki-Listener: 1` |
 | observer/agent | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`（DO 支持，Worker 入口保留） |
 
-角色不放在 URL 中：Worker 依据认证头设置内部角色，并由 `hello.role` 与认证角色交叉校验。URL 只承载公开的会话名。v1.1 Worker 分配 `host` / `viewer` /
-`listener` 三个入口角色；`X-Tokimeki-Master` 优先，存在时忽略
+角色不放在 URL 中：Worker 依据认证头设置内部角色，并由 `hello.role` 与认证角色交叉校验。URL 只承载公开的会话名。v1.2 Worker 分配 `host` / `viewer` /
+`listener` 三个入口角色；host 凭证优先，存在时忽略
 `X-Tokimeki-Listener`。`observer` / `agent` 的 DO 路由、SQLite 表与协议 schema 已实现并通过直连测试，但生产 Worker 尚未提供选择这两个角色的入口，属于为后续协调层保留的能力。更早的 v1 relay 对 `listener` 返回 `not_implemented`。
+
+> **Breaking change（v1.2）**：host 头已从 `X-Tokimeki-Master` 更名为
+> `X-Tokimeki-Token`；旧头不再被识别为凭证，CLI 与 relay 必须成对升级。
+
+host 凭证在 `X-Tokimeki-Token` 内按值形态判定（顺序固定）：
+
+1. **回退 token**（`TOKIMEKI_MASTER_TOKEN`，单人独占 relay 的凭证）：仅当
+   relay 未启用有效 `TOKIMEKI_NAMESPACE_TOKENS` 时可用，可接管任意 session
+   （root `*`）。namespace 模式启用后即使值匹配也 401。
+2. **三段式 Host JWT**（仅 JWT 模式非 disabled，即配置了
+   `TOKIMEKI_JWT_JWKS_URL`）：ES256 离线验签（JWKS 缓存），claims 必须满足
+   `token_use=host`、`scope` 含 `host`、`namespace` 合法，session 必须为
+   `<claim-namespace>.<slug>`。JWT 模式关闭时不做 JWT 解析；配置非法时 JWT
+   凭证 fail-closed（401）；JWKS 不可达返回 503 `jwks_unavailable`。
+3. **静态 namespace token**（`TOKIMEKI_NAMESPACE_TOKENS`）：只认证其
+   namespace，session 必须为 `<namespace>.<slug>`。
+
+`Authorization: Bearer <Host JWT>` 仅在 JWT 模式非 disabled 时作为第二载体
+（web/代理 attach），只在主头缺失/为空时生效；主头与 Bearer 不同返回 401；
+非 disabled 模式下 `Authorization` 在转发 DO 前删除，`disabled` 模式下不解析、
+不剥离。Bearer 永远只承载 Host JWT，不作为回退或 namespace token 的载体。
+CLI 只发送 `X-Tokimeki-Token`，从不发送 `Authorization`。
+
+Worker 删除客户端自带的 `x-tokimeki-token` / `x-tokimeki-master` /
+`x-tokimeki-listener` / `x-tokimeki-namespace`（以及非 disabled 模式下的
+`authorization`），只注入从验证后的凭证推导的内部头。未配置 namespace
+token 且未配置 JWT 时仅回退 token 生效。
 
 规则：
 
 1. `session` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`。
-2. Worker 校验 host 的 master token（常量时间比较）、session 格式，覆盖内部 `x-tokimeki-role` 头，并移除客户端自带 master 与 listener 头后再转发到 DO。
+2. Worker 校验 host 凭证（回退 token 常量时间比较、Host JWT 离线验签或
+   namespace token 常量时间比较）、session 格式与 namespace 前缀，覆盖内部
+   `x-tokimeki-role` 头，并移除客户端自带 token、master、listener、namespace
+   头（及非 disabled 模式下的 `authorization`）后再转发到 DO。
 3. DO 首次创建会话时保存 `sha256(sessionToken)`；已有会话校验 hash。viewer/observer/agent/listener 不做 master 校验。
 4. 认证失败返回 HTTP 401 或 `error{code:"unauthorized"}` 后关闭。
 5. WebSocket 打开后，客户端第一条消息必须是 `hello`。`hello.session` 必须等于 URL session，`hello.role` 必须等于认证角色；`protocolVersion` 若提供必须为 1，缺省按 1 处理。
@@ -265,7 +296,8 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
 7. 成功认证后 DO 返回 `welcome`，其中包含在线客户端、ICE servers、provider、TTL 与协商 capabilities。
 8. token、TURN secret、credential 不得进入 `hello`、URL、日志或错误消息。
 9. 每个连接必须携带非空 `X-Tokimeki-Session`；缺失/空值在 Worker 层直接返回 HTTP 401，不会到达 DO。
-10. `X-Tokimeki-Master` 不得与 `X-Tokimeki-Session` 相同；相等时 Worker 返回 HTTP 401。
+10. host 凭证不得与 `X-Tokimeki-Session` 相同（`X-Tokimeki-Token` 或 Bearer
+    值均可）；相等时 Worker 返回 HTTP 401。
 11. DO 对非空 token 仍做防御性校验（空 token → 401），并把每个会话的 OPEN socket 数限制为 `maxClients * 2`（含 pending；超限 HTTP 429）。schema 只在该会话首次 host `hello` 时创建。
 12. listener 仍计入 `maxClients`，并额外受 `TOKIMEKI_MAX_LISTENERS`（默认 8）限制；超限返回 `session_full` 并关闭。listener 必须先有 host 会话，不能创建 schema。
 
@@ -292,8 +324,9 @@ viewer                     relay / DO                         host
 - `listener` 角色：v1.1 relay 接受只读 listener；更早的 v1 relay 返回
   `error{code:"not_implemented"}`（关闭码 4005），不得静默降级为 viewer。
 - listener 的只读边界：发送 `INPUT`/`RESYNC_REQ`/`resize`/`resync`/`ack`/`signal`/
-  `transport` 返回 `invalid_role`，relay 不转发给 host；listener 不接收 `OUTPUT`，
-  不参与 ACK、`unackedBytes`、`droppedBytes`、pause 或 slow-consumer 判定。
+  `transport`/`ice-refresh` 返回 `invalid_role`，relay 不转发给 host；listener 不接收
+  `OUTPUT`，不参与 ACK、`unackedBytes`、`droppedBytes`、pause 或 slow-consumer 判定。
+  listener 的 `welcome` 只含 STUN（`iceProvider:"stun"`），relay 不向其签发 TURN 凭据。
 - 未知 `agent.*` 消息：返回 `not_implemented`，通常**不关闭**连接，允许同一连接继续发送 v1 消息。
 
 ## 6. 输出序号、确认、重连与快照
@@ -357,6 +390,7 @@ viewer                     relay / DO                         host
 - Cloudflare TURN 使用短期凭据；TTL 上限 48 小时。provider 为 `stun` 表示未配置 TURN，只尝试直连。
 - `iceExpiresAt` 是 epoch 毫秒。v1.1 F0 的 host/viewer 在到期前自动发送 `ice-refresh`，收到 `ice` 后更新配置并重排；刷新严格串行，超时有退避，relay 未 ready 时不发请求。重新连接会获得新的 `welcome`/ICE 配置并重置定时器。
 - `ice-refresh.provider` 受 `TOKIMEKI_TURN_PROVIDER` 约束：`none` 只允许 `stun`；`coturn` 只允许 `coturn`/`static`/`stun`；`cloudflare` 只允许 `cloudflare`/`stun`；`auto` 允许任意已配置 provider。越权覆盖回退到 mode 默认，不报错。客户端以实际返回的 `iceProvider` 为准。
+- `listener` 永远不获得 TURN 凭据：其 `welcome.iceServers` 只含 STUN、`iceProvider` 为 `stun`、`iceExpiresAt` 为 `null`；listener 的 `ice-refresh` 返回 `invalid_role`，不返回 `ice`。host/viewer 的签发与刷新行为不变。
 - v1.1 F0 在 P2P link 尚未 ready 时失败，最多重试一次：先按 `coturn → static → cloudflare` 刷新到可用 TURN 配置（或刷新临期凭据），再重新协商；无可用配置或第二次失败则发送 `transport{mode:"relay", state:"failed"}` 并保持 relay。已 ready 后的关闭、DataChannel 发送失败不触发重试。relay 路径不受 ICE 凭据过期影响。
 - TURN 凭据、secret、credential 不得写入日志、URL 或 `hello`。
 
@@ -375,6 +409,10 @@ TUN profile 是可选、P2P-only 的终端字节流隧道：在 unreliable/unord
 DataChannel 上用 selective-repeat ARQ + AES-256-GCM 承载完整的 `INPUT`/`OUTPUT`
 帧。控制消息、快照、resize、signal 与 relay ACK 流控仍走各自 v1 路径；relay
 不转发 `TUNNEL`，收到时仍返回 `not_implemented`。
+
+> 设计取舍（为何在 unreliable DataChannel 上自建 SR-ARQ，而不是使用 SCTP
+> reliable 模式，以及两者何时会构成重复设计）见 `docs/tunnel-reliability.md`。
+> 弱网注入 A/B 验证规划见 `docs/roadmap.md` 的 v2.0 小节。
 
 **开关与协商**
 

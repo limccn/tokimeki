@@ -16,7 +16,7 @@ describe("relayHandshakeHeaders", () => {
   });
 
   it("leaves viewer and host headers untouched", () => {
-    const headers = { "X-Tokimeki-Session": "s", "X-Tokimeki-Master": "m" };
+    const headers = { "X-Tokimeki-Session": "s", "X-Tokimeki-Token": "t" };
     expect(relayHandshakeHeaders("viewer", headers)).toEqual(headers);
     expect(relayHandshakeHeaders("host", headers)).toEqual(headers);
   });
