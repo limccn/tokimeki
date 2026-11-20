@@ -92,3 +92,25 @@ node scripts/e2e/v1.2-cross-repo.mjs
 The harness asserts: anonymous host JWT admission, CLI viewer via a Session
 JWT from `attach/cli`, web viewer through the proxy, no TURN fields in
 `welcome`, and INPUT from the web viewer reaching the host and both viewers.
+
+### Passcode e2e
+
+`scripts/e2e/v1.2-passcode-e2e.mjs` covers v1.2-D end-to-end. It inserts a
+`passcodeRequired` invite directly into the local TokiAPI D1 (no login
+needed), mints a Host JWT with the same local signing key, and requires
+`TOKIMEKI_JWT_PRIVATE_JWK` plus the two servers above:
+
+```bash
+TOKIMEKI_JWT_PRIVATE_JWK="$(cat /tmp/tokiapi-e2e-jwk.json)" \
+TOKIAPI_BASE_URL=http://localhost:5173 \
+TOKIMEKI_RELAY_URL=ws://localhost:8788 \
+TOKIAPI_REPO=/path/to/cf-ai-gateway \
+node scripts/e2e/v1.2-passcode-e2e.mjs
+```
+
+It asserts: host verifier accepted, CLI viewer with the correct passcode
+attaches, CLI viewer without a passcode is rejected (`passcode_required`),
+web viewer sends the passcode first and renders output, and a wrong passcode
+is rejected (`passcode_invalid`). The proxy must keep queueing viewer frames
+between the passcode frame and the upstream handshake — `hello` is commonly
+sent immediately after the passcode and must not be dropped.

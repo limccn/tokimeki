@@ -57,7 +57,9 @@ maintained separately as 0.1.4.
   opaque value (no parsing/refresh); viewer config envelopes accept `v:2`
   (`namespace`, `expiresAt`, `passcodeRequired`). `docs/web-viewer.md` records
   the TokiAPI proxy contract, TURN stripping, passcode handshake, and the
-  cross-repo e2e harness (`scripts/e2e/v1.2-cross-repo.mjs`).
+  cross-repo e2e harness (`scripts/e2e/v1.2-cross-repo.mjs`) plus a
+  passcode-specific harness (`scripts/e2e/v1.2-passcode-e2e.mjs`) covering
+  CLI passcode success/failure and the Web proxy first-frame gate.
 - Test-only `TOKIMEKI_JWT_ALLOW_HTTP=1` allows a loopback `http://` JWKS URL
   for local cross-repo e2e; production must leave it unset.
 - Static namespace host tokens for OSS multi-namespace hosting:

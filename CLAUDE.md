@@ -251,7 +251,10 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 - v1.2 Session JWT (A) and optional passcode (D) are covered by relay
   unit/Worker tests. A local cross-repo e2e (TokiAPI invite → Host JWT CLI host
   → Session JWT CLI viewer → TokiAPI WS proxy web viewer with TURN stripped)
-  passes against local `wrangler dev` servers. Session JWTs have no revocation
+  passes against local `wrangler dev` servers; a second passcode-specific e2e
+  (`scripts/e2e/v1.2-passcode-e2e.mjs`) covers host verifier, CLI viewer
+  passcode success/failure, and the Web proxy first-frame passcode gate.
+  Session JWTs have no revocation
   list (short TTL); passcode lockout is per session and can be triggered by an
   attacker (documented DoS trade-off). The web viewer itself lives in the
   TokiAPI repo; tokimeki provides `docs/web-viewer.md` and the e2e harness.
