@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-20
+
+No-jwt mainline: static multi-namespace host tokens, the additive
+`session_meta.namespace_id` migration, authenticated `/auth/whoami`, and
+opt-in session TTL/byte/message limits. The JWT/hosted-auth line is maintained
+separately as 0.2.0.
+
+
 ### Added
 
 - Static namespace host tokens for OSS multi-namespace hosting:
@@ -201,7 +209,8 @@ First public release.
 > P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
 > recovery. The 0.1.0 limitation above is kept as the release-time record.
 
-[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/limccn/tokimeki/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/limccn/tokimeki/releases/tag/v0.1.2
 [0.1.1]: https://github.com/limccn/tokimeki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/limccn/tokimeki/releases/tag/v0.1.0
