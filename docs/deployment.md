@@ -7,6 +7,15 @@
 > 边缘验签；生产未配置 `TOKIMEKI_JWT_*`，当前为 no-JWT。协议与 DO schema
 > 不变）。
 >
+> 2026-11-20 生产 0.1.3：部署 Worker 版本 `b4af8f47`（`relay.tokiapi.app`）。
+> `TOKIMEKI_NAMESPACE_TOKENS` 从本地 `~/namespace_token.json` 轮换为
+> `test1`/`test2`/`test3`（值不入库、不写入文档），`TOKIMEKI_MASTER_TOKEN`
+> 同步轮换；namespace 模式生效（三个 token 的 `/auth/whoami` 均返回
+> `authMode=namespace`，master 回退 401，旧 `X-Tokimeki-Master` 401）。
+> 生产 live e2e（relay-only，`E2E_SECRET_CHECK=1`、`E2E_LISTENER=1`，
+> namespace `test1`）全部 PASS：snapshot/input/broadcast/resize/listener/
+> reconnect/relay-only/Ctrl-C/secret scrub。
+>
 > 2026-11-19 生产认证状态：`TOKIMEKI_NAMESPACE_TOKENS` 已轮换为已知的
 > `e2e` namespace token（值不入库、不写入文档）；`TOKIMEKI_MASTER_TOKEN`
 > 仍保留，但因 namespace 模式生效已不再认证 host（relay 记录一次
