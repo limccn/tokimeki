@@ -120,7 +120,13 @@ tokimeki claude
 The host prints the **session name** and a **session token**. Share those with
 the viewer — never share the relay master token. For shared relays, hosts use
 `TOKIMEKI_TOKEN` (a namespace token or TokiAPI Host JWT) with the required
-`TOKIMEKI_NAMESPACE` instead; see [docs/cli.md](docs/cli.md).
+`TOKIMEKI_NAMESPACE`; see [docs/cli.md](docs/cli.md).
+
+Pass the issued credential as `TOKIMEKI_TOKEN` together with
+`TOKIMEKI_NAMESPACE` (the 5-character prefix shown on the TokiAPI page). The
+CLI sends it as `X-Tokimeki-Token` and does not need to know whether it is a
+JWT. `TOKIMEKI_NAMESPACE_TOKEN` is retired (a non-empty value makes the CLI
+exit). `TOKIMEKI_MASTER_TOKEN` remains only as the single-owner fallback.
 
 ### 3. Attach from another machine
 
