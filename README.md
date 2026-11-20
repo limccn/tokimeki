@@ -245,10 +245,10 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 
 ## Status
 
-`0.1.2` — current release. Install from
+`0.1.3` — current release. Install from
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to GitHub
 Packages; see [docs/release.md](docs/release.md)) or read the
-[v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2).
+[v0.1.3 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.3).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
 limitations and the v1.1 feature history.

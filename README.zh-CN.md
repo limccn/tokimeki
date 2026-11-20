@@ -223,10 +223,10 @@ relay、ICE 凭据到期前自动刷新、TURN provider 失败后重试一次再
 
 ## 状态
 
-`0.1.2` — 当前版本。从
+`0.1.3` — 当前版本。从
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装（同时镜像到 GitHub
 Packages，见 [docs/release.md](docs/release.md)），或查看
-[v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2)。
+[v0.1.3 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.3)。
 P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1
 功能演进见 [CHANGELOG.md](CHANGELOG.md) 与 [`CLAUDE.md`](CLAUDE.md)。
 
