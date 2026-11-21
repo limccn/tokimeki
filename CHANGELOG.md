@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.4] - 2026-11-20
+## [0.1.4] - 2026-11-21
 
 JWT/hosted-auth line, based on 0.1.3: Session JWT viewer/listener verification, share links/web viewer contract, optional passcode, and cross-repo e2e.
 

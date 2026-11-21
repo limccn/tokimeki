@@ -208,7 +208,7 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
   "connectedAt": 1760000000000,
   "lastSeenAt": 1760000000000,
   "transport": { "mode": "p2p-direct", "state": "ready", "via": "host" },
-  "client": { "name": "tokimeki-cli", "version": "0.1.2", "kind": "cli" },
+  "client": { "name": "tokimeki-cli", "version": "0.1.4", "kind": "cli" },
   "capabilities": { "display": { "modes": ["viewport"] } }
 }
 ```

@@ -128,7 +128,7 @@ tokimeki attach
 
 ### v1.2：托管认证、分享链接与 Web 终端
 
-`develop` 上的 relay（尚未包含在已发布的 `0.1.2` 包中）支持：
+`0.1.4` 的 relay 支持：
 
 - **Host JWT**：`TOKIMEKI_TOKEN` + `TOKIMEKI_NAMESPACE`（由 TokiAPI 或任意
   ES256/JWKS 签发方提供）。relay 未启用 JWT 时，静态 namespace token 与
@@ -138,7 +138,7 @@ tokimeki attach
   listener 还需 `X-Tokimeki-Listener: 1`。
 - 可选 **session passcode**：`TOKIMEKI_PASSCODE`（6–128 个可见 ASCII 字符）。
   host 只发送 PBKDF2-SHA256 verifier；viewer 提交明文，relay 在 5 次失败后锁定
-  30 秒。它与 6 位会话访问码是两套机制。
+  30 秒。它与 TokiAPI 会话 token（6–8 位）是两套机制。
 
 [TokiAPI](https://github.com/limccn/TokiAPI) 可以驱动完整流程：`/tokimeki`
 生成 host 命令与一次性分享链接，`/#t-<code>` 打开浏览器终端，
@@ -233,7 +233,7 @@ relay、ICE 凭据到期前自动刷新、TURN provider 失败后重试一次再
 
 - Host JWT 与 Session JWT 没有撤销列表：在 `exp` 前一直有效（Host JWT 默认
   30 天，CLI Session JWT 最长 24 小时）。撤销 TokiAPI invite 只阻止新的兑换。
-- 6 位会话访问码是低熵共享 viewer 凭证；优先使用 16 位 invite 链接，泄露后
+- TokiAPI 会话 token（6–8 位）是低熵共享 viewer 凭证；优先使用 16 位 invite 链接，泄露后
   应轮换 session。
 
 ## 文档
@@ -249,11 +249,11 @@ relay、ICE 凭据到期前自动刷新、TURN provider 失败后重试一次再
 
 ## 状态
 
-`0.1.2` — 当前已发布版本。`develop` 另含尚未发布的 v1.2 认证工作
+`0.1.4` — 当前发布版本。包含 v1.2 托管认证工作
 （Host/Session JWT、passcode、分享链接与 Web 终端集成）。从
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装（同时镜像到 GitHub
 Packages，见 [docs/release.md](docs/release.md)），或查看
-[v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2)。
+[v0.1.4 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.4)。
 P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1
 功能演进见 [CHANGELOG.md](CHANGELOG.md) 与 [`CLAUDE.md`](CLAUDE.md)。
 

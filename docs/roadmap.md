@@ -151,8 +151,8 @@ wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/
   `TOKIMEKI_SESSION_TOKEN`。
 - C：TokiAPI 负责 Session JWT 签发、invite、WS 代理与 xterm.js viewer；
   tokimeki 提供 `docs/web-viewer.md` 与 e2e harness。
-- D：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`），与 6 位会话
-  访问码是两套机制。
+- D：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`），与 6–8 位
+  TokiAPI 会话 token 是两套机制。
 
 ### 边界
 

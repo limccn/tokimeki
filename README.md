@@ -142,7 +142,7 @@ tokimeki attach
 
 ### v1.2: hosted auth, share links, and the web viewer
 
-The relay on `develop` (not yet part of the published `0.1.2` package) accepts:
+The `0.1.4` relay accepts:
 
 - **Host JWT** via `TOKIMEKI_TOKEN` + `TOKIMEKI_NAMESPACE` (issued by TokiAPI
   or any ES256/JWKS issuer). Static namespace tokens and the single-owner
@@ -155,7 +155,7 @@ The relay on `develop` (not yet part of the published `0.1.2` package) accepts:
 - Optional **session passcode** via `TOKIMEKI_PASSCODE` (6–128 visible ASCII
   chars). The host sends only a PBKDF2-SHA256 verifier; viewers submit the
   plaintext and the relay locks verification for 30 s after five failures.
-  This is separate from a 6-digit session access code.
+  This is separate from the TokiAPI session token (6–8 digits).
 
 [TokiAPI](https://github.com/limccn/TokiAPI) can drive the whole flow:
 `/tokimeki` generates the host command and a one-time share link,
@@ -260,7 +260,7 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 - Host JWTs and Session JWTs have no revocation list: they remain valid until
   `exp` (Host JWT default 30 days; CLI Session JWT up to 24 hours). Revoking a
   TokiAPI invite only blocks new redemptions.
-- A 6-digit session access code is a low-entropy shared viewer credential;
+- The TokiAPI session token (6–8 digits) is a low-entropy shared viewer credential;
   prefer a 16-character invite link and rotate the session if it leaks.
 - Report vulnerabilities via [SECURITY.md](SECURITY.md), not public issues.
 
@@ -277,12 +277,11 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 
 ## Status
 
-`0.1.2` — current published release. `develop` additionally contains the
-unreleased v1.2 authentication work (Host/Session JWT, passcode, share-link
-and web-viewer integration). Install from
-[npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to GitHub
-Packages; see [docs/release.md](docs/release.md)) or read the
-[v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2).
+`0.1.4` — current release. It includes the v1.2 hosted-auth work
+(Host/Session JWT, passcode, share-link and web-viewer integration). Install
+from [npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to
+GitHub Packages; see [docs/release.md](docs/release.md)) or read the
+[v0.1.4 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.4).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
 limitations and the v1.1 feature history.

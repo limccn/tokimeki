@@ -174,7 +174,7 @@ Useful host variables:
 | `TOKIMEKI_MASTER_TOKEN` | — | Single-owner fallback credential (one person owning a relay); rejected once the relay has valid namespace tokens |
 | `TOKIMEKI_SESSION` | `<namespace>.<hostname>-<cwd>` or sanitized hostname+cwd | Session name (ASCII/`._-`, <=64 chars); token mode auto-prefixes `<namespace>.` |
 | `TOKIMEKI_SESSION_TOKEN` | generated | Per-session viewer token; generated value is printed once. Viewers may also receive a TokiAPI Session JWT (opaque to the CLI) |
-| `TOKIMEKI_PASSCODE` | — | Optional per-session passcode (6..128 visible ASCII chars; letters/digits/`. _ ~ @ # * + = : -`). Host sends only a PBKDF2 verifier; viewers send `X-Tokimeki-Passcode`. Not the 6-digit TokiAPI session access code |
+| `TOKIMEKI_PASSCODE` | — | Optional per-session passcode (6..128 visible ASCII chars; letters/digits/`. _ ~ @ # * + = : -`). Host sends only a PBKDF2 verifier; viewers send `X-Tokimeki-Passcode`. Not the TokiAPI session token (6–8 digits) |
 | `TOKIMEKI_P2P` | `auto` | `off` forces the Worker relay |
 | `TOKIMEKI_ICE_TRANSPORT_POLICY` | `all` | `relay` restricts ICE to TURN (test/forced TURN) |
 | `TOKIMEKI_RESIZE_POLICY` | `latest` | `latest`, `min`, or `pinned`; ignored when the fixed TUI window is active |
