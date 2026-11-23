@@ -158,10 +158,10 @@ wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/
 - `Authorization: Bearer` 仅 JWT 模式 web/代理 Host JWT 第二载体；
   CLI 不发送。
 
-## v1.4（规划中，2026-11-20 立项）
+## v1.4（已交付，0.1.5，2026-11-23）
 
 状态：父任务 `.trellis/tasks/11-20-v1-4-user-onboarding` 与 10 个子任务
-（A–J）已创建，均为 planning，未启动实现。规划已完成收敛
+（A–J）均已实现并随 **0.1.5**（tag `v0.1.5`）交付（2026-11-23）。规划已完成收敛
 （2026-11-22）：Open Questions 已由代码库证据回答，各子任务
 implement/check jsonl 清单已配置；B 拆分为 B1/B2。
 2026-11-23 规划评审：B2 的 TokiAPI 契约已在本地 `cf-ai-gateway` 核实
@@ -179,6 +179,16 @@ daemon 事件通道/schema、G 的日志视图键与阈值、E 的写入白名�
 可修项归入 H/A/J/E/D/G/I，限速/边缘加固归入 v1.7 R8，凭证/会话生命周期新建
 v1.8；摘要见
 `.trellis/tasks/11-20-v1-4-user-onboarding/audit/2026-11-23-security-audit.md`。
+
+**交付记录（0.1.5）**：A–J 已实现。本地验证：601 个单测（5 skipped）、relay
+五套（155+15+23+8+12）、`build:site`、两份 Wrangler dry-run、basic 与
+`E2E_WINDOW=1` live e2e、自包含
+`scripts/e2e/v1.4-onboarding-e2e.mjs`（v2 config-file host、daemon 事件、
+passcode、share-URL attach、assets 路由、无落盘）。生产 relay 已部署
+（version `cb651e83`，`relay.tokiapi.app` 返回站点/CSP、`/healthz` 200、
+`/auth/whoami` 401、`/ws` 426）。固定窗口的 F12 实时 resize 因 v1 无
+wire 消息更新 viewer fixed-grid 而延后到 v1.8；非 fixed 策略可用。TokiAPI
+匿名路径本轮未重跑生产 live（沿用用户 2026-11-23 功能测试确认，本地用 mock）。
 
 目标：补齐用户途径——CLI 交互/守护模式、doctor-first host/attach 向导、
 默认 `relay.tokiapi.app` 的匿名 namespace/token 申请、F12 连接菜单、
@@ -241,10 +251,16 @@ DEBUG 日志、宽终端侧栏）。进程接管仅规划。
 - E 的 token 落盘、匿名申请、F12 token 展示需安全审查；relay 仍要求
   token，不匿名 host/viewer。
 
-## v1.5（规划中，2026-11-20 立项）
+## v1.5（已交付，0.1.6，2026-11-23）
 
 状态：父任务 `.trellis/tasks/11-20-v1-5-agent-onboarding` 与 3 个子任务
-（A skill / B dsh 插件 / C 发布）已创建，均为 planning，未启动实现。
+（A skill / B dsh 插件 / C 发布）已实现并随 **0.1.6**（tag `v0.1.6`）交付
+（2026-11-23）。skill 位于 `skills/tokimeki/`，本地
+`npx skills add . --list` 已验证可发现；GitHub 默认分支 `main` 仍为
+0.1.2，需维护者合并 `release/0.1.6` 后默认分支安装才可用。dsh 插件源码
+与 13 个测试已完成（`D:/Workspace/tokimeki-dsh`，commit `9464dad`），但
+新建公开仓库 `limccn/tokimeki-dsh` 需要用户显式授权（或由用户在 GitHub
+UI 创建）并配置 `NPM_TOKEN` 后才能发布 npm/GitHub Release。
 
 启动前置（2026-11-23）：先对齐 v1.4 路线图（A/B/C/E/H/J）与 0.1.4
 凭证模型（推荐 `TOKIMEKI_TOKEN`，`TOKIMEKI_MASTER_TOKEN` 为 deprecated
@@ -353,6 +369,21 @@ config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
 
 已知取舍：撤销代际依赖 TokiAPI 签发 epoch；短期只能 jti denylist 或重新
 兑换 invite；viewer 驱逐需限速/确认，避免 host/其他 viewer DoS。
+
+### v1.4/v1.5 delivery follow-ups（任务 `11-23-v1-8-v1-4-v1-5-followups`）
+
+- 固定窗口实时 resize：新增 additive `display-size`/capability 刷新路径，
+  更新 relay DO、协议文档/goldens、viewer 重连行为；恢复 F12 fixed 菜单项并补
+  多 viewer e2e。
+- 公开发布 `tokimeki-dsh`：用户创建/授权 `limccn/tokimeki-dsh` 公开仓库、
+  配置 `NPM_TOKEN`，推送 `main`/`v0.1.0`，由 CI 发布 npm + GitHub Release。
+- skill 分发：合并 `release/0.1.6` → `main` 后验证默认分支
+  `npx skills add limccn/tokimeki --skill tokimeki`、卸载与 skills.sh
+  indexing request（best-effort）。
+- TokiAPI `api/config`/`anon-host`/`attach/cli` 生产 live 复测（200/429/503、
+  TTL、relay wss 绑定）。
+- 清理项：`TOKIMEKI_TOKIAPI_URL` 定位、ACP 检测跨平台 CI、skill 结构/secret
+  扫描脚本。
 
 ## v2（独立任务）
 
