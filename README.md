@@ -183,7 +183,9 @@ The `0.1.5` CLI adds the user onboarding path:
 
 - `skills/tokimeki/SKILL.md` with
   `npx skills add limccn/tokimeki --skill tokimeki` (project scope; `-g` for
-  global). There is no registry short name.
+  global). There is no registry short name. The skill is on
+  `develop`/`release/0.1.6`; default-branch installation becomes available
+  after the maintainer merges `release/0.1.6` into `main`.
 - `docs/agent-install.md` has a copy-paste install prompt (skill + CLI +
   doctor).
 - `@limccn/tokimeki-dsh` is an independent DeepSeek Harness plugin with
