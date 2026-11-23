@@ -241,7 +241,7 @@ function commonEnv() {
     "TOKIMEKI_WINDOW",
     "TOKIMEKI_WINDOW_SIZE",
     "TOKIMEKI_WINDOW_TUI",
-    "TOKIMEKI_LOG_PANEL_ROWS",
+    "TOKIMEKI_LOG_VIEW_ROWS",
     "TOKIMEKI_INVITE_KEY",
     "TOKIMEKI_CONFIG",
     "TOKIMEKI_LOG_LEVEL",
@@ -267,7 +267,7 @@ function commonEnv() {
       ? {
           TOKIMEKI_WINDOW: "on",
           TOKIMEKI_WINDOW_SIZE: `${windowSize.cols}x${windowSize.rows}`,
-          TOKIMEKI_LOG_PANEL_ROWS: "8",
+          TOKIMEKI_LOG_VIEW_ROWS: "8",
           TOKIMEKI_INVITE_KEY: "f12",
         }
       : {}),
@@ -295,7 +295,7 @@ function configHostEnv() {
     "TOKIMEKI_WINDOW",
     "TOKIMEKI_WINDOW_SIZE",
     "TOKIMEKI_WINDOW_TUI",
-    "TOKIMEKI_LOG_PANEL_ROWS",
+    "TOKIMEKI_LOG_VIEW_ROWS",
     "TOKIMEKI_INVITE_KEY",
     "TOKIMEKI_TUNNEL",
     "TOKIMEKI_TUNNEL_FEC",
@@ -608,21 +608,21 @@ async function main() {
 
   if (windowMode) {
     await waitForLog(host, "viewers=2", timeoutMs, "host viewers status");
-    await waitForLog(host, "f12:invite", timeoutMs, "host invite hint");
+    await waitForLog(host, "f12:menu", timeoutMs, "host invite hint");
     await waitForLog(host, "view:fit", timeoutMs, "host fit status");
     if (!host.output.includes("\x1b[2m")) {
       throw new Error("debug log panel did not render");
     }
-    await waitForLog(attach1, "view:80x15@", timeoutMs, "attach1 crop status");
+    await waitForLog(attach1, "view:80x23@", timeoutMs, "attach1 crop status");
     await waitForLog(attach2, "view:fit", timeoutMs, "attach2 fit status");
     assertFixedHost(host, windowBaseline, "after two viewers attached");
     pass("host status bar, debug log panel, and viewer crop/fit status verified");
 
     if (inviteCheck) {
       host.child.write("\x1b[24~");
-      await waitForLog(host, "TOKIMEKI VIEWER CONFIG (SECRET)", 20_000, "invite overlay");
-      await waitForLog(host, "viewer config (secret):", 20_000, "invite config line");
-      await waitForLog(host, "c: copy exact JSON", 20_000, "invite copy hint");
+      await waitForLog(host, "TOKIMEKI CONNECTION", 20_000, "connection menu");
+      await waitForLog(host, "session token (viewer capability):", 20_000, "menu token line");
+      await waitForLog(host, "c: copy config", 20_000, "menu copy hint");
       host.child.write("c");
       await waitFor(host, "\x1b]52;c;", 20_000, "OSC 52 copy");
       host.child.write("x");
@@ -636,14 +636,18 @@ async function main() {
       await new Promise((r) => setTimeout(r, 300));
       attach1.child.write("post-invite-e2e\r");
       await waitForLog(attach1, "ECHO:post-invite-e2e", 20_000, "post-invite input");
-      pass("F12 overlay opened, copied via OSC 52, consumed keys, and closed");
+      host.child.write("[23~");
+      await waitForLog(host, "LOGS", 20_000, "F11 log view");
+      host.child.write("[23~");
+      await new Promise((r) => setTimeout(r, 300));
+      pass("F12 menu opened, copied via OSC 52, consumed keys, closed; F11 log view toggled");
     }
 
     attach1.child.resize(120, 40);
     await waitForLog(attach1, "view:fit", timeoutMs, "attach1 fit after resize");
     assertFixedHost(host, windowBaseline, "after viewer resize");
     attach1.child.resize(80, 24);
-    await waitForLog(attach1, "view:80x15@", timeoutMs, "attach1 crop after resize");
+    await waitForLog(attach1, "view:80x23@", timeoutMs, "attach1 crop after resize");
     assertFixedHost(host, windowBaseline, "after viewer resize restore");
     pass("viewer resize only changed its local viewport; host PTY stayed fixed");
 

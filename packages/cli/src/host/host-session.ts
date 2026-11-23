@@ -24,13 +24,15 @@ import {
   type TunnelKeyMode,
   type WelcomeMessage,
 } from "@limccn/tokimeki-protocol";
-
-import {
-  buildClientDescriptor,
-  buildInviteOverlayLines,
-  formatViewerConfigJson,
-} from "../client-info.js";
+import type { CliMode } from "../cli-mode.js";
+import { buildClientDescriptor, formatViewerConfigJson } from "../client-info.js";
 import { buildHostAuthHeaders, type HostConfig } from "../config.js";
+import {
+  type CliEventWriter,
+  eventConnectionState,
+  eventTransport,
+  mapRelayErrorCode,
+} from "../events.js";
 import { inviteKeyLabel } from "../invite.js";
 import { formatError, type Logger } from "../logger.js";
 import { createPasscodeVerifier, type PasscodeVerifier } from "../passcode.js";
@@ -39,6 +41,8 @@ import { ModeTracker } from "../terminal/mode-tracker.js";
 import { ByteRing } from "../terminal/ring-buffer.js";
 import {
   LocalViewport,
+  type MenuAction,
+  type MenuModel,
   type ViewportRelayState,
   type ViewportStatus,
   type ViewportTransport,
@@ -86,6 +90,13 @@ export interface HostSessionDeps {
   readonly platform?: NodeJS.Platform;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** Daemon mode suppresses the startup banner and emits structured events. */
+  readonly mode?: CliMode;
+  readonly events?: CliEventWriter;
+  /** Hosted anonymous invite URL (capability secret, memory only). */
+  readonly hostedInviteUrl?: string;
+  /** Invoked once the first relay welcome has been processed. */
+  readonly onWelcome?: () => void;
 }
 
 const LOCAL_STDOUT_PAUSE = "local-stdout";
@@ -169,6 +180,12 @@ function truncateUtf8Tail(data: Buffer, maxBytes: number): string {
   return slice.subarray(offset).toString("utf8");
 }
 
+/** Mask a secret for the local menu unless the user explicitly reveals it. */
+export function maskSecretToken(value: string): string {
+  if (value.length <= 8) return "*".repeat(Math.max(4, value.length));
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
 /** Session banner lines (never includes the relay master token). */
 export function formatSessionInfo(config: HostConfig, viewerCount: number): string[] {
   const window = config.ptySize ?? config.windowSize;
@@ -209,6 +226,11 @@ class HostSession {
   readonly #cwd: string;
   readonly #env: NodeJS.ProcessEnv;
   readonly #clientId = `host-${randomUUID()}`;
+  readonly #mode: CliMode;
+  readonly #events: CliEventWriter | null;
+  readonly #hostedInviteUrl: string | null;
+  readonly #onWelcome: (() => void) | undefined;
+  #readyEmitted = false;
 
   /** Derived once per process; reconnect hellos reuse the same verifier. */
   #passcodeVerifierCache: PasscodeVerifier | null = null;
@@ -232,8 +254,16 @@ class HostSession {
    * `#viewportEnabled` (local TTY only) additionally renders it locally.
    */
   readonly #fixedGeometryEnabled: boolean;
-  readonly #fixedSize: TerminalSize;
+  #fixedSize: TerminalSize;
   readonly #viewportEnabled: boolean;
+  /** Session-scoped pinned size chosen from the connection menu. */
+  #menuPinnedSize: TerminalSize | null = null;
+  readonly #menuResizeState: {
+    cols: number;
+    rows: number;
+    policy: string;
+    hint?: string;
+  } = { cols: 80, rows: 24, policy: "latest" };
 
   readonly #viewers = new Set<string>();
   /**
@@ -306,7 +336,14 @@ class HostSession {
     this.#platform = deps.platform ?? process.platform;
     this.#cwd = deps.cwd ?? process.cwd();
     this.#env = deps.env ?? process.env;
+    this.#mode = deps.mode ?? "interactive";
+    this.#events = deps.events ?? null;
+    this.#hostedInviteUrl = deps.hostedInviteUrl ?? null;
+    this.#onWelcome = deps.onWelcome;
     this.#fixedSize = config.ptySize ?? config.windowSize;
+    this.#menuResizeState.cols = this.#fixedSize.cols;
+    this.#menuResizeState.rows = this.#fixedSize.rows;
+    this.#menuResizeState.policy = config.resizePolicy;
     this.#fixedGeometryEnabled =
       resolveWindowMode({
         mode: config.windowMode,
@@ -353,6 +390,10 @@ class HostSession {
   }
 
   #writeSessionInfo(): void {
+    // Daemon mode must not bypass logger redaction with the sessionToken-bearing
+    // viewer config; the harness gets ready/status events and explicit sharing
+    // happens through the local menu instead.
+    if (this.#mode === "daemon") return;
     for (const line of formatSessionInfo(this.#config, this.#viewers.size)) {
       try {
         this.#stderr.write(`${line}\n`);
@@ -367,7 +408,7 @@ class HostSession {
     this.#viewport.start();
     this.#logger.setSink((line) => {
       this.#viewport?.appendLog(line);
-      if (this.#config.logLevel !== "debug" || this.#config.logPanelRows === 0) {
+      if (this.#config.logLevel !== "debug" || this.#config.logViewRows === 0) {
         if (this.#deferredLogs.length >= 256) this.#deferredLogs.shift();
         this.#deferredLogs.push(line);
       }
@@ -394,7 +435,7 @@ class HostSession {
       transport: this.#transportLabel(),
       ...(this.#config.inviteKey === "off"
         ? {}
-        : { inviteHint: `${inviteKeyLabel(this.#config.inviteKey).toLowerCase()}:invite` }),
+        : { inviteHint: `${inviteKeyLabel(this.#config.inviteKey).toLowerCase()}:menu` }),
     };
   }
 
@@ -417,6 +458,82 @@ class HostSession {
 
   #updateViewportStatus(): void {
     this.#viewport?.setStatus(this.#statusModel());
+  }
+
+  #menuModel(revealToken: boolean): MenuModel {
+    const token = revealToken
+      ? this.#config.sessionToken
+      : maskSecretToken(this.#config.sessionToken);
+    const window = this.#fixedGeometryEnabled
+      ? this.#fixedSize
+      : this.#pty === null
+        ? this.#config.windowSize
+        : { cols: this.#pty.cols, rows: this.#pty.rows };
+    const lines = [
+      `relay: ${this.#config.relayUrl}`,
+      ...(this.#config.namespace === null ? [] : [`namespace: ${this.#config.namespace}`]),
+      `session: ${this.#config.session}`,
+      `session token (viewer capability): ${token}`,
+      `viewers: ${this.#viewers.size}   listeners: ${this.#listeners.size}`,
+      `transport: ${this.#transportLabel()}   relay: ${this.#relayState}`,
+      `window: ${window.cols}x${window.rows} (${this.#config.resizePolicy})`,
+      ...(this.#fixedGeometryEnabled
+        ? ["fixed window: live resize requires a host restart (deferred to v1.8)"]
+        : []),
+      ...(this.#hostedInviteUrl === null ? [] : ["anonymous invite URL: available"]),
+    ];
+    const items = [
+      { id: "status", label: "Refresh status" },
+      { id: "show-token", label: "Show/hide session token" },
+      { id: "copy-config", label: "Copy viewer config (OSC 52)" },
+      ...(this.#hostedInviteUrl === null
+        ? []
+        : [{ id: "copy-invite", label: "Copy anonymous invite URL (OSC 52)" }]),
+      ...(this.#config.logLevel === "debug" && this.#config.logViewRows > 0
+        ? [{ id: "open-logs", label: "Open log view (F11)" }]
+        : []),
+      ...(this.#fixedGeometryEnabled ? [] : [{ id: "resize", label: "Resize hosted window" }]),
+    ];
+    return { title: "TOKIMEKI CONNECTION", lines, items };
+  }
+
+  #handleMenuAction(action: MenuAction): void {
+    if (action.type === "resize") {
+      this.#applyMenuResize({ cols: action.cols, rows: action.rows });
+    }
+  }
+
+  /**
+   * Apply a window size chosen from the F12 menu through the existing resize
+   * pipeline. Fixed windows update the session-scoped pinned size; `min` may
+   * still be compressed by viewers; `pinned` updates the in-memory pin.
+   */
+  #applyMenuResize(next: TerminalSize): void {
+    if (!isTerminalSizeWithinLimits(next.cols, next.rows)) {
+      this.#logger.warn(`ignoring resize outside the cell limit: ${next.cols}x${next.rows}`);
+      return;
+    }
+    if (this.#fixedGeometryEnabled) {
+      // Viewers learn the fixed grid from the host hello capabilities, and v1
+      // has no wire message to update them live. Applying a new PTY size would
+      // desync existing viewers' mirrors, so fixed-grid live resize is deferred
+      // to the v1.8 protocol work; the menu item is not offered in this mode.
+      this.#logger.warn(
+        "fixed-window resize is not applied live; restart the host with a new TOKIMEKI_WINDOW_SIZE (deferred to v1.8)",
+      );
+      return;
+    }
+    if (this.#config.resizePolicy === "pinned") {
+      this.#menuPinnedSize = next;
+    }
+    this.#latestSize = next;
+    this.#applyResize();
+    this.#logger.info(
+      `menu resize requested ${next.cols}x${next.rows} (policy ${this.#config.resizePolicy})`,
+    );
+    if (this.#config.resizePolicy === "min") {
+      this.#logger.info("min policy may compress the window to fit every writable viewer");
+    }
   }
 
   #createPty(): void {
@@ -468,20 +585,26 @@ class HostSession {
     });
     if (this.#viewportEnabled) {
       const inviteKey = this.#config.inviteKey;
+      this.#menuResizeState.cols = this.#pty.cols;
+      this.#menuResizeState.rows = this.#pty.rows;
       this.#viewport = new LocalViewport({
         mirror: this.#mirror,
         tracker: this.#tracker,
         stdout: this.#stdout,
-        logRows: this.#config.logLevel === "debug" ? this.#config.logPanelRows : 0,
+        logViewRows: this.#config.logLevel === "debug" ? this.#config.logViewRows : 0,
         status: this.#statusModel(),
         onInput: (data) => this.#pty?.write(data),
         ...(inviteKey === "off"
           ? {}
           : {
-              invite: {
+              menu: {
                 key: inviteKey,
-                lines: buildInviteOverlayLines(this.#config, inviteKey),
+                role: "host",
+                getModel: ({ revealToken }) => this.#menuModel(revealToken),
+                onAction: (action) => this.#handleMenuAction(action),
                 copyText: formatViewerConfigJson(this.#config),
+                ...(this.#hostedInviteUrl === null ? {} : { inviteUrl: this.#hostedInviteUrl }),
+                resize: this.#menuResizeState,
               },
             }),
       });
@@ -611,6 +734,16 @@ class HostSession {
       this.#relayState = state;
       this.#updateViewportStatus();
       this.#iceManager.onRelayState(state);
+      this.#events?.status({
+        connection: {
+          state: eventConnectionState(state),
+          transport: eventTransport(this.#transportLabel()),
+        },
+        configured: true,
+        relay: this.#config.relayUrl,
+        ...(this.#config.namespace === null ? {} : { namespace: this.#config.namespace }),
+        session: this.#config.session,
+      });
     });
     client.onFatal((error) => this.#handleFatal(error));
 
@@ -686,6 +819,19 @@ class HostSession {
       this.#logger.info(`listeners: ${this.#listeners.size}`);
     }
     this.#updateViewportStatus();
+    this.#onWelcome?.();
+    if (!this.#readyEmitted) {
+      this.#readyEmitted = true;
+      this.#events?.ready({
+        command: "host",
+        role: "host",
+        relay: this.#config.relayUrl,
+        ...(this.#config.namespace === null ? {} : { namespace: this.#config.namespace }),
+        session: this.#config.session,
+        transport: eventTransport(this.#transportLabel()),
+        pid: process.pid,
+      });
+    }
   }
 
   #handleControl(message: KnownControlMessage): void {
@@ -1097,6 +1243,12 @@ class HostSession {
   #handleFatal(error: RelayFatalError): void {
     this.#logger.error(`${error.code}: ${error.message}`);
     const code = error.code === "unauthorized" ? 2 : error.code === "session_full" ? 3 : 1;
+    this.#events?.error({
+      code: mapRelayErrorCode(error.code),
+      message: error.message,
+      retryable: false,
+      exitCode: code,
+    });
     this.#finish(code);
   }
 
@@ -1301,7 +1453,7 @@ class HostSession {
           policy: this.#config.resizePolicy,
           local: this.#localSize,
           startup: this.#startupSize,
-          pinned: this.#config.ptySize,
+          pinned: this.#menuPinnedSize ?? this.#config.ptySize,
           viewers: this.#viewerSizes.values(),
           latest: this.#latestSize,
         });
@@ -1313,6 +1465,8 @@ class HostSession {
     if (!shouldApplyResize(current, next)) return;
     pty.resize(next.cols, next.rows);
     this.#mirror?.resize(next.cols, next.rows);
+    this.#menuResizeState.cols = next.cols;
+    this.#menuResizeState.rows = next.rows;
     this.#logger.debug(`PTY resized to ${next.cols}x${next.rows}`);
   }
 

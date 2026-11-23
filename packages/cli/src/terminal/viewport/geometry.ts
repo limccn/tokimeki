@@ -1,10 +1,11 @@
 /**
  * Pure viewport geometry.
  *
- * The local terminal is split into a TUI viewport, an optional debug log panel,
- * and a one-line status bar. The logical TUI grid is fixed for the session; the
- * viewport either letterboxes it (when the local area is larger) or crops it
- * with a camera that follows the TUI cursor.
+ * The local terminal is split into a TUI viewport and a one-line status bar.
+ * In debug mode on a wide terminal an additional 40x8 log area occupies the
+ * bottom-right corner; the TUI viewport then becomes L-shaped (top full-width
+ * slice + bottom-left slice) while the camera is computed over the merged
+ * (top + corner-height) rectangle.
  */
 
 export interface TerminalSize {
@@ -19,15 +20,33 @@ export interface Rect {
   readonly rows: number;
 }
 
+export type ViewportLayoutMode = "narrow" | "corner";
+
+export interface ViewportLayoutOptions {
+  /** Reserve the bottom-right debug log area (wide terminals only). */
+  readonly corner?: boolean;
+}
+
 export interface ViewportFrame {
   readonly local: TerminalSize;
   readonly logical: TerminalSize;
-  /** Requested log rows after clamping to leave at least one viewport row. */
-  readonly logRows: number;
+  readonly mode: ViewportLayoutMode;
+  /** Top full-width slice (narrow mode: the only viewport). */
   readonly viewport: Rect;
+  /** Bottom-left continuation slice in corner mode (null otherwise). */
+  readonly cornerViewport: Rect | null;
+  /** Bottom-right debug log area in corner mode (null otherwise). */
   readonly logPanel: Rect | null;
+  /** Camera rectangle: viewport + corner height in corner mode. */
+  readonly mergedViewport: Rect;
   readonly statusBar: Rect;
 }
+
+/** v1.4 constants (not environment-configurable). */
+export const CORNER_COLS = 40;
+export const CORNER_ROWS = 8;
+export const CORNER_MIN_COLS = 120;
+export const CORNER_EXIT_COLS = 118;
 
 export interface ViewportCamera {
   /** Camera origin inside the logical grid (0 when the axis fits). */
@@ -55,33 +74,62 @@ function clampDimension(value: number): number {
 }
 
 /**
- * Split the local terminal into viewport / log panel / status bar.
+ * Split the local terminal into viewport / optional corner log / status bar.
  *
- * `requestedLogRows` is clamped so the viewport keeps at least one row when the
- * terminal has room. The status bar always occupies the final row.
+ * The corner layout requires at least one viewport row, one status row, the
+ * 8-row log area, and enough columns for the 40-column log area plus one
+ * viewport column; otherwise it falls back to the narrow layout.
  */
 export function computeViewportFrame(
   local: TerminalSize,
   logical: TerminalSize,
-  requestedLogRows: number,
+  options: ViewportLayoutOptions = {},
 ): ViewportFrame {
   const localCols = clampDimension(local.cols);
   const localRows = clampDimension(local.rows);
-  const logRows = clamp(Math.floor(requestedLogRows), 0, Math.max(0, localRows - 2));
-  const viewRows = Math.max(0, localRows - 1 - logRows);
-  const viewport: Rect = { x: 0, y: 0, cols: localCols, rows: viewRows };
-  const logPanel: Rect | null =
-    logRows > 0 ? { x: 0, y: viewRows, cols: localCols, rows: logRows } : null;
   const statusBar: Rect =
     localRows > 0
       ? { x: 0, y: localRows - 1, cols: localCols, rows: 1 }
       : { x: 0, y: 0, cols: localCols, rows: 0 };
+  const cornerPossible =
+    options.corner === true && localCols > CORNER_COLS && localRows - 1 > CORNER_ROWS;
+  if (cornerPossible) {
+    const viewRows = localRows - 1 - CORNER_ROWS;
+    const cornerCols = Math.max(1, localCols - CORNER_COLS);
+    const viewport: Rect = { x: 0, y: 0, cols: localCols, rows: viewRows };
+    const cornerViewport: Rect = {
+      x: 0,
+      y: viewRows,
+      cols: cornerCols,
+      rows: CORNER_ROWS,
+    };
+    const logPanel: Rect = {
+      x: localCols - CORNER_COLS,
+      y: viewRows,
+      cols: CORNER_COLS,
+      rows: CORNER_ROWS,
+    };
+    return {
+      local: { cols: localCols, rows: localRows },
+      logical,
+      mode: "corner",
+      viewport,
+      cornerViewport,
+      logPanel,
+      mergedViewport: { x: 0, y: 0, cols: localCols, rows: viewRows + CORNER_ROWS },
+      statusBar,
+    };
+  }
+  const viewRows = Math.max(0, localRows - 1);
+  const viewport: Rect = { x: 0, y: 0, cols: localCols, rows: viewRows };
   return {
     local: { cols: localCols, rows: localRows },
     logical,
-    logRows,
+    mode: "narrow",
     viewport,
-    logPanel,
+    cornerViewport: null,
+    logPanel: null,
+    mergedViewport: viewport,
     statusBar,
   };
 }
@@ -136,7 +184,7 @@ export function computeCamera(
   return { x, y, offsetX, offsetY, fitsX, fitsY };
 }
 
-/** The logical region currently visible in the viewport. */
+/** The logical region currently visible in the merged viewport. */
 export function visibleLogicalRect(
   logical: TerminalSize,
   viewport: Rect,
@@ -150,6 +198,10 @@ export function visibleLogicalRect(
   };
 }
 
+function insideRect(rect: Rect, x: number, y: number): boolean {
+  return x >= rect.x && x < rect.x + rect.cols && y >= rect.y && y < rect.y + rect.rows;
+}
+
 /** Map a 0-based local screen cell to the logical grid, or null outside it. */
 export function mapLocalToLogical(
   frame: ViewportFrame,
@@ -157,16 +209,12 @@ export function mapLocalToLogical(
   localX: number,
   localY: number,
 ): LogicalPoint | null {
-  if (
-    localX < frame.viewport.x ||
-    localX >= frame.viewport.x + frame.viewport.cols ||
-    localY < frame.viewport.y ||
-    localY >= frame.viewport.y + frame.viewport.rows
-  ) {
-    return null;
-  }
-  const x = localX - frame.viewport.x - camera.offsetX + camera.x;
-  const y = localY - frame.viewport.y - camera.offsetY + camera.y;
+  const inTop = insideRect(frame.viewport, localX, localY);
+  const inCorner =
+    frame.cornerViewport !== null && insideRect(frame.cornerViewport, localX, localY);
+  if (!inTop && !inCorner) return null;
+  const x = localX - frame.mergedViewport.x - camera.offsetX + camera.x;
+  const y = localY - frame.mergedViewport.y - camera.offsetY + camera.y;
   if (x < 0 || y < 0 || x >= frame.logical.cols || y >= frame.logical.rows) return null;
   return { x, y };
 }
@@ -178,15 +226,11 @@ export function mapLogicalToLocal(
   logicalX: number,
   logicalY: number,
 ): LogicalPoint | null {
-  const x = frame.viewport.x + camera.offsetX + logicalX - camera.x;
-  const y = frame.viewport.y + camera.offsetY + logicalY - camera.y;
-  if (
-    x < frame.viewport.x ||
-    x >= frame.viewport.x + frame.viewport.cols ||
-    y < frame.viewport.y ||
-    y >= frame.viewport.y + frame.viewport.rows
-  ) {
-    return null;
-  }
+  const merged = frame.mergedViewport;
+  const x = merged.x + camera.offsetX + logicalX - camera.x;
+  const y = merged.y + camera.offsetY + logicalY - camera.y;
+  const inTop = insideRect(frame.viewport, x, y);
+  const inCorner = frame.cornerViewport !== null && insideRect(frame.cornerViewport, x, y);
+  if (!inTop && !inCorner) return null;
   return { x, y };
 }

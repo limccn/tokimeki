@@ -7,7 +7,7 @@ import {
   collectV11Warnings,
   DEFAULT_HEARTBEAT_SECONDS,
   DEFAULT_LISTENER_SNAPSHOT_MS,
-  DEFAULT_LOG_PANEL_ROWS,
+  DEFAULT_LOG_VIEW_ROWS,
   DEFAULT_SCROLLBACK_LINES,
   DEFAULT_SNAPSHOT_MAX_BYTES,
   DEFAULT_WINDOW_SIZE,
@@ -130,8 +130,18 @@ describe("loadHostConfig", () => {
     expect(config.ptySize).toBeNull();
     expect(config.windowMode).toBe("tui");
     expect(config.windowSize).toEqual(DEFAULT_WINDOW_SIZE);
-    expect([...config.windowTuiCommands]).toEqual(["claude", "pi"]);
-    expect(config.logPanelRows).toBe(DEFAULT_LOG_PANEL_ROWS);
+    expect([...config.windowTuiCommands]).toEqual([
+      "claude",
+      "pi",
+      "codex",
+      "gemini",
+      "cursor",
+      "aider",
+      "opencode",
+      "goose",
+      "amp",
+    ]);
+    expect(config.logViewRows).toBe(DEFAULT_LOG_VIEW_ROWS);
     expect(config.inviteKey).toBe("f12");
     expect(config.claudeBg).toBe(false);
   });
@@ -214,21 +224,36 @@ describe("loadHostConfig", () => {
     ).toThrow(ConfigError);
   });
 
-  it("parses TUI window mode, command list, size, and log panel rows", () => {
+  it("parses TUI window mode, command list, size, and log-view rows", () => {
     const config = loadHostConfig({
       env: baseHostEnv({
         TOKIMEKI_WINDOW: "on",
         TOKIMEKI_WINDOW_TUI: " omp, OMP ,, pi.exe ",
         TOKIMEKI_WINDOW_SIZE: "200x50",
-        TOKIMEKI_LOG_PANEL_ROWS: "4",
+        TOKIMEKI_LOG_VIEW_ROWS: "4",
         TOKIMEKI_INVITE_KEY: "ctrl-]",
       }),
     });
     expect(config.windowMode).toBe("on");
     expect([...config.windowTuiCommands]).toEqual(["omp", "pi"]);
     expect(config.windowSize).toEqual({ cols: 200, rows: 50 });
-    expect(config.logPanelRows).toBe(4);
+    expect(config.logViewRows).toBe(4);
     expect(config.inviteKey).toBe("ctrl-]");
+
+    const legacy = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_LOG_PANEL_ROWS: "0" }),
+    });
+    expect(legacy.logViewRows).toBe(0);
+    expect(legacy.warnings.some((warning) => warning.includes("deprecated"))).toBe(true);
+
+    const both = loadHostConfig({
+      env: baseHostEnv({
+        TOKIMEKI_LOG_PANEL_ROWS: "8",
+        TOKIMEKI_LOG_VIEW_ROWS: "16",
+      }),
+    });
+    expect(both.logViewRows).toBe(16);
+    expect(both.warnings.some((warning) => warning.includes("ignored"))).toBe(true);
 
     const empty = loadHostConfig({
       env: baseHostEnv({ TOKIMEKI_WINDOW: "off", TOKIMEKI_WINDOW_TUI: "" }),

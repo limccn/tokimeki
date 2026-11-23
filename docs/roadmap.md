@@ -166,12 +166,15 @@ wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/
 implement/check jsonl 清单已配置；B 拆分为 B1/B2。
 2026-11-23 规划评审：B2 的 TokiAPI 契约已在本地 `cf-ai-gateway` 核实
 （`GET /api/config`、`POST /api/tokimeki/anon-host`、
-`POST /api/tokimeki/attach/cli`），B2 收窄为生产验证/跨仓冻结；A 的
+`POST /api/tokimeki/attach/cli`），B2 收窄为生产验证/跨仓冻结（生产
+端点后由用户 2026-11-23 确认功能测试覆盖）；A 的
 daemon 事件通道/schema、G 的日志视图键与阈值、E 的写入白名单已冻结。
 2026-11-23 追加 H（下载 config 文件 host + share URL attach）、I（ACP 9 种
 应用 + TUI 自动识别研究）、J（no-JWT 静态接入站）。
 **基线为 `develop`；`jwt`/0.1.4 已于 2026-11-23 并入 `develop`（合并门禁
-已解除）；实现启动仍需用户确认 TokiAPI 功能测试完成。**
+已解除）。用户已于 2026-11-23 确认 TokiAPI 功能测试覆盖生产
+`/api/config`、`anon-host`、`attach/cli`；v1.4 无外部阻塞。生产部署/发布
+仍需用户批准。**
 2026-11-23 安全审计（quick/scoped 设计级）：0 confirmed、7 needs_validation；
 可修项归入 H/A/J/E/D/G/I，限速/边缘加固归入 v1.7 R8，凭证/会话生命周期新建
 v1.8；摘要见
@@ -186,11 +189,14 @@ DEBUG 日志、宽终端侧栏）。进程接管仅规划。
 - **A CLI 模式/harness**：interactive/daemon、非 TTY、doctor-first、
   结构化 ready/error，适配 harness。
 - **B Host 向导（拆分 B1/B2）**：relay 默认 `wss://relay.tokiapi.app`；
-  有 token 设 namespace/token；自部署 relay 无 token 时提示配置；
+  有 token 时推荐 `TOKIMEKI_TOKEN`（`TOKIMEKI_MASTER_TOKEN` 为 deprecated
+  兼容别名）；自部署 relay 无 token 时给出 one-click Cloudflare Deploy
+  Button/docs + token 配置指引（仅指导，不执行部署）；
   `relay.tokiapi.app` 无 token 时申请匿名 namespace/token。B1 向导
   主体 + mock provisioning client 先行（不被跨仓契约阻塞）；B2 接
-  TokiAPI 现有 `anon-host`（本地 `cf-ai-gateway` 已核实契约），待生产
-  验证后 live 接通。
+  TokiAPI 现有 `anon-host`（本地 `cf-ai-gateway` 已核实契约）；生产
+  `api/config`/`anon-host`/`attach/cli` 已由用户 2026-11-23 确认功能测试
+  覆盖，实现时记录契约差异即可。
 - **C Attach 向导**：relay/session/sessionToken 分步；hello 连接测试
   （复用同一连接，不加 relay 端点）；支持粘贴 v1 viewer JSON 或 TokiAPI
   invite URL/code（`attach/cli` 兑换 Session JWT，不落盘）。
@@ -205,8 +211,9 @@ DEBUG 日志、宽终端侧栏）。进程接管仅规划。
   （≥阈值）右下角常驻日志区，尺寸变化自动切换。
 - **H 托管快捷入口**：`tokimeki --config <tokimeki-config.json>` 使用
   TokiAPI 下载的 v2 envelope 直接 host；`tokimeki attach <share-url>`
-  （`#t-<code>`）经 `attach/cli` 兑换 Session JWT 后 attach。依赖
-  `jwt → develop` 合并。
+  （`#t-<code>`）经 `attach/cli` 兑换 Session JWT 后 attach。`jwt`/0.1.4
+  已于 2026-11-23 并入 `develop`（a427bf2），v2/passcode/Session JWT
+  可用。
 - **I ACP/TUI**：CLI 覆盖 TokiAPI 预定义的 9 种 ACP
   （claude/pi/codex/gemini/cursor/aider/opencode/goose/amp）；先研究
   TUI 自动识别（只读 PATH、不执行未知二进制），再按结论实现。
@@ -219,8 +226,8 @@ DEBUG 日志、宽终端侧栏）。进程接管仅规划。
 - 依赖 0.1.3/0.1.4 的 CLI/relay 凭证模型。
 - B2 的匿名 namespace/token 申请使用 TokiAPI 现有公开契约
   （`GET /api/config`、`POST /api/tokimeki/anon-host`、
-  `POST /api/tokimeki/attach/cli`）；只差生产验证/跨仓冻结，不再被
-  “未定义 API”阻塞。C 的 hosted invite 兑换依赖 0.1.4 的
+  `POST /api/tokimeki/attach/cli`）；生产验证已由用户 2026-11-23 确认功能
+  测试覆盖；仅需实现时记录契约/差异，不再被“未定义 API”阻塞。C 的 hosted invite 兑换依赖 0.1.4 的
   Session JWT/passcode。
 - **基线（2026-11-23）**：`jwt`/0.1.4 已并入 `develop`，v1.4 基线 =
   `develop`；H/C 的 hosted live 验证前置已满足。实现启动仍待用户确认
@@ -242,7 +249,14 @@ DEBUG 日志、宽终端侧栏）。进程接管仅规划。
 启动前置（2026-11-23）：先对齐 v1.4 路线图（A/B/C/E/H/J）与 0.1.4
 凭证模型（推荐 `TOKIMEKI_TOKEN`，`TOKIMEKI_MASTER_TOKEN` 为 deprecated
 兼容别名）、one-click Cloudflare Deploy Button（skill 仅指导，不执行
-部署）、TokiAPI `anon-host` 生产验证；未记录对齐结论不启动 A/B/C。
+部署）、TokiAPI `api/config`/`anon-host`/`attach/cli` 生产功能测试
+（**已由用户 2026-11-23 确认覆盖**）；未记录对齐结论不启动 A/B/C。
+
+v1.4 实现状态：A–J 仍为 planning，0.1.4 仅含 jwt/JWT/passcode/v2；
+skill/plugin 对 `--config`/share URL/F12/config-history/no-JWT/ACP 标注
+v1.4+。安全审计 follow-up（H2 relay URL scheme/origin、config
+partial-file 混配、config 0600/删除、argv secret env、v1.7 限速、
+v1.8 撤销/轮换）纳入 skill/plugin 警告。
 
 目标：让 AI agent 更容易接入 tokimeki——通用 skill、DeepSeek Harness
 插件，以及公开发布/分发。
@@ -277,8 +291,8 @@ DEBUG 日志、宽终端侧栏）。进程接管仅规划。
 状态：任务 `.trellis/tasks/11-22-v1-7-relay-rate-limit-hardening`
 （`prd.md` / `design.md` / `implement.md`）已创建，当前为 planning，未启动
 实现。安排在 v1.4/v1.5 之后、v2 之前；当前用户量不大，但应在大规模匿名
-onboarding 前完成。基线为 `release/0.1.4` / `jwt`（生产 0.1.4）；CLI/npm
-版本启动时确定（候选 0.1.5）。
+onboarding 前完成。基线为 `develop`（0.1.4 已于 2026-11-23 并入；生产
+0.1.4 已部署）；CLI/npm 版本启动时确定（候选 0.1.5）。
 
 目标：在 relay/TokiAPI 侧补齐匿名/会话凭证的 **按 IP 限速** 与 **失败重试
 上限**，压低会话 token 枚举、passcode 分布式猜测和 429 无限重连风险。

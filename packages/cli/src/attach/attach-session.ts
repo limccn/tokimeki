@@ -22,9 +22,15 @@ import {
   toU64String,
   type WelcomeMessage,
 } from "@limccn/tokimeki-protocol";
-
+import type { CliMode } from "../cli-mode.js";
 import { buildClientDescriptor } from "../client-info.js";
 import type { AttachConfig } from "../config.js";
+import {
+  type CliEventWriter,
+  eventConnectionState,
+  eventTransport,
+  mapRelayErrorCode,
+} from "../events.js";
 import { formatError, type Logger } from "../logger.js";
 import { TerminalMirror } from "../terminal/mirror.js";
 import { ModeTracker } from "../terminal/mode-tracker.js";
@@ -35,6 +41,8 @@ import {
 } from "../terminal/restore.js";
 import {
   LocalViewport,
+  type MenuAction,
+  type MenuModel,
   type ViewportRelayState,
   type ViewportStatus,
   type ViewportTransport,
@@ -67,6 +75,11 @@ export interface AttachSessionDeps {
   readonly createClient?: (options: RelayClientOptions) => RelayClient;
   /** Test seam: replace relay transport selection. */
   readonly selectTransport?: (client: RelayClient) => Promise<Transport>;
+  /** Daemon mode emits structured events; interactive mode stays human-only. */
+  readonly mode?: CliMode;
+  readonly events?: CliEventWriter;
+  /** Invoked once the first welcome completes (the attach wizard uses this). */
+  readonly onWelcome?: () => void;
 }
 
 const RESYNC_THROTTLE_MS = 500;
@@ -79,6 +92,11 @@ interface BufferedOutput {
 }
 
 type SizedWriteStream = NodeJS.WriteStream & { columns?: number; rows?: number; fd?: number };
+
+export function maskViewerToken(value: string): string {
+  if (value.length <= 8) return "*".repeat(Math.max(4, value.length));
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -107,6 +125,9 @@ class AttachSession {
   readonly #listener: boolean;
   readonly #createClient: ((options: RelayClientOptions) => RelayClient) | null;
   readonly #selectTransport: ((client: RelayClient) => Promise<Transport>) | null;
+  readonly #events: CliEventWriter | null;
+  readonly #onWelcome: (() => void) | undefined;
+  #readyEmitted = false;
 
   #client: RelayClient | null = null;
   #transport: Transport | null = null;
@@ -122,6 +143,7 @@ class AttachSession {
   #peer: P2PPeer | null = null;
   #tunnel: TunnelTransport | null = null;
   #tunnelFec: TunnelFecMode | null = null;
+  #hostOnline: boolean | null = null;
   #p2pReady = false;
   #p2pSnapshotSeen = false;
   #p2pBufferOverflow = false;
@@ -149,6 +171,8 @@ class AttachSession {
     this.#listener = config.role === "listener";
     this.#createClient = deps.createClient ?? null;
     this.#selectTransport = deps.selectTransport ?? null;
+    this.#events = deps.mode === "daemon" ? (deps.events ?? null) : null;
+    this.#onWelcome = deps.onWelcome;
     this.#iceTransportPolicy = config.iceTransportPolicy;
     this.#logger = deps.logger;
     this.#stdin = deps.stdin ?? process.stdin;
@@ -345,6 +369,7 @@ class AttachSession {
       `relay welcome: session=${welcome.session} hostOnline=${String(welcome.hostOnline)} ` +
         `iceProvider=${welcome.iceProvider}`,
     );
+    this.#hostOnline = welcome.hostOnline;
     if (!welcome.hostOnline) {
       this.#logger.warn("host is offline; waiting for it to come online");
     }
@@ -356,6 +381,18 @@ class AttachSession {
     // Tell the host our terminal size even if the relay did not synthesize a
     // resize from hello. The host ignores no-op resizes.
     this.#sendResize();
+    this.#onWelcome?.();
+    if (!this.#readyEmitted) {
+      this.#readyEmitted = true;
+      this.#events?.ready({
+        command: "attach",
+        role: this.#listener ? "listener" : "viewer",
+        relay: this.#config.relayUrl,
+        session: this.#config.session,
+        ...(this.#listener ? { listener: true } : {}),
+        transport: eventTransport(this.#transportMode),
+      });
+    }
   }
 
   #prepareViewport(clients: readonly ClientInfo[]): boolean {
@@ -404,9 +441,25 @@ class AttachSession {
       mirror,
       tracker,
       stdout: this.#stdout,
-      logRows: this.#config.logLevel === "debug" ? this.#config.logPanelRows : 0,
+      logViewRows: this.#config.logLevel === "debug" ? this.#config.logViewRows : 0,
       status: this.#statusModel(),
       onInput: (data) => this.#sendInput(data),
+      ...(this.#config.inviteKey === "off"
+        ? {}
+        : {
+            menu: {
+              key: this.#config.inviteKey,
+              role: this.#listener ? "listener" : "viewer",
+              getModel: ({ revealToken }) => this.#menuModel(revealToken),
+              onAction: (action) => this.#handleMenuAction(action),
+              copyText: JSON.stringify({
+                version: 1,
+                relayUrl: this.#config.relayUrl,
+                session: this.#config.session,
+                sessionToken: this.#config.sessionToken,
+              }),
+            },
+          }),
     });
     return true;
   }
@@ -426,7 +479,7 @@ class AttachSession {
       this.#viewport.start();
       this.#logger.setSink((line) => {
         this.#viewport?.appendLog(line);
-        if (this.#config.logLevel !== "debug" || this.#config.logPanelRows === 0) {
+        if (this.#config.logLevel !== "debug" || this.#config.logViewRows === 0) {
           if (this.#deferredLogs.length >= 256) this.#deferredLogs.shift();
           this.#deferredLogs.push(line);
         }
@@ -498,6 +551,15 @@ class AttachSession {
   #handleState(state: RelayConnectionState): void {
     this.#relayState = state;
     this.#updateViewportStatus();
+    this.#events?.status({
+      connection: {
+        state: eventConnectionState(state),
+        transport: eventTransport(this.#transportMode),
+      },
+      configured: true,
+      relay: this.#config.relayUrl,
+      session: this.#config.session,
+    });
     this.#iceManager.onRelayState(state);
     if (state === "reconnecting") {
       this.#restoreTerminal();
@@ -519,6 +581,46 @@ class AttachSession {
     };
   }
 
+  #menuModel(revealToken: boolean): MenuModel {
+    const token = revealToken
+      ? this.#config.sessionToken
+      : maskViewerToken(this.#config.sessionToken);
+    const host = this.#hostOnline === null ? "unknown" : this.#hostOnline ? "online" : "offline";
+    return {
+      title: "TOKIMEKI CONNECTION",
+      lines: [
+        `role: ${this.#listener ? "listener (read-only)" : "viewer"}`,
+        `relay: ${this.#config.relayUrl}`,
+        `session: ${this.#config.session}`,
+        `session token: ${token}`,
+        `connection: ${this.#relayState}   transport: ${this.#transportMode}`,
+        `host: ${host}`,
+      ],
+      items: [
+        { id: "status", label: "Refresh status" },
+        { id: "show-token", label: "Show/hide session token" },
+        { id: "copy-config", label: "Copy viewer config (OSC 52)" },
+        { id: "reconnect", label: "Reconnect / request a fresh snapshot" },
+        { id: "disconnect", label: "Disconnect this viewer/listener" },
+        ...(this.#config.logLevel === "debug" && this.#config.logViewRows > 0
+          ? [{ id: "open-logs", label: "Open log view (F11)" }]
+          : []),
+      ],
+    };
+  }
+
+  #handleMenuAction(action: MenuAction): void {
+    if (action.type === "reconnect") {
+      this.#logger.info("reconnect requested from the local menu");
+      this.#requestResync();
+      return;
+    }
+    if (action.type === "disconnect") {
+      this.#logger.info("disconnected from the local menu");
+      this.#finish(0, "disconnected by user");
+    }
+  }
+
   #flushDeferredLogs(): void {
     if (this.#deferredLogs.length === 0) return;
     const lines = this.#deferredLogs.splice(0);
@@ -538,10 +640,14 @@ class AttachSession {
       this.#finish(0, "host exited");
       return;
     }
-    this.#finish(
-      error.code === "unauthorized" ? 2 : error.code === "session_full" ? 3 : 1,
-      `${error.code}: ${error.message}`,
-    );
+    const code = error.code === "unauthorized" ? 2 : error.code === "session_full" ? 3 : 1;
+    this.#events?.error({
+      code: mapRelayErrorCode(error.code),
+      message: error.message,
+      retryable: false,
+      exitCode: code,
+    });
+    this.#finish(code, `${error.code}: ${error.message}`);
   }
 
   #handleControl(message: KnownControlMessage): void {

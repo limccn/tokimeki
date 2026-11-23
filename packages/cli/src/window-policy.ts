@@ -6,12 +6,18 @@
  * `tokimeki run -- /usr/bin/omp` and `tokimeki omp` both resolve to `omp`.
  */
 
+import { ACP_COMMANDS } from "./acp/catalog.js";
+
 export const WINDOW_MODES = ["tui", "on", "off"] as const;
 export type WindowMode = (typeof WINDOW_MODES)[number];
 
-export const DEFAULT_TUI_COMMANDS = ["claude", "pi"] as const;
+/**
+ * Default fixed-window/dynamic-dispatch allow-list, sourced from the built-in
+ * ACP catalog (9 entries). An explicit `TOKIMEKI_WINDOW_TUI` still replaces it.
+ */
+export const DEFAULT_TUI_COMMANDS = ACP_COMMANDS;
 
-const WINDOWS_EXECUTABLE_SUFFIX = /\.(?:exe|cmd|bat)$/i;
+const WINDOWS_EXECUTABLE_SUFFIX = /\.(?:exe|cmd|bat|com)$/i;
 
 /** Normalize a command or list entry to a comparable basename. */
 export function commandBasename(command: string, _platform?: NodeJS.Platform): string {
@@ -24,7 +30,7 @@ export function commandBasename(command: string, _platform?: NodeJS.Platform): s
 /**
  * Parse the comma-separated TUI command list.
  *
- * `undefined` uses the default `claude,pi`; an explicit empty string means
+ * `undefined` uses the 9-command ACP catalog default; an explicit empty string means
  * "no dynamic TUI commands". Entries are trimmed, lowercased, de-duplicated,
  * and stripped of a Windows executable suffix. Invalid entries simply never
  * match rather than blocking startup.

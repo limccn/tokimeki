@@ -40,6 +40,12 @@
   "observability": {
     "enabled": true
   },
+  // Static no-JWT onboarding page; the directory is relative to this config.
+  "assets": {
+    "directory": "../../packages/onboarding-site/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none"
+  },
   "durable_objects": {
     "bindings": [
       {

@@ -3,8 +3,9 @@
  *
  * Draws the fixed logical TUI grid into the local terminal, letterboxing when
  * the local area is larger and following the cursor when it is smaller. The
- * bottom row is always a reverse-video status bar; an optional log panel sits
- * above it in debug mode.
+ * bottom row is always a reverse-video status bar. In debug mode on a wide
+ * terminal a 40x8 log area occupies the bottom-right corner; the TUI viewport
+ * is then rendered as an L-shaped pair of slices over a merged camera.
  */
 
 import { writeSync } from "node:fs";
@@ -13,6 +14,8 @@ import type { IBuffer, IBufferCell } from "@xterm/headless";
 import type { TerminalMirror } from "../mirror.js";
 import { CLEAR_SCREEN, ENTER_ALTERNATE_SCREEN, terminalRestoreSequence } from "../restore.js";
 import {
+  CORNER_EXIT_COLS,
+  CORNER_MIN_COLS,
   computeCamera,
   computeViewportFrame,
   mapLogicalToLocal,
@@ -21,10 +24,9 @@ import {
   type ViewportFrame,
   visibleLogicalRect,
 } from "./geometry.js";
+import { LogRing } from "./log-ring.js";
 
 const RENDER_INTERVAL_MS = 16;
-const LOG_RING_LINES = 256;
-const LOG_LINE_MAX_CHARS = 4096;
 
 export type ViewportRole = "host" | "viewer" | "listener";
 export type ViewportRelayState = "connecting" | "ready" | "reconnecting" | "failed" | "closed";
@@ -36,7 +38,7 @@ export interface ViewportStatus {
   readonly relayState: ViewportRelayState;
   readonly viewers: number;
   readonly transport: ViewportTransport;
-  /** Short local hint such as `f12:invite`; omitted for viewers. */
+  /** Short local hint such as `f12:menu`; omitted for viewers. */
   readonly inviteHint?: string;
 }
 
@@ -44,7 +46,8 @@ export interface ViewportRendererOptions {
   readonly mirror: TerminalMirror;
   readonly stdout: NodeJS.WriteStream;
   readonly logical: TerminalSize;
-  readonly logRows: number;
+  /** Log-ring capacity; 0 disables the corner log area and the log view. */
+  readonly logViewRows: number;
   readonly status: ViewportStatus;
   readonly isCursorVisible: () => boolean;
 }
@@ -52,20 +55,6 @@ export interface ViewportRendererOptions {
 function writeStreamFd(stream: NodeJS.WriteStream): number | null {
   const fd = (stream as NodeJS.WriteStream & { fd?: number }).fd;
   return typeof fd === "number" ? fd : null;
-}
-
-function sanitizeLogLine(line: string): string {
-  let result = "";
-  for (const char of line) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) {
-      result += code === 0x09 ? " " : "";
-    } else {
-      result += char;
-    }
-    if (result.length >= LOG_LINE_MAX_CHARS) break;
-  }
-  return result;
 }
 
 function cellSgr(cell: IBufferCell): string {
@@ -104,18 +93,19 @@ function cellSgr(cell: IBufferCell): string {
 export class ViewportRenderer {
   readonly #mirror: TerminalMirror;
   readonly #stdout: NodeJS.WriteStream;
-  readonly #logical: TerminalSize;
-  readonly #logRows: number;
   readonly #isCursorVisible: () => boolean;
+  readonly #ring: LogRing;
+  #logical: TerminalSize;
   #status: ViewportStatus;
 
   #local: TerminalSize;
   #frame: ViewportFrame;
   #camera: ViewportCamera;
+  #cornerEnabled: boolean;
   #lastRows: string[] = [];
-  #logs: string[] = [];
-  #inviteLines: readonly string[] | null = null;
-  #inviteCopyText = "";
+  #menuLines: readonly string[] | null = null;
+  #logViewOpen = false;
+  #logScroll = 0;
 
   #dirtyViewport = true;
   #dirtyChrome = true;
@@ -129,19 +119,28 @@ export class ViewportRenderer {
     this.#mirror = options.mirror;
     this.#stdout = options.stdout;
     this.#logical = options.logical;
-    this.#logRows = Math.max(0, Math.floor(options.logRows));
+    this.#ring = new LogRing(options.logViewRows);
     this.#status = options.status;
     this.#isCursorVisible = options.isCursorVisible;
     this.#local = {
       cols: Math.max(1, options.stdout.columns ?? 80),
       rows: Math.max(1, options.stdout.rows ?? 24),
     };
-    this.#frame = computeViewportFrame(this.#local, this.#logical, this.#logRows);
-    this.#camera = computeCamera(this.#logical, this.#frame.viewport, { x: 0, y: 0 });
+    this.#cornerEnabled = this.#local.cols >= CORNER_MIN_COLS;
+    this.#frame = this.#computeFrame();
+    this.#camera = computeCamera(this.#logical, this.#frame.mergedViewport, { x: 0, y: 0 });
   }
 
   get layout(): { readonly frame: ViewportFrame; readonly camera: ViewportCamera } {
     return { frame: this.#frame, camera: this.#camera };
+  }
+
+  get logViewOpen(): boolean {
+    return this.#logViewOpen;
+  }
+
+  get logCapacity(): number {
+    return this.#ring.capacity;
   }
 
   start(): void {
@@ -153,10 +152,24 @@ export class ViewportRenderer {
       cols: Math.max(1, this.#stdout.columns ?? this.#local.cols),
       rows: Math.max(1, this.#stdout.rows ?? this.#local.rows),
     };
-    this.#frame = computeViewportFrame(this.#local, this.#logical, this.#logRows);
+    this.#cornerEnabled = this.#local.cols >= CORNER_MIN_COLS;
+    this.#frame = this.#computeFrame();
     this.#write(ENTER_ALTERNATE_SCREEN + CLEAR_SCREEN);
     this.#forceFull = true;
     this.renderNow();
+  }
+
+  /** Change the logical grid size (host-side window resize). */
+  setLogical(logical: TerminalSize): void {
+    const cols = Math.max(1, Math.floor(logical.cols));
+    const rows = Math.max(1, Math.floor(logical.rows));
+    if (cols === this.#logical.cols && rows === this.#logical.rows) return;
+    this.#logical = { cols, rows };
+    this.#frame = this.#computeFrame();
+    this.#forceFull = true;
+    this.#dirtyViewport = true;
+    this.#dirtyChrome = true;
+    this.requestRender();
   }
 
   resize(local: TerminalSize): void {
@@ -164,11 +177,15 @@ export class ViewportRenderer {
     const rows = Math.max(1, Math.floor(local.rows));
     if (cols === this.#local.cols && rows === this.#local.rows) return;
     this.#local = { cols, rows };
-    this.#frame = computeViewportFrame(this.#local, this.#logical, this.#logRows);
+    // Hysteresis prevents a 119/120-column flapping terminal from switching
+    // layouts on every resize event.
+    if (!this.#cornerEnabled && cols >= CORNER_MIN_COLS) this.#cornerEnabled = true;
+    else if (this.#cornerEnabled && cols < CORNER_EXIT_COLS) this.#cornerEnabled = false;
+    this.#frame = this.#computeFrame();
     this.#forceFull = true;
     this.#dirtyViewport = true;
     this.#dirtyChrome = true;
-    if (this.#inviteLines !== null) {
+    if (this.#menuLines !== null || this.#logViewOpen) {
       this.renderNow();
     } else {
       this.requestRender();
@@ -182,11 +199,12 @@ export class ViewportRenderer {
   }
 
   appendLog(line: string): void {
-    for (const part of sanitizeLogLine(line).split(/\r?\n/)) {
-      this.#logs.push(part);
-    }
-    if (this.#logs.length > LOG_RING_LINES) {
-      this.#logs.splice(0, this.#logs.length - LOG_RING_LINES);
+    if (!this.#ring.enabled) return;
+    this.#ring.push(line);
+    if (this.#logViewOpen) {
+      this.#forceFull = true;
+      this.renderNow();
+      return;
     }
     this.#dirtyChrome = true;
     this.requestRender();
@@ -200,10 +218,9 @@ export class ViewportRenderer {
     this.requestRender();
   }
 
-  /** Show or hide the local viewer-config overlay. */
-  setInviteOverlay(lines: readonly string[] | null, copyText = ""): void {
-    this.#inviteCopyText = copyText;
-    this.#inviteLines = lines;
+  /** Show or hide the local connection-menu overlay. */
+  setMenuOverlay(lines: readonly string[] | null): void {
+    this.#menuLines = lines;
     this.#forceFull = true;
     this.#dirtyViewport = true;
     this.#dirtyChrome = true;
@@ -214,11 +231,42 @@ export class ViewportRenderer {
     }
   }
 
-  /** Copy the exact viewer config through OSC 52 (terminal-native clipboard). */
-  copyInvite(): void {
-    if (this.#inviteCopyText.length === 0) return;
-    const encoded = Buffer.from(this.#inviteCopyText, "utf8").toString("base64");
+  /** Enter or leave the full-screen (tmux-style) log view. */
+  setLogView(open: boolean): void {
+    if (this.#logViewOpen === open) return;
+    this.#logViewOpen = open;
+    this.#logScroll = 0;
+    this.#forceFull = true;
+    this.#dirtyViewport = true;
+    this.#dirtyChrome = true;
+    this.renderNow();
+  }
+
+  scrollLogBy(delta: number): void {
+    if (!this.#logViewOpen) return;
+    const contentRows = Math.max(0, this.#local.rows - 1);
+    const maxScroll = Math.max(0, this.#ring.length - contentRows);
+    const next = Math.min(maxScroll, Math.max(0, this.#logScroll + delta));
+    if (next === this.#logScroll) return;
+    this.#logScroll = next;
+    this.renderNow();
+  }
+
+  /** Copy text through OSC 52 (terminal-native clipboard). */
+  copyText(text: string): void {
+    if (text.length === 0) return;
+    const encoded = Buffer.from(text, "utf8").toString("base64");
     this.#write(`\x1b]52;c;${encoded}\x07`);
+  }
+
+  /** Backwards-compatible alias used by the viewer-config copy action. */
+  copyInvite(): void {
+    this.copyText(this.#lastCopyText);
+  }
+
+  #lastCopyText = "";
+  setCopyText(text: string): void {
+    this.#lastCopyText = text;
   }
 
   /** Called by the mirror after parsing a chunk. */
@@ -228,7 +276,7 @@ export class ViewportRenderer {
   }
 
   requestRender(): void {
-    if (this.#disposed || this.#inviteLines !== null) return;
+    if (this.#disposed || this.#menuLines !== null || this.#logViewOpen) return;
     if (this.#timer !== null || this.#drainWaiting) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
@@ -239,16 +287,20 @@ export class ViewportRenderer {
 
   renderNow(): void {
     if (this.#disposed || !this.#started) return;
-    if (!this.#dirtyViewport && !this.#dirtyChrome && !this.#forceFull) return;
-    if (this.#inviteLines !== null) {
-      this.#renderInviteOverlay();
+    if (this.#logViewOpen) {
+      this.#renderLogView();
       return;
     }
+    if (this.#menuLines !== null) {
+      this.#renderOverlay(this.#menuLines);
+      return;
+    }
+    if (!this.#dirtyViewport && !this.#dirtyChrome && !this.#forceFull) return;
 
     const buffer = this.#mirror.term.buffer.active;
     const cursor = { x: buffer.cursorX, y: buffer.cursorY };
     const previousCamera = this.#camera;
-    this.#camera = computeCamera(this.#logical, this.#frame.viewport, cursor, previousCamera);
+    this.#camera = computeCamera(this.#logical, this.#frame.mergedViewport, cursor, previousCamera);
 
     if (this.#forceFull) {
       this.#write(CLEAR_SCREEN);
@@ -258,7 +310,7 @@ export class ViewportRenderer {
       this.#renderViewport(buffer);
     }
     if (this.#dirtyChrome || this.#forceFull) {
-      this.#renderLogPanel();
+      this.#renderCornerLog();
       this.#renderStatusBar();
     }
     this.#renderCursor(cursor);
@@ -268,20 +320,38 @@ export class ViewportRenderer {
     this.#forceFull = false;
   }
 
+  #computeFrame(): ViewportFrame {
+    return computeViewportFrame(this.#local, this.#logical, {
+      corner: this.#cornerEnabled && this.#ring.enabled,
+    });
+  }
+
   #renderViewport(buffer: IBuffer): void {
-    const frame = this.#frame;
+    this.#renderSlice(buffer, this.#frame.viewport);
+    if (this.#frame.cornerViewport !== null) {
+      this.#renderSlice(buffer, this.#frame.cornerViewport);
+    }
+  }
+
+  #renderSlice(
+    buffer: IBuffer,
+    rect: { readonly x: number; readonly y: number; readonly cols: number; readonly rows: number },
+  ): void {
     const camera = this.#camera;
     const logical = this.#logical;
+    const merged = this.#frame.mergedViewport;
     const cell = buffer.getNullCell();
-    for (let screenRow = 0; screenRow < frame.viewport.rows; screenRow += 1) {
-      const logicalY = screenRow - camera.offsetY + camera.y;
+    for (let screenRow = 0; screenRow < rect.rows; screenRow += 1) {
+      const localY = rect.y + screenRow;
+      const logicalY = localY - merged.y - camera.offsetY + camera.y;
       let content = "";
       let style = "\u0000";
       let lastWidth = 1;
       if (logicalY >= 0 && logicalY < logical.rows) {
         const line = buffer.getLine(buffer.baseY + logicalY);
-        for (let screenCol = 0; screenCol < frame.viewport.cols; screenCol += 1) {
-          const logicalX = screenCol - camera.offsetX + camera.x;
+        for (let screenCol = 0; screenCol < rect.cols; screenCol += 1) {
+          const localX = rect.x + screenCol;
+          const logicalX = localX - merged.x - camera.offsetX + camera.x;
           if (logicalX < 0 || logicalX >= logical.cols || line === undefined) {
             if (style !== "0") {
               content += "\x1b[0m";
@@ -298,15 +368,13 @@ export class ViewportRenderer {
             continue;
           }
           const chars = current?.getChars() || " ";
-          if (width === 2 && screenCol + 1 >= frame.viewport.cols) {
+          if (width === 2 && screenCol + 1 >= rect.cols) {
             content += " ";
             lastWidth = 1;
             continue;
           }
           const nextStyle = current === undefined ? "0" : cellSgr(current);
           if (nextStyle !== style) {
-            // Reset first so default/bold-only cells do not inherit a color
-            // from the previous cell.
             content += `\x1b[0m\x1b[${nextStyle}m`;
             style = nextStyle;
           }
@@ -315,24 +383,25 @@ export class ViewportRenderer {
         }
       }
       if (content.length === 0) {
-        content = " ".repeat(frame.viewport.cols);
+        content = " ".repeat(rect.cols);
       }
       if (style !== "0") content += "\x1b[0m";
-      if (this.#lastRows[screenRow] === content) continue;
-      this.#lastRows[screenRow] = content;
-      this.#write(`\x1b[${screenRow + 1};1H${content}`);
+      if (this.#lastRows[localY] === content) continue;
+      this.#lastRows[localY] = content;
+      this.#write(`\x1b[${localY + 1};${rect.x + 1}H${content}`);
     }
   }
 
-  #renderLogPanel(): void {
+  #renderCornerLog(): void {
     const panel = this.#frame.logPanel;
     if (panel === null || panel.rows <= 0) return;
-    const first = Math.max(0, this.#logs.length - panel.rows);
+    const lines = this.#ring.tail(panel.rows);
+    const first = Math.max(0, panel.rows - lines.length);
     for (let row = 0; row < panel.rows; row += 1) {
-      const line = this.#logs[first + row] ?? "";
+      const line = lines[row - first] ?? "";
       const text =
         line.length > panel.cols ? line.slice(0, panel.cols) : line.padEnd(panel.cols, " ");
-      this.#write(`\x1b[${panel.y + row + 1};1H\x1b[2m${text}\x1b[0m`);
+      this.#write(`\x1b[${panel.y + row + 1};${panel.x + 1}H\x1b[2m${text}\x1b[0m`);
     }
   }
 
@@ -344,7 +413,7 @@ export class ViewportRenderer {
   }
 
   #statusLine(width: number): string {
-    const visible = visibleLogicalRect(this.#logical, this.#frame.viewport, this.#camera);
+    const visible = visibleLogicalRect(this.#logical, this.#frame.mergedViewport, this.#camera);
     const view =
       this.#camera.fitsX && this.#camera.fitsY
         ? "view:fit"
@@ -381,13 +450,38 @@ export class ViewportRenderer {
     return text.length > width ? text.slice(0, width) : text.padEnd(width, " ");
   }
 
-  #renderInviteOverlay(): void {
+  #renderLogView(): void {
     const local = this.#local;
     if (local.cols <= 0 || local.rows <= 0) return;
-    const boxWidth = Math.max(20, Math.min(local.cols, 120));
+    const contentRows = Math.max(0, local.rows - 1);
+    const total = this.#ring.length;
+    const maxScroll = Math.max(0, total - contentRows);
+    this.#logScroll = Math.min(this.#logScroll, maxScroll);
+    const lines = this.#ring.tail(contentRows, this.#logScroll);
+    this.#write(CLEAR_SCREEN);
+    for (let row = 0; row < contentRows; row += 1) {
+      const line = lines[row] ?? "";
+      const text =
+        line.length > local.cols ? line.slice(0, local.cols) : line.padEnd(local.cols, " ");
+      this.#write(`\x1b[${row + 1};1H\x1b[2m${text}\x1b[0m`);
+    }
+    if (local.rows > 0) {
+      const footer = `LOGS ${total}  scroll ${this.#logScroll}/${maxScroll}  up/down scroll  F11/Esc close`;
+      const text =
+        footer.length > local.cols ? footer.slice(0, local.cols) : footer.padEnd(local.cols, " ");
+      this.#write(`\x1b[${local.rows};1H\x1b[7m${text}\x1b[0m`);
+    }
+    this.#write("\x1b[?25l");
+    this.#forceFull = false;
+  }
+
+  #renderOverlay(lines: readonly string[]): void {
+    const local = this.#local;
+    if (local.cols <= 0 || local.rows <= 0) return;
+    const boxWidth = Math.max(20, Math.min(local.cols, 110));
     const inner = Math.max(1, boxWidth - 4);
     const content: string[] = [];
-    for (const line of this.#inviteLines ?? []) {
+    for (const line of lines) {
       if (line.length <= inner) {
         content.push(line);
         continue;
@@ -396,21 +490,21 @@ export class ViewportRenderer {
         content.push(line.slice(offset, offset + inner));
       }
     }
-    const maxContentRows = Math.max(0, local.rows - 3);
+    const maxContentRows = Math.max(0, local.rows - 2);
     const visible = content.slice(0, maxContentRows);
-    const lines = [
+    const framed = [
       `+${"-".repeat(boxWidth - 2)}+`,
-      `| ${"TOKIMEKI VIEWER CONFIG (SECRET)".slice(0, inner).padEnd(inner, " ")} |`,
       ...visible.map((line) => `| ${line.padEnd(inner, " ")} |`),
       `+${"-".repeat(boxWidth - 2)}+`,
     ].slice(0, local.rows);
-    const startRow = Math.max(0, Math.floor((local.rows - lines.length) / 2));
+    const startRow = Math.max(0, Math.floor((local.rows - framed.length) / 2));
     const startCol = Math.max(0, Math.floor((local.cols - boxWidth) / 2));
     this.#write(CLEAR_SCREEN);
-    for (let row = 0; row < lines.length; row += 1) {
-      this.#write(`\x1b[${startRow + row + 1};${startCol + 1}H${lines[row] ?? ""}`);
+    for (let row = 0; row < framed.length; row += 1) {
+      this.#write(`\x1b[${startRow + row + 1};${startCol + 1}H${framed[row] ?? ""}`);
     }
     this.#write("\x1b[?25l");
+    this.#forceFull = false;
   }
 
   #renderCursor(cursor: { x: number; y: number }): void {
@@ -474,7 +568,7 @@ export class ViewportRenderer {
 
   dispose(): void {
     this.restoreSync();
-    this.#logs = [];
+    this.#ring.clear();
     this.#lastRows = [];
   }
 }

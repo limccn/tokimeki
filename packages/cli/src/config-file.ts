@@ -12,7 +12,7 @@
  * Error messages name keys and paths, never values.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -156,6 +156,77 @@ export function readConfigFile(
   return { env, info: { path, exists: true, warnings } };
 }
 
+export interface ConfigEnvelopeFile {
+  readonly path: string;
+  /** Parsed `TOKIMEKI_*` env layer contributed by the JSON envelope file. */
+  readonly env: Record<string, string>;
+  readonly warnings: readonly string[];
+}
+
+/**
+ * Read a TokiAPI-downloaded `tokimeki-config.json` (v1/v2 envelope).
+ *
+ * The file is read-only, must be a regular non-symlink file, is capped at
+ * 64 KiB, and must be 0600 on POSIX when it contains credentials. Error
+ * messages name the path/key, never the value.
+ */
+export function readConfigEnvelopeFile(
+  path: string,
+  options: { platform?: NodeJS.Platform } = {},
+): ConfigEnvelopeFile {
+  const platform = options.platform ?? process.platform;
+  let stats: import("node:fs").Stats;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new ConfigError(`config file not found: ${path}`);
+    }
+    throw new ConfigError(`unable to read ${path}: ${code ?? "stat failed"}`);
+  }
+  if (stats.isSymbolicLink()) {
+    throw new ConfigError(`${path} must not be a symbolic link`);
+  }
+  if (!stats.isFile()) {
+    throw new ConfigError(`${path} is not a regular file`);
+  }
+  if (stats.size > CONFIG_FILE_MAX_BYTES) {
+    throw new ConfigError(`${path} is larger than ${CONFIG_FILE_MAX_BYTES} bytes`);
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new ConfigError(
+      `unable to read ${path}: ${(error as NodeJS.ErrnoException).code ?? "read failed"}`,
+    );
+  }
+  let env: Record<string, string>;
+  try {
+    env = parseConfigEnvelope(raw);
+  } catch (error) {
+    const message =
+      error instanceof ConfigEnvelopeError ? error.message : "the config file is invalid";
+    throw new ConfigError(`${path}: ${message}`);
+  }
+  const warnings: string[] = [];
+  if (configFileExistsWithSecrets(env)) {
+    const verdict = checkSecretFilePermissions(stats.mode, platform);
+    if (verdict === "insecure") {
+      throw new ConfigError(
+        `${path} must be 0600 when it contains credentials (run: chmod 600 ${path})`,
+      );
+    }
+    if (verdict === "not-enforced") {
+      warnings.push(
+        `config file permissions are not enforced on Windows; keep ${path} private and delete it when done`,
+      );
+    }
+  }
+  return { path, env, warnings };
+}
+
 /** Host credential keys, in within-layer priority order. */
 const HOST_CREDENTIAL_KEYS = ["TOKIMEKI_TOKEN", "TOKIMEKI_MASTER_TOKEN"] as const;
 
@@ -170,12 +241,20 @@ function findCredential(layer: Record<string, string>): string | null {
 }
 
 /**
- * Merge the config file and the `TOKIMEKI_CONFIG` envelope under the explicit
- * process environment.
+ * Merge the user config file, an optional `--config` envelope file, the
+ * `TOKIMEKI_CONFIG` string, and the explicit process environment.
  *
- * - Non-credential keys keep key-level precedence (file < envelope < env).
+ * Precedence (lowest to highest):
+ *
+ *   ~/.tokimeki/config.json < TOKIMEKI_CONFIG < --config/TOKIMEKI_CONFIG_FILE
+ *     < explicit process env
+ *
+ * - Non-credential keys keep key-level precedence.
  * - Host credentials are selected as a group from the highest layer that sets
  *   any of them; lower-layer credential keys are dropped with a warning.
+ * - A `--config` file that changes the relay URL must also provide the host
+ *   credential in the same layer; otherwise a lower-layer token would be sent
+ *   to a relay chosen by the file.
  * - `TOKIMEKI_CONFIG` is expanded exactly once and removed from the result, so
  *   the loaders' envelope stage cannot re-inject a dropped credential.
  * - A non-empty retired `TOKIMEKI_NAMESPACE_TOKEN` anywhere is a `ConfigError`
@@ -187,17 +266,36 @@ export function resolveConfigEnv(
     homeDir?: string;
     platform?: NodeJS.Platform;
     enabled?: boolean;
+    configFile?: { readonly path: string; readonly source: "flag" | "env" };
   } = {},
 ): { env: NodeJS.ProcessEnv; file: ConfigFileInfo; warnings: readonly string[] } {
   const warnings: string[] = [];
-  if (options.enabled === false) {
-    return { env: processEnv, file: { path: "", exists: false, warnings }, warnings };
+  const enabled = options.enabled !== false;
+
+  let fileLayer: Record<string, string> = {};
+  let fileInfo: ConfigFileInfo = { path: "", exists: false, warnings: [] };
+  if (enabled) {
+    const file = readConfigFile({ homeDir: options.homeDir, platform: options.platform });
+    warnings.push(...file.info.warnings);
+    fileLayer = { ...file.env };
+    fileInfo = file.info;
   }
 
-  const file = readConfigFile({ homeDir: options.homeDir, platform: options.platform });
-  warnings.push(...file.info.warnings);
+  let configFileLayer: Record<string, string> = {};
+  if (options.configFile !== undefined) {
+    if (options.configFile.source === "flag") {
+      const envPath = processEnv.TOKIMEKI_CONFIG_FILE;
+      if (typeof envPath === "string" && envPath.length > 0) {
+        warnings.push("--config takes precedence over TOKIMEKI_CONFIG_FILE");
+      }
+    }
+    const loaded = readConfigEnvelopeFile(options.configFile.path, {
+      platform: options.platform,
+    });
+    configFileLayer = loaded.env;
+    warnings.push(...loaded.warnings);
+  }
 
-  const fileLayer: Record<string, string> = { ...file.env };
   const envelopeRaw = pickFirstNonEmpty(processEnv.TOKIMEKI_CONFIG, fileLayer.TOKIMEKI_CONFIG);
   let envelopeLayer: Record<string, string> = {};
   if (envelopeRaw !== null) {
@@ -210,9 +308,10 @@ export function resolveConfigEnv(
     }
   }
 
-  // Retired key check across all three layers.
+  // Retired key check across every layer.
   const retiredLayers: Array<[string, Record<string, string | undefined>]> = [
     ["config file", fileLayer],
+    ["--config file", configFileLayer],
     ["TOKIMEKI_CONFIG", envelopeLayer],
     ["environment", processEnv],
   ];
@@ -232,7 +331,12 @@ export function resolveConfigEnv(
       envLayer[key] = value;
     }
   }
-  const layers: Array<Record<string, string>> = [envLayer, envelopeLayer, fileLayer];
+  const layers: Array<Record<string, string>> = [
+    envLayer,
+    configFileLayer,
+    envelopeLayer,
+    fileLayer,
+  ];
   let winningIndex = -1;
   for (let index = 0; index < layers.length; index += 1) {
     if (findCredential(layers[index] ?? {}) !== null) {
@@ -240,9 +344,26 @@ export function resolveConfigEnv(
       break;
     }
   }
-  const labels = ["environment", "TOKIMEKI_CONFIG", "the config file"];
+  const labels = ["environment", "the --config file", "TOKIMEKI_CONFIG", "the config file"];
   if (winningIndex < 0) {
     winningIndex = layers.length; // no credential anywhere: merge everything
+  }
+
+  // Partial-file guard: if the effective relay URL comes from the --config
+  // layer, the host credential must come from that same layer.
+  const configFileHasRelay =
+    typeof configFileLayer.TOKIMEKI_RELAY_URL === "string" &&
+    configFileLayer.TOKIMEKI_RELAY_URL.length > 0;
+  if (configFileHasRelay && winningIndex !== layers.length) {
+    const relayLayerIndex = layers.findIndex(
+      (layer) =>
+        typeof layer.TOKIMEKI_RELAY_URL === "string" && layer.TOKIMEKI_RELAY_URL.length > 0,
+    );
+    if (relayLayerIndex === 1 && winningIndex !== 1) {
+      throw new ConfigError(
+        "--config sets TOKIMEKI_RELAY_URL without a host credential; refusing to send a credential from another layer to that relay",
+      );
+    }
   }
 
   // Merge lowest -> highest, but skip host credential keys from layers below
@@ -283,11 +404,12 @@ export function resolveConfigEnv(
     }
   }
 
-  // The envelope was expanded exactly once above; remove it so the loaders'
+  // Both envelope inputs are consumed above; remove them so the loaders'
   // envelope stage cannot re-inject a credential the layer selection dropped.
   delete merged.TOKIMEKI_CONFIG;
+  delete merged.TOKIMEKI_CONFIG_FILE;
 
-  return { env: merged, file: file.info, warnings };
+  return { env: merged, file: fileInfo, warnings };
 }
 
 function pickFirstNonEmpty(...values: Array<string | undefined>): string | null {

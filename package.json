@@ -1,6 +1,6 @@
 {
   "name": "tokimeki-monorepo",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Cloudflare Worker relay + P2P terminal sharing for TUI programs",
@@ -13,17 +13,19 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "build:site": "npm run build --workspace @limccn/tokimeki-onboarding-site",
     "typecheck": "tsc -b --pretty false && tsc -p tsconfig.tests.json --pretty false",
     "typecheck:relay": "tsc -b packages/relay/tsconfig.json --pretty false && tsc -p packages/relay/tsconfig.test.json --pretty false",
     "test": "vitest run",
     "test:relay": "vitest run --config packages/relay/vitest.config.ts && vitest run --config packages/relay/vitest.namespace.config.ts && vitest run --config packages/relay/vitest.jwt.config.ts && vitest run --config packages/relay/vitest.passcode.config.ts && vitest run --config packages/relay/vitest.quotas.config.ts",
     "test:all": "vitest run && vitest run --config packages/relay/vitest.config.ts && vitest run --config packages/relay/vitest.namespace.config.ts && vitest run --config packages/relay/vitest.jwt.config.ts && vitest run --config packages/relay/vitest.passcode.config.ts && vitest run --config packages/relay/vitest.quotas.config.ts",
+    "e2e:v1.4": "npm run build && npm run build:site && node scripts/e2e/v1.4-onboarding-e2e.mjs",
     "lint": "biome check .",
     "format": "biome format --write .",
     "release:bump": "node scripts/release/version.mjs bump",
     "release:check": "node scripts/release/version.mjs check",
     "dev:relay": "npm run build && wrangler dev --config packages/relay/wrangler.jsonc",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "npm run build && npm run build:site && wrangler deploy",
     "perf:smoke": "node scripts/perf/cli.mjs --scenario smoke",
     "perf:local": "node scripts/perf/cli.mjs --scenario local",
     "perf:matrix": "node scripts/perf/cli.mjs --scenario matrix",
@@ -34,8 +36,8 @@
     "perf:p2p": "node scripts/perf/cli.mjs --scenario p2p",
     "perf:cross-nat": "node scripts/perf/cli.mjs --scenario cross-nat",
     "perf:compare": "node scripts/perf/cli.mjs --compare",
-    "deploy:prod": "npm run build && wrangler deploy --config packages/relay/wrangler.jsonc",
-    "deploy:dry-run": "wrangler deploy --dry-run"
+    "deploy:prod": "npm run build && npm run build:site && wrangler deploy --config packages/relay/wrangler.jsonc",
+    "deploy:dry-run": "npm run build && npm run build:site && wrangler deploy --dry-run"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.7",

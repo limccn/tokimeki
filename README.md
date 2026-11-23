@@ -40,12 +40,18 @@ keyboard control.
   parity (`TOKIMEKI_TUNNEL_FEC=xor`); failures fall back to the relay.
 - **P2P resilience.** Fragmented P2P snapshots, direct snapshot delivery with
   relay fallback, automatic ICE refresh, and one TURN-provider retry.
-- **Any TUI command.** Add its executable name to `TOKIMEKI_WINDOW_TUI` and run
-  `tokimeki <command>` (for example `TOKIMEKI_WINDOW_TUI=claude,pi,omp` then
-  `tokimeki omp`). Unknown commands are rejected unless allow-listed.
-- **Share again.** In the host viewport, press F12 to reopen the viewer config
-  after the startup banner scrolls away; `c` copies the exact JSON. The config
-  can be passed to the viewer as `TOKIMEKI_CONFIG`.
+- **ACP catalog.** Claude Code, pi, Codex, Gemini, Cursor, Aider, OpenCode,
+  Goose, and Amp are allow-listed by default (`tokimeki codex`), with
+  `tokimeki acp list [--detect]` and `tokimeki run -- <cmd>` as the escape
+  hatch. Detection is read-only PATH scanning; no binary is executed.
+- **Guided onboarding.** doctor-first host/attach wizards, TokiAPI anonymous
+  host, `--config tokimeki-config.json`, `tokimeki attach <share-url>`,
+  `~/.tokimeki/config.json`/history (explicit save, 0600), and daemon-mode
+  structured events for harnesses.
+- **F12 connection menu.** Host status/session/token (masked), viewer-config
+  copy, anonymous invite URL (memory only), reconnect/disconnect, host-side
+  window resize, and an F11 full-screen log view. The viewer config can still
+  be passed as `TOKIMEKI_CONFIG`.
 
 ## How it works
 
@@ -138,11 +144,44 @@ export TOKIMEKI_SESSION_TOKEN=<session-token>
 tokimeki attach
 ```
 
-`tokimeki doctor` checks the local PTY and relay configuration.
+Or use a TokiAPI invite/share URL:
+
+```bash
+tokimeki attach "https://tokiapi.app/#t-<code>"
+```
+
+`tokimeki doctor` checks the local PTY and relay configuration. Interactive
+first-time host/attach also runs doctor and then the corresponding wizard.
+
+### v1.4: CLI onboarding, ACP catalog, and the no-JWT site
+
+The `0.1.5` CLI adds the user onboarding path:
+
+- **interactive/daemon modes** (`--interactive`, `--daemon`,
+  `TOKIMEKI_MODE`); daemon emits `tokimeki-event: ` JSON on stderr and never
+  prompts.
+- **doctor-first host wizard** with three paths: existing token (recommended
+  `TOKIMEKI_TOKEN`; `TOKIMEKI_MASTER_TOKEN` is a deprecated alias), self-hosted
+  relay guidance (one-click Cloudflare Deploy Button/docs; never runs wrangler),
+  and TokiAPI anonymous host (24h, rate-limited, no revocation/account).
+- **attach wizard** with invite URL/code exchange, viewer config JSON, saved
+  history, manual entry, and a same-connection pre-ready test.
+- **persistent config/history** written only on explicit save: config.json keeps
+  the five whitelisted keys (0600/atomic/no-follow), history.json keeps up to
+  20 connections without host tokens or hosted Session JWTs.
+- **`--config`/`TOKIMEKI_CONFIG_FILE`** host from a downloaded v1/v2 envelope,
+  and **`tokimeki attach <share-url>`** redeems `attach/cli` (410/429/503 and
+  passcode-aware).
+- **F12 connection menu**, host window resize, wide-terminal corner log area,
+  and the F11 full-screen log view.
+- **ACP catalog/detection** for the nine TokiAPI ACP applications.
+- **no-JWT onboarding site** served by the relay from Workers Static Assets:
+  pure static, same origin, multi-namespace static tokens only, no JWT/backend,
+  and no token storage/network calls.
 
 ### v1.2: hosted auth, share links, and the web viewer
 
-The `0.1.4` relay accepts:
+The relay accepts:
 
 - **Host JWT** via `TOKIMEKI_TOKEN` + `TOKIMEKI_NAMESPACE` (issued by TokiAPI
   or any ES256/JWKS issuer). Static namespace tokens and the single-owner
@@ -172,10 +211,13 @@ e2e harnesses (`scripts/e2e/v1.2-cross-repo.mjs`,
 |---|---|
 | `tokimeki claude [args...]` | Host Claude Code in a PTY |
 | `tokimeki pi [args...]` | Host pi in a PTY |
+| `tokimeki codex` / `gemini` / `cursor` / `aider` / `opencode` / `goose` / `amp` | Host a catalog ACP command |
 | `tokimeki run -- <cmd...>` | Host any TUI/terminal program |
-| `tokimeki attach` | Attach to a hosted session |
+| `tokimeki attach [share-url]` | Attach to a hosted session or redeem a TokiAPI invite |
 | `tokimeki attach --listen` | Watch read-only (no input, ACKs, or resizing) |
 | `tokimeki doctor` | Check PTY, config, and relay connectivity |
+| `tokimeki acp list [--detect]` | List ACP commands and read-only PATH detection |
+| `tokimeki history [list\|remove\|clear]` | Inspect/clear saved connections |
 
 Full command/env reference: [docs/cli.md](docs/cli.md).
 
@@ -267,6 +309,8 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 ## Documentation
 
 - [CLI usage](docs/cli.md)
+- [Agent install (skill + CLI)](docs/agent-install.md)
+- [No-JWT onboarding site](docs/onboarding-site.md)
 - [Cloudflare relay deploy + TURN](docs/deploy-cloudflare.md)
 - [Wire protocol](docs/protocol.md)
 - [Web viewer / TokiAPI proxy contract](docs/web-viewer.md)
@@ -277,11 +321,12 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 
 ## Status
 
-`0.1.4` — current release. It includes the v1.2 hosted-auth work
-(Host/Session JWT, passcode, share-link and web-viewer integration). Install
+`0.1.5` — current release. It includes the v1.2 hosted-auth work
+(Host/Session JWT, passcode, share-link and web-viewer integration) plus the
+v1.4 CLI onboarding path, ACP catalog, F12 menu/log view, and no-JWT site. Install
 from [npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to
 GitHub Packages; see [docs/release.md](docs/release.md)) or read the
-[v0.1.4 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.4).
+[v0.1.5 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.5).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
 limitations and the v1.1 feature history.

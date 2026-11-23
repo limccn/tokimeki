@@ -33,6 +33,7 @@ const FIELDS: Readonly<Record<string, FieldMapping>> = {
   windowMode: { env: "TOKIMEKI_WINDOW", kind: "string" },
   windowTui: { env: "TOKIMEKI_WINDOW_TUI", kind: "string-list" },
   windowTuiCommands: { env: "TOKIMEKI_WINDOW_TUI", kind: "string-list" },
+  logViewRows: { env: "TOKIMEKI_LOG_VIEW_ROWS", kind: "integer" },
   logPanelRows: { env: "TOKIMEKI_LOG_PANEL_ROWS", kind: "integer" },
   inviteKey: { env: "TOKIMEKI_INVITE_KEY", kind: "string" },
   p2p: { env: "TOKIMEKI_P2P", kind: "string" },

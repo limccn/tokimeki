@@ -13,6 +13,7 @@ import {
   relayHealthUrl,
   relayWhoamiUrl,
 } from "../config.js";
+import type { ReportCheck } from "../events.js";
 import { createRedactor, formatError } from "../logger.js";
 
 export interface DoctorDeps {
@@ -20,6 +21,8 @@ export interface DoctorDeps {
   readonly fetchImpl?: typeof fetch;
   /** Returns null on success or a human-readable failure reason. */
   readonly probePty?: () => Promise<string | null>;
+  /** Structured daemon-mode report (stderr event); the human report is unchanged. */
+  readonly onReport?: (report: { ok: boolean; checks: readonly ReportCheck[] }) => void;
 }
 
 const HEALTH_TIMEOUT_MS = 5_000;
@@ -168,6 +171,7 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
   const probePty = deps.probePty ?? probeNodePty;
   const redact = createRedactor(config.secrets);
   const lines: string[] = [];
+  const checks: ReportCheck[] = [];
   let failures = 0;
 
   const write = (line: string): void => {
@@ -178,10 +182,17 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
       // best effort
     }
   };
-  const ok = (label: string): void => write(`[ok] ${label}`);
-  const warn = (label: string): void => write(`[warn] ${label}`);
+  const ok = (label: string): void => {
+    checks.push({ name: label, status: "ok" });
+    write(`[ok] ${label}`);
+  };
+  const warn = (label: string): void => {
+    checks.push({ name: label, status: "warn" });
+    write(`[warn] ${label}`);
+  };
   const fail = (label: string): void => {
     failures += 1;
+    checks.push({ name: label, status: "fail" });
     write(`[fail] ${label}`);
   };
 
@@ -288,10 +299,13 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
     }
   }
 
+  const report = { ok: failures === 0, checks: [...checks] };
   if (failures === 0) {
     write("result: all checks passed");
+    deps.onReport?.(report);
     return 0;
   }
   write(`result: ${failures} check(s) failed`);
+  deps.onReport?.(report);
   return 1;
 }
