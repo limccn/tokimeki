@@ -106,6 +106,11 @@ export const ERROR_CODES = [
   "slow_consumer",
   "transport_failed",
   "internal",
+  // Session passcode (v1.2-D; additive optional codes).
+  "passcode_required",
+  "passcode_invalid",
+  "passcode_locked",
+  "passcode_mismatch",
   // Agent coordination (reserved; emitted by future coordinator code).
   "invalid_request",
   "not_found",

@@ -21,6 +21,7 @@ import {
 import { ConfigEnvelopeError, parseConfigEnvelope } from "./config-envelope.js";
 import { INVITE_KEYS, type InviteKey } from "./invite.js";
 import { isLogLevel, LOG_LEVELS, type LogLevel } from "./logger.js";
+import { PASSCODE_PATTERN } from "./passcode.js";
 import { parseTuiCommandList, WINDOW_MODES, type WindowMode } from "./window-policy.js";
 
 export class ConfigError extends Error {
@@ -67,6 +68,8 @@ export interface CommonConfig {
   readonly tunnelKeyMode: TunnelKeyMode;
   /** Shared secret for relay-blind mode; null derives from the session token. */
   readonly tunnelSecret: string | null;
+  /** Optional per-session passcode (v1.2-D); null when not configured. */
+  readonly passcode: string | null;
   readonly logLevel: LogLevel;
   /** Global TUI window switch (`TOKIMEKI_WINDOW`). */
   readonly windowMode: WindowMode;
@@ -134,6 +137,8 @@ export interface DoctorConfig {
   /** Host credential source, or null when no host token is configured. */
   readonly authMode: HostAuthMode | null;
   readonly hasSessionToken: boolean;
+  /** True when a valid `TOKIMEKI_PASSCODE` is configured (value never printed). */
+  readonly hasPasscode: boolean;
   readonly warnings: readonly string[];
   readonly secrets: readonly string[];
 }
@@ -507,6 +512,7 @@ interface CommonConfigParts {
   readonly tunnelFec: TunnelFecMode;
   readonly tunnelKeyMode: TunnelKeyMode;
   readonly tunnelSecret: string | null;
+  readonly passcode: string | null;
   readonly logLevel: LogLevel;
   readonly windowMode: WindowMode;
   readonly warnings: string[];
@@ -574,6 +580,31 @@ function validateHostTokenValue(name: string, token: string): void {
   }
 }
 
+export const MIN_PASSCODE_LENGTH = 6;
+export const MAX_PASSCODE_LENGTH = 128;
+
+/**
+ * Optional session passcode (v1.2-D). Empty/whitespace means unset; line
+ * breaks are rejected because the viewer sends it in a header.
+ */
+function parsePasscode(env: NodeJS.ProcessEnv): string | null {
+  const raw = optionalEnv(env, "TOKIMEKI_PASSCODE");
+  if (raw === undefined || raw.trim().length === 0) {
+    return null;
+  }
+  if (raw.length < MIN_PASSCODE_LENGTH || raw.length > MAX_PASSCODE_LENGTH) {
+    throw new ConfigError(
+      `TOKIMEKI_PASSCODE must be ${MIN_PASSCODE_LENGTH}..${MAX_PASSCODE_LENGTH} characters`,
+    );
+  }
+  if (!PASSCODE_PATTERN.test(raw)) {
+    throw new ConfigError(
+      "TOKIMEKI_PASSCODE must use visible ASCII letters/digits and ._~@#*+=:- only",
+    );
+  }
+  return raw;
+}
+
 function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts {
   const relayUrl = normalizeRelayBaseUrl(requireEnv(env, "TOKIMEKI_RELAY_URL"));
   if (!isValidSessionId(session)) {
@@ -586,6 +617,7 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
   const tunnel = parseTunnelMode(env);
   const tunnelFec = parseTunnelFec(env);
   const tunnelSecret = parseTunnelSecret(env, tunnel);
+  const passcode = parsePasscode(env);
   if (tunnel === "auto" && p2p === "off") {
     warnings.push("TOKIMEKI_TUNNEL=auto requires P2P; the tunnel will not be used");
   }
@@ -594,6 +626,7 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
     optionalEnv(env, "TOKIMEKI_MASTER_TOKEN"),
     optionalEnv(env, "TOKIMEKI_SESSION_TOKEN"),
     optionalEnv(env, "TOKIMEKI_TUNNEL_SECRET"),
+    optionalEnv(env, "TOKIMEKI_PASSCODE"),
   ].filter((value): value is string => value !== undefined);
   return {
     relayUrl,
@@ -606,6 +639,7 @@ function loadCommon(env: NodeJS.ProcessEnv, session: string): CommonConfigParts 
     tunnelFec,
     tunnelKeyMode: tunnelSecret === null ? "session-token" : "shared-secret",
     tunnelSecret,
+    passcode,
     logLevel,
     windowMode: parseWindowMode(env),
     warnings,
@@ -782,6 +816,21 @@ export function loadDoctorConfig(
   const masterToken = optionalEnv(env, "TOKIMEKI_MASTER_TOKEN");
   const namespaceRaw = optionalEnv(env, "TOKIMEKI_NAMESPACE");
   const sessionToken = optionalEnv(env, "TOKIMEKI_SESSION_TOKEN");
+  const passcodeRaw = optionalEnv(env, "TOKIMEKI_PASSCODE");
+  let hasPasscode = false;
+  if (passcodeRaw !== undefined) {
+    if (
+      passcodeRaw.length >= MIN_PASSCODE_LENGTH &&
+      passcodeRaw.length <= MAX_PASSCODE_LENGTH &&
+      PASSCODE_PATTERN.test(passcodeRaw)
+    ) {
+      hasPasscode = true;
+    } else {
+      warnings.push(
+        `TOKIMEKI_PASSCODE must be ${MIN_PASSCODE_LENGTH}..${MAX_PASSCODE_LENGTH} visible ASCII characters (._~@#*+=:-)`,
+      );
+    }
+  }
   let namespace: string | null = null;
   if (namespaceRaw !== undefined) {
     if (HOST_NAMESPACE_PATTERN.test(namespaceRaw)) {
@@ -825,6 +874,7 @@ export function loadDoctorConfig(
     masterToken,
     sessionToken,
     optionalEnv(env, "TOKIMEKI_TUNNEL_SECRET"),
+    passcodeRaw,
   ].filter((value): value is string => value !== undefined);
   return {
     relayUrl,
@@ -836,6 +886,7 @@ export function loadDoctorConfig(
     namespace,
     authMode: token !== undefined ? "token" : masterToken !== undefined ? "master" : null,
     hasSessionToken: sessionToken !== undefined,
+    hasPasscode,
     warnings,
     secrets,
   };

@@ -16,7 +16,7 @@
  */
 
 import { parseNonNegativeInt, type RelayEnv } from "./env.js";
-import { NAMESPACE_PATTERN } from "./namespace-tokens.js";
+import { isNamespaceSessionId, NAMESPACE_PATTERN } from "./namespace-tokens.js";
 
 /** Hard cap on a presented JWT value (header safety; matches the CLI guard). */
 export const MAX_JWT_LENGTH = 8192;
@@ -81,8 +81,14 @@ export function readJwtAuthConfig(env: RelayEnv): JwtConfigStatus {
   } catch {
     return { status: "invalid", reason: "invalid_url" };
   }
+  const loopback =
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "[::1]";
+  const allowLoopbackHttp =
+    env.TOKIMEKI_JWT_ALLOW_HTTP === "1" && loopback && parsed.protocol === "http:";
   if (
-    parsed.protocol !== "https:" ||
+    (parsed.protocol !== "https:" && !allowLoopbackHttp) ||
     parsed.username !== "" ||
     parsed.password !== "" ||
     parsed.hash !== ""
@@ -127,6 +133,7 @@ function jwtConfigCacheKey(env: RelayEnv): string {
     env.TOKIMEKI_JWT_AUDIENCE,
     env.TOKIMEKI_JWT_JWKS_TTL_SECONDS,
     env.TOKIMEKI_JWT_CLOCK_SKEW_SECONDS,
+    env.TOKIMEKI_JWT_ALLOW_HTTP,
   ]);
 }
 
@@ -494,12 +501,12 @@ export type JwtFailureReason =
   | "expired"
   | "jwks_unavailable";
 
-export interface HostJwtClaims {
+/** Claims shared by Host and Session JWTs (everything except role-specific fields). */
+interface CommonJwtClaims {
   readonly iss: string;
   readonly aud: string | readonly string[];
   readonly sub: string;
   readonly namespace: string;
-  readonly tokenUse: "host";
   readonly scopes: readonly string[];
   readonly issuedAt: number;
   readonly notBefore: number | null;
@@ -507,19 +514,37 @@ export interface HostJwtClaims {
   readonly jti: string | null;
 }
 
+export interface HostJwtClaims extends CommonJwtClaims {
+  readonly tokenUse: "host";
+}
+
+export interface SessionJwtClaims extends CommonJwtClaims {
+  readonly tokenUse: "session";
+  /** Session id the token is scoped to; must equal the WebSocket path. */
+  readonly session: string;
+}
+
 export type JwtVerification =
   | { readonly ok: true; readonly claims: HostJwtClaims }
+  | { readonly ok: false; readonly reason: JwtFailureReason };
+
+export type SessionJwtVerification =
+  | { readonly ok: true; readonly claims: SessionJwtClaims }
+  | { readonly ok: false; readonly reason: JwtFailureReason };
+
+type CommonClaimsResult =
+  | { readonly ok: true; readonly claims: CommonJwtClaims }
   | { readonly ok: false; readonly reason: JwtFailureReason };
 
 function isSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value);
 }
 
-function validateClaims(
+function validateCommonClaims(
   payload: Record<string, unknown>,
   config: JwtAuthConfig,
   nowSeconds: number,
-): { ok: true; claims: HostJwtClaims } | { ok: false; reason: JwtFailureReason } {
+): CommonClaimsResult {
   const iss = payload.iss;
   if (typeof iss !== "string" || iss !== config.issuer) {
     return { ok: false, reason: "claims_invalid" };
@@ -543,17 +568,11 @@ function validateClaims(
   if (typeof namespace !== "string" || !NAMESPACE_PATTERN.test(namespace)) {
     return { ok: false, reason: "claims_invalid" };
   }
-  if (payload.token_use !== "host") {
-    return { ok: false, reason: "claims_invalid" };
-  }
   const scope = payload.scope;
   if (typeof scope !== "string") {
     return { ok: false, reason: "claims_invalid" };
   }
   const scopes = scope.split(/\s+/).filter((entry) => entry.length > 0);
-  if (!scopes.includes("host")) {
-    return { ok: false, reason: "claims_invalid" };
-  }
   const iat = payload.iat;
   if (!isSafeInteger(iat) || iat > nowSeconds + config.clockSkewSeconds) {
     return { ok: false, reason: "claims_invalid" };
@@ -594,7 +613,6 @@ function validateClaims(
       aud: typeof aud === "string" ? aud : Object.freeze([...(aud as readonly string[])]),
       sub,
       namespace,
-      tokenUse: "host",
       scopes: Object.freeze(scopes),
       issuedAt: iat,
       notBefore,
@@ -604,17 +622,77 @@ function validateClaims(
   };
 }
 
+function validateHostClaims(
+  payload: Record<string, unknown>,
+  config: JwtAuthConfig,
+  nowSeconds: number,
+): JwtVerification {
+  const common = validateCommonClaims(payload, config, nowSeconds);
+  if (!common.ok) {
+    return common;
+  }
+  if (payload.token_use !== "host") {
+    return { ok: false, reason: "claims_invalid" };
+  }
+  if (!common.claims.scopes.includes("host")) {
+    return { ok: false, reason: "claims_invalid" };
+  }
+  return { ok: true, claims: { ...common.claims, tokenUse: "host" } };
+}
+
+const MAX_SESSION_CLAIM_LENGTH = 64;
+
+function validateSessionClaims(
+  payload: Record<string, unknown>,
+  config: JwtAuthConfig,
+  nowSeconds: number,
+): SessionJwtVerification {
+  const common = validateCommonClaims(payload, config, nowSeconds);
+  if (!common.ok) {
+    return common;
+  }
+  if (payload.token_use !== "session") {
+    return { ok: false, reason: "claims_invalid" };
+  }
+  // A Session JWT is never a host credential, and only attach/listen carry a
+  // role. `web` may coexist (the TokiAPI proxy enforces it); unknown scopes
+  // are ignored for forward compatibility.
+  if (common.claims.scopes.includes("host")) {
+    return { ok: false, reason: "claims_invalid" };
+  }
+  if (!common.claims.scopes.includes("attach") && !common.claims.scopes.includes("listen")) {
+    return { ok: false, reason: "claims_invalid" };
+  }
+  const session = payload.session;
+  if (
+    typeof session !== "string" ||
+    session.length === 0 ||
+    session.length > MAX_SESSION_CLAIM_LENGTH ||
+    !isNamespaceSessionId(session, common.claims.namespace)
+  ) {
+    return { ok: false, reason: "claims_invalid" };
+  }
+  return { ok: true, claims: { ...common.claims, tokenUse: "session", session } };
+}
+
+interface VerifiedJwtPayload {
+  readonly ok: true;
+  readonly payload: Record<string, unknown>;
+}
+
+type SignatureVerification =
+  | VerifiedJwtPayload
+  | { readonly ok: false; readonly reason: JwtFailureReason };
+
 /**
- * Verify a Host JWT: strict decode, ES256 signature first, then the full
- * claims matrix. Signature verification happens before any claim is trusted.
+ * Strict decode + ES256 signature check (signature before any claim is
+ * trusted). Shared by Host and Session JWT verification.
  */
-export async function verifyHostJwt(
+async function verifyJwtSignature(
   token: string,
   config: JwtAuthConfig,
-  options: { nowSeconds?: number; nowMs?: number; fetchImpl?: typeof fetch } = {},
-): Promise<JwtVerification> {
-  const nowMs = options.nowMs ?? Date.now();
-  const nowSeconds = options.nowSeconds ?? Math.floor(nowMs / 1000);
+  options: { nowMs?: number; fetchImpl?: typeof fetch },
+): Promise<SignatureVerification> {
   if (token.length === 0 || token.length > MAX_JWT_LENGTH) {
     return { ok: false, reason: "malformed_token" };
   }
@@ -650,6 +728,7 @@ export async function verifyHostJwt(
     return { ok: false, reason: "malformed_token" };
   }
 
+  const nowMs = options.nowMs ?? Date.now();
   const lookup = await getJwksKey(config, kid, { nowMs, fetchImpl: options.fetchImpl });
   if (lookup.kind === "unavailable") {
     return { ok: false, reason: "jwks_unavailable" };
@@ -672,8 +751,52 @@ export async function verifyHostJwt(
   if (!valid) {
     return { ok: false, reason: "signature_invalid" };
   }
+  return { ok: true, payload };
+}
 
-  return validateClaims(payload, config, nowSeconds);
+/**
+ * Verify a Host JWT: strict decode, ES256 signature first, then the full
+ * claims matrix. Signature verification happens before any claim is trusted.
+ */
+export async function verifyHostJwt(
+  token: string,
+  config: JwtAuthConfig,
+  options: { nowSeconds?: number; nowMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<JwtVerification> {
+  const nowMs = options.nowMs ?? Date.now();
+  const nowSeconds = options.nowSeconds ?? Math.floor(nowMs / 1000);
+  const verified = await verifyJwtSignature(token, config, {
+    nowMs,
+    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+  });
+  if (!verified.ok) {
+    return verified;
+  }
+  return validateHostClaims(verified.payload, config, nowSeconds);
+}
+
+/**
+ * Verify a TokiAPI Session JWT (`token_use=session`).
+ *
+ * The path/session equality is enforced by the Worker; this function only
+ * validates the claims matrix and that the claimed session is scoped to the
+ * claimed namespace.
+ */
+export async function verifySessionJwt(
+  token: string,
+  config: JwtAuthConfig,
+  options: { nowSeconds?: number; nowMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<SessionJwtVerification> {
+  const nowMs = options.nowMs ?? Date.now();
+  const nowSeconds = options.nowSeconds ?? Math.floor(nowMs / 1000);
+  const verified = await verifyJwtSignature(token, config, {
+    nowMs,
+    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+  });
+  if (!verified.ok) {
+    return verified;
+  }
+  return validateSessionClaims(verified.payload, config, nowSeconds);
 }
 
 /** Test hook: clear the JWKS cache and the per-isolate config cache. */
