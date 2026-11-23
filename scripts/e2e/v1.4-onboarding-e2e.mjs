@@ -32,7 +32,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const cli = join(root, "packages/cli/dist/index.js");
+const cli = process.env.E2E_CLI_ENTRY
+  ? resolve(process.env.E2E_CLI_ENTRY)
+  : join(root, "packages/cli/dist/index.js");
 const fakeTui = join(root, "scripts/e2e/fake-tui.mjs");
 const siteIndex = join(root, "packages/onboarding-site/dist/index.html");
 const wranglerBin = join(root, "node_modules/wrangler/bin/wrangler.js");

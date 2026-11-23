@@ -80,7 +80,8 @@ GitHub Release.
    ```
 
    `E2E_CLI_ENTRY` defaults to `packages/cli/dist/index.js` and also works
-   with `scripts/e2e/host-relay-reconnect.mjs`. Repeat the run with
+   with `scripts/e2e/host-relay-reconnect.mjs` and
+   `scripts/e2e/v1.4-onboarding-e2e.mjs`. Repeat the run with
    `REQUIRE_P2P=1 E2E_P2P_MODE=auto` for the P2P data path and with
    `E2E_P2P_MODE=off E2E_FLOW_CONTROL=1 E2E_SECRET_CHECK=1` for relay flow
    control and PTY secret isolation. The `--@limccn:registry` flag is needed
