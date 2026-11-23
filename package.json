@@ -1,6 +1,6 @@
 {
   "name": "tokimeki-monorepo",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "Cloudflare Worker relay + P2P terminal sharing for TUI programs",

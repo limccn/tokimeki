@@ -6,6 +6,38 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-21
+
+JWT/hosted-auth line, based on 0.1.3: Session JWT viewer/listener verification, share links/web viewer contract, optional passcode, and cross-repo e2e.
+
+### Added
+
+- Relay **Session JWT** verification (v1.2-A): when JWT mode is enabled, a
+  three-segment `X-Tokimeki-Session` is verified as `token_use=session` with
+  `attach`/`listen` scope, an exact `session` claim, and the token namespace
+  prefix. Verified viewers/listeners reach the SessionDO with
+  `x-tokimeki-session-claim`/`-scope`; the DO re-checks session/namespace/scope
+  and skips the opaque `host_token_hash` comparison. Legacy
+  `namespace_id=NULL` sessions keep the opaque path only. Session JWTs are
+  never host credentials; JWT-disabled mode leaves opaque tokens unchanged.
+- Optional **session passcode** (v1.2-D): `TOKIMEKI_PASSCODE` (6..128 chars)
+  makes the host send only a PBKDF2-SHA256 verifier in `hello.passcode`;
+  viewers/listeners submit `X-Tokimeki-Passcode`. The relay stores the verifier
+  in `session_passcode`, locks verification for 30 s after five failures, and
+  advertises `welcome.capabilities.sessionSecurity.passcode=1`. New error codes
+  `passcode_required`/`passcode_invalid`/`passcode_locked`/`passcode_mismatch`;
+  unset passcode behavior is unchanged. The CLI scrubs the passcode from the
+  hosted PTY environment and logs.
+- CLI accepts a TokiAPI **Session JWT** in `TOKIMEKI_SESSION_TOKEN` as an
+  opaque value (no parsing/refresh); viewer config envelopes accept `v:2`
+  (`namespace`, `expiresAt`, `passcodeRequired`). `docs/web-viewer.md` records
+  the TokiAPI proxy contract, TURN stripping, passcode handshake, and the
+  cross-repo e2e harness (`scripts/e2e/v1.2-cross-repo.mjs`) plus a
+  passcode-specific harness (`scripts/e2e/v1.2-passcode-e2e.mjs`) covering
+  CLI passcode success/failure and the Web proxy first-frame gate.
+- Test-only `TOKIMEKI_JWT_ALLOW_HTTP=1` allows a loopback `http://` JWKS URL
+  for local cross-repo e2e; production must leave it unset.
+
 ## [0.1.3] - 2026-11-20
 
 Default/no-jwt mainline: static multi-namespace host tokens, the additive
@@ -241,7 +273,8 @@ First public release.
 > P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
 > recovery. The 0.1.0 limitation above is kept as the release-time record.
 
-[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/limccn/tokimeki/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/limccn/tokimeki/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/limccn/tokimeki/releases/tag/v0.1.2
 [0.1.1]: https://github.com/limccn/tokimeki/releases/tag/v0.1.1
