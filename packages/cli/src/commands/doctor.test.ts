@@ -14,6 +14,7 @@ function doctorConfig(overrides: Partial<DoctorConfig> = {}): DoctorConfig {
     namespace: null,
     authMode: "master",
     hasSessionToken: false,
+    hasPasscode: false,
     warnings: [],
     secrets: ["test-master-token-abc"],
     ...overrides,

@@ -204,6 +204,8 @@ export interface ConnectOptions {
   readonly listener?: boolean;
   /** Forged internal namespace header; the Worker must delete it. */
   readonly namespaceHeader?: string;
+  /** Extra upgrade headers (for example `x-tokimeki-passcode`). */
+  readonly headers?: Record<string, string>;
 }
 
 export async function connectWorker(
@@ -226,6 +228,9 @@ export async function connectWorker(
   if (options.listener === true) {
     headers["x-tokimeki-listener"] = "1";
   }
+  if (options.headers !== undefined) {
+    Object.assign(headers, options.headers);
+  }
   const response = await SELF.fetch(`https://relay.test/ws/${sessionId}`, { headers });
   if (response.status !== 101 || response.webSocket == null) {
     throw new Error(`expected websocket 101, got ${response.status}`);
@@ -235,11 +240,17 @@ export async function connectWorker(
 
 export async function connectDirect(
   sessionId: string,
-  options: { role: string; token?: string | null },
+  options: {
+    role: string;
+    token?: string | null;
+    /** Extra internal headers, used to exercise DO-side defense in depth. */
+    headers?: Record<string, string>;
+  },
 ): Promise<TestSocket> {
   const headers: Record<string, string> = {
     Upgrade: "websocket",
     "x-tokimeki-role": options.role,
+    ...options.headers,
   };
   if (options.token !== null) {
     headers["x-tokimeki-session"] = options.token ?? SESSION_TOKEN;

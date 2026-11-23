@@ -163,6 +163,7 @@ function attachConfig(
     tunnelFec: "off",
     tunnelKeyMode: "session-token",
     tunnelSecret: null,
+    passcode: null,
     logLevel: "silent",
     windowMode: "tui",
     warnings: [],

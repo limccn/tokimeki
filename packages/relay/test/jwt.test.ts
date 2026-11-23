@@ -10,6 +10,7 @@ import {
   readJwtAuthConfig,
   selectHostCredential,
   verifyHostJwt,
+  verifySessionJwt,
 } from "../src/jwt-auth.js";
 
 // ---------------------------------------------------------------------------
@@ -663,5 +664,131 @@ describe("selectHostCredential", () => {
       action: "unauthorized",
       reason: "malformed_bearer",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session JWT (task A): token_use=session, attach/listen scopes
+// ---------------------------------------------------------------------------
+
+describe("verifySessionJwt", () => {
+  let key: TestKeyMaterial;
+  let jwks: Record<string, string>;
+
+  beforeEach(async () => {
+    __resetJwtCacheForTests();
+    key = await generateTestKey("kd-session");
+    jwks = { ...key.publicJwk };
+  });
+
+  const fetchImpl = (): Promise<Response> =>
+    Promise.resolve(
+      new Response(JSON.stringify({ keys: [jwks] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+  function sessionToken(overrides: Record<string, unknown> = {}): Promise<string> {
+    return signHostJwt(key, {
+      ...validClaims(),
+      token_use: "session",
+      scope: "attach",
+      session: "abcde.demo",
+      ...overrides,
+    });
+  }
+
+  const verify = (token: string) =>
+    verifySessionJwt(token, baseConfig(), { nowMs: BASE_NOW_MS, fetchImpl });
+
+  it("accepts an attach-scoped Session JWT", async () => {
+    const result = await verify(await sessionToken());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.claims.tokenUse).toBe("session");
+    expect(result.claims.session).toBe("abcde.demo");
+    expect(result.claims.scopes).toEqual(["attach"]);
+    expect(result.claims.namespace).toBe("abcde");
+  });
+
+  it("accepts listen + web scopes as a space-separated string", async () => {
+    const result = await verify(await sessionToken({ scope: "listen web" }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.claims.scopes).toEqual(["listen", "web"]);
+  });
+
+  it("rejects token_use=host and a host scope", async () => {
+    await expect(verify(await sessionToken({ token_use: "host" }))).resolves.toEqual({
+      ok: false,
+      reason: "claims_invalid",
+    });
+    await expect(verify(await sessionToken({ scope: "attach host" }))).resolves.toEqual({
+      ok: false,
+      reason: "claims_invalid",
+    });
+  });
+
+  it("rejects tokens without an attach or listen scope", async () => {
+    for (const scope of ["web", "viewer", "", "attachx"]) {
+      await expect(verify(await sessionToken({ scope }))).resolves.toEqual({
+        ok: false,
+        reason: "claims_invalid",
+      });
+    }
+  });
+
+  it("requires the session claim to be scoped to the token namespace", async () => {
+    for (const session of ["other.demo", "abcde", "abcde.", ".demo", "x".repeat(65)]) {
+      await expect(verify(await sessionToken({ session }))).resolves.toEqual({
+        ok: false,
+        reason: "claims_invalid",
+      });
+    }
+    await expect(verify(await sessionToken({ session: 42 }))).resolves.toEqual({
+      ok: false,
+      reason: "claims_invalid",
+    });
+  });
+
+  it("applies the same iss/aud/exp/nbf/signature matrix as Host JWTs", async () => {
+    for (const overrides of [
+      { iss: "https://evil.test" },
+      { aud: "other-audience" },
+      { exp: BASE_NOW_SECONDS - 3600 },
+      { nbf: BASE_NOW_SECONDS + 3600 },
+    ]) {
+      const result = await verify(await sessionToken(overrides));
+      expect(result.ok).toBe(false);
+    }
+    const good = await sessionToken();
+    const tampered = `${good.slice(0, -4)}AAAA`;
+    await expect(verify(tampered)).resolves.toEqual({
+      ok: false,
+      reason: "signature_invalid",
+    });
+  });
+});
+
+describe("readJwtAuthConfig loopback HTTP (test-only)", () => {
+  const base = {
+    TOKIMEKI_JWT_JWKS_URL: "http://127.0.0.1:5173/api/tokimeki/jwks.json",
+    TOKIMEKI_JWT_ISSUER: "http://127.0.0.1:5173",
+  };
+
+  it("accepts loopback http only with TOKIMEKI_JWT_ALLOW_HTTP=1", () => {
+    expect(readJwtAuthConfig({ ...base } as RelayEnv).status).toBe("invalid");
+    expect(readJwtAuthConfig({ ...base, TOKIMEKI_JWT_ALLOW_HTTP: "1" } as RelayEnv).status).toBe(
+      "enabled",
+    );
+    expect(
+      readJwtAuthConfig({
+        ...base,
+        TOKIMEKI_JWT_JWKS_URL: "http://relay.example/api/tokimeki/jwks.json",
+        TOKIMEKI_JWT_ISSUER: "http://relay.example",
+        TOKIMEKI_JWT_ALLOW_HTTP: "1",
+      } as RelayEnv).status,
+    ).toBe("invalid");
   });
 });

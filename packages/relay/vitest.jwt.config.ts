@@ -8,7 +8,7 @@ import { relayWorkersConfig } from "./vitest.shared.js";
  * here too because namespace mode is active in this configuration.
  */
 export default relayWorkersConfig({
-  include: ["test/worker-jwt.test.ts"],
+  include: ["test/worker-jwt.test.ts", "test/worker-session-jwt.test.ts"],
   namespaceTokens: true,
   jwtBindings: true,
   // See vitest.shared.ts for the Windows alarm rationale.

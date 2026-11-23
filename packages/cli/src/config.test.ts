@@ -701,3 +701,63 @@ describe("loadDoctorConfig", () => {
     expect(loadDoctorConfig({ TOKIMEKI_NAMESPACE_TOKEN: "" }).authMode).toBeNull();
   });
 });
+
+describe("session passcode config", () => {
+  it("reads a valid passcode and redacts it", () => {
+    const config = loadHostConfig({
+      env: baseHostEnv({ TOKIMEKI_PASSCODE: "123456" }),
+      hostname: "laptop",
+      cwd: "/work",
+    });
+    expect(config.passcode).toBe("123456");
+    expect(config.secrets).toContain("123456");
+  });
+
+  it("treats empty/whitespace as unset and rejects invalid lengths/line breaks", () => {
+    for (const value of ["", "   "]) {
+      const config = loadHostConfig({
+        env: baseHostEnv({ TOKIMEKI_PASSCODE: value }),
+        hostname: "laptop",
+        cwd: "/work",
+      });
+      expect(config.passcode).toBeNull();
+    }
+    for (const value of ["12345", "x".repeat(129), "12345\n6", "密码123456", "abc$123"]) {
+      expect(() =>
+        loadHostConfig({
+          env: baseHostEnv({ TOKIMEKI_PASSCODE: value }),
+          hostname: "laptop",
+          cwd: "/work",
+        }),
+      ).toThrow(ConfigError);
+    }
+  });
+
+  it("reports passcode presence in doctor without the value", () => {
+    const config = loadDoctorConfig(baseHostEnv({ TOKIMEKI_PASSCODE: "123456" }));
+    expect(config.hasPasscode).toBe(true);
+    expect(config.warnings.join("\n")).not.toContain("123456");
+  });
+});
+
+describe("viewer config v2", () => {
+  it("accepts a v2 envelope", () => {
+    const envelope = JSON.stringify({
+      v: 2,
+      relayUrl: "wss://relay.example",
+      namespace: "abcde",
+      session: "abcde.demo",
+      sessionToken: "session-jwt",
+      window: { cols: 120, rows: 40 },
+      expiresAt: 1763586400,
+      passcodeRequired: true,
+    });
+    const config = loadAttachConfig({
+      TOKIMEKI_CONFIG: envelope,
+      TOKIMEKI_SESSION_TOKEN: "session-jwt",
+    });
+    expect(config.session).toBe("abcde.demo");
+    expect(config.sessionToken).toBe("session-jwt");
+    expect(config.passcode).toBeNull();
+  });
+});

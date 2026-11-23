@@ -79,7 +79,12 @@ export function relayWorkersConfig(options: RelayWorkersConfigOptions) {
                     TOKIMEKI_JWT_JWKS_TTL_SECONDS: "3600",
                     TOKIMEKI_JWT_CLOCK_SKEW_SECONDS: "60",
                   }
-                : {}),
+                : {
+                    // `wrangler.jsonc` persists the production (non-secret)
+                    // `TOKIMEKI_JWT_*` vars; blank the URL so JWT-disabled
+                    // suites never inherit them from the deployment config.
+                    TOKIMEKI_JWT_JWKS_URL: "",
+                  }),
               TOKIMEKI_SESSION_TTL_SECONDS: "30",
               ...(options.sessionMaxTtlSeconds === undefined
                 ? {}
