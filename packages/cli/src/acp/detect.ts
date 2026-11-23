@@ -7,7 +7,7 @@
  */
 
 import { accessSync, constants, statSync } from "node:fs";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { ACP_CATALOG, type AcpEntry } from "./catalog.js";
 
@@ -48,7 +48,8 @@ function candidateDirectories(
   cwd: string,
 ): string[] {
   const raw = env.PATH ?? env.Path ?? "";
-  const separator = platform === "win32" ? ";" : delimiter;
+  // Use the target platform, not the host: tests pass a synthetic platform.
+  const separator = platform === "win32" ? ";" : ":";
   const seen = new Set<string>();
   const directories: string[] = [];
   for (const entry of raw.split(separator)) {

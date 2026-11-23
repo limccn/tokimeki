@@ -43,7 +43,8 @@ describe("ACP catalog", () => {
 });
 
 describe("read-only PATH detection", () => {
-  it("finds executable files on POSIX-style PATHs", () => {
+  const posixOnly = process.platform === "win32" ? it.skip : it;
+  posixOnly("finds executable files on POSIX-style PATHs", () => {
     const dir = tempDir();
     const executable = join(dir, "codex");
     writeFileSync(executable, "#!/bin/sh\nexit 0\n");
@@ -59,7 +60,6 @@ describe("read-only PATH detection", () => {
     expect(detection.find((entry) => entry.id === "claude")?.installed).toBe(false);
   });
 
-  const posixOnly = process.platform === "win32" ? it.skip : it;
   posixOnly("does not report non-executable files on POSIX", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "claude"), "not executable");
@@ -83,11 +83,20 @@ describe("read-only PATH detection", () => {
 
   it("handles empty, duplicate, and relative PATH entries", () => {
     const dir = tempDir();
-    writeFileSync(join(dir, "goose"), "");
-    chmodSync(join(dir, "goose"), 0o755);
+    const platform = process.platform;
+    if (platform === "win32") {
+      writeFileSync(join(dir, "goose.CMD"), "@echo off\r\n");
+    } else {
+      writeFileSync(join(dir, "goose"), "");
+      chmodSync(join(dir, "goose"), 0o755);
+    }
+    const separator = platform === "win32" ? ";" : ":";
     const detection = detectAcps({
-      env: { PATH: `;${dir};${dir};missing` },
-      platform: "linux",
+      env: {
+        PATH: `${separator}${dir}${separator}${dir}${separator}missing`,
+        ...(platform === "win32" ? { PATHEXT: ".CMD" } : {}),
+      },
+      platform,
       cwd: dir,
     });
     expect(detection.find((entry) => entry.id === "goose")?.installed).toBe(true);
