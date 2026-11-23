@@ -1,6 +1,7 @@
 # 路线图
 
-> 本文件区分 v1 交付、v1.1 增强与 v2.0 兼容性工作。
+> 本文件区分 v1 交付、v1.1 增强、v1.2–v1.7 用户途径/agent 分发与 v2.0
+> 兼容性工作。
 > **v1.1 与 v2 不属于当前 v1 验收（AC1–AC10）**，未完成不会阻塞 v1 归档。
 
 ## v1（已交付基线）
@@ -101,65 +102,265 @@ mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0
 wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/<session>`
 斜杠路径。
 
-## v1.2（分阶段；E 当前，A–D 暂停）
+## v1.2（已完成，2026-11-19/22）
 
-状态（2026-11-19）：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与
-**五个**子任务已创建。
+状态：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与 5 个子任务
+（E/A/B/C/D）已完成 5/5。v1.2 不阻塞 v2.0。
 
-- **E `11-19-v1-2-cli-tokiapi-host-jwt`**：当前权威切片，代码已实现（relay
-  Host JWT 最小验签 + CLI `TOKIMEKI_TOKEN`/只读 config.json），单测与 Worker
-  集成测试通过；2026-11-19 已轮换 namespace token 并部署生产
-  （`5cda681f`，no-JWT），生产 no-JWT live e2e（基础/secret 清洗/listener）
-  通过；待合并，真实 TokiAPI↔relay live e2e 仍 **pending**（需已部署 JWKS 的
-  relay 与真实 Host JWT）。
-  TokiAPI Host JWT/JWKS 已落地；E 负责 CLI + relay 最小 Host JWT 验签。
-- **A–D**（namespace-auth / cli-ux / web-ui / passcode）：**in_progress**；
-  PRD/design/implement 已按 E 的 Host JWT 模型重写，代码尚未开始。
-  A=Session JWT viewer/listener 验签；B=TokiAPI session 创建/Session JWT/
-  invite v2/offline fallback；C=Session JWT/Web viewer；D=可选 passcode。
-- TokiAPI Session JWT、session 创建、invite v2、Web viewer、passcode 仍需落地；
-  A–D 已恢复规划/实现准备。v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
-- **2026-11-19 审查结论**：E 合并/部署前必须确认 TokiAPI 5 位 namespace 唯一性、
-  生产 `TOKIMEKI_NAMESPACE_TOKENS` 轮换/分发 preflight，并更新过期的
-  `docs/relay-exposure-policy.md`；A–D 已补充 `looksLikeJwt`、legacy NULL、
-  token 类型判定、Web `web` 校验/TURN 剥离、passcode secret 清单等安全契约。
+### 0.1.3 no-JWT mainline
 
-### E 已确认的凭证/路由
+- tag `v0.1.3`；CLI/protocol 版本 0.1.3。
+- E Host JWT/CLI 凭证对齐已合入；生产 Worker `b4af8f47`（2026-11-20，
+  `relay.tokiapi.app`），namespace token 已轮换。
+- 0.1.3 生产窗口未配置 `TOKIMEKI_JWT_*`（no-JWT）；no-JWT live e2e（基础、
+  secret 清洗、listener）通过。生产随后升级到 0.1.4（见下）。
+- TokiAPI Host JWT ↔ relay 真实 live e2e 已在 0.1.4 生产部署后完成（见下）。
 
-- Host 凭证唯一 `TOKIMEKI_TOKEN`（Host JWT 或静态 namespace token；CLI 不解析）；
-  `TOKIMEKI_NAMESPACE` 必填；`X-Tokimeki-Token` 是唯一 host 头
-  （旧 `X-Tokimeki-Master` 拒绝）；`TOKIMEKI_NAMESPACE_TOKEN` 退役；
-  `TOKIMEKI_MASTER_TOKEN` 仅作单人回退，启用有效 `TOKIMEKI_NAMESPACE_TOKENS`
-  后失效（root `*` 接管同时失效）。
-- Host JWT：ES256；JWKS 在 **TokiAPI 管理台域** `/api/tokimeki/jwks.json`；
-  claims `iss/aud/sub/namespace/token_use=host/scope/iat/nbf/exp/jti`；
-  默认 TTL 30 天；relay 离线验签，不逐连接回调 TokiAPI。
-- `TOKIMEKI_JWT_JWKS_URL` 未配置 = JWT 关闭（不解析三段式、不拉 JWKS）；
-  配置非法 = JWT 凭证 fail-closed；JWKS 不可达且无缓存 = 503。
-- `Authorization: Bearer` 仅作为 JWT 模式 web/代理的 Host JWT 第二载体；
-  CLI 不发送；JWT 关闭时不解析/不剥离。
-- **破坏性变更**：header 更名；namespace token 启用后 fallback 失效。
-  CLI/relay 必须成对升级；生产部署前必须轮换/分发 namespace token，或清空
-  secret 保持 fallback 模式，否则 host 认证锁死。
+### 0.1.4 jwt line
 
-### A–D（in_progress，代码未开始）
+- 分支 `jwt` / `release/0.1.4`；tag `v0.1.4` 在 `e86f747`，版本 0.1.4。
+- 已发布：A Session JWT、B invite v2/session 创建、C Web viewer、
+  D passcode、cross-repo e2e；npmjs/GitHub Packages 双发布，生产 relay
+  `93bad9e4…` 与 TokiAPI prod `60569f11…` 已部署（2026-11-21/22，生产
+  0.1.4 + Host/Session JWT）。
+- **0.1.4 代码已于 2026-11-23 合入 `develop`**（merge `release/0.1.4`）；
+  `jwt` 分支与 `release/0.1.4` 同提交。
+- 剩余：TokiAPI 本地 `7902297` 未推送、完整 TokiAPI 套件待干净 CI；
+  5 位 namespace 唯一性确认；安全审查 follow-up（web scope 校验、TURN
+  剥离、passcode secret 清单等）。生产 e2e 已知 WAN 超时：流控
+  pause/resume 与 TUN XOR 重连。
 
-- A `11-18-v1-2-namespace-auth`：Session JWT viewer/listener 验签
-  （`X-Tokimeki-Session` 三段式、`token_use=session`、`attach`/`listen`、
-  `session`=路径、namespace 前缀、严格 `iss/aud/exp/nbf`；DO hash bypass；
-  listener 仍需 `X-Tokimeki-Listener: 1`；Session JWT 不作 host；无 invite）。
-- B `11-18-v1-2-cli-ux`：TokiAPI session 创建、Session JWT、invite v2、
-  offline fallback。
-- C `11-18-v1-2-web-ui`：TokiAPI Session JWT 签发、WS 代理、xterm.js viewer。
-- D `11-18-v1-2-passcode`：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`）。
+### A–D 交付要点
 
-### 边界
+- A：`X-Tokimeki-Session` 三段式在 JWT 模式按 `token_use=session` 验签；
+  `attach`/`listen` scope、`session`=路径、namespace 前缀；DO hash bypass
+  但复核 session/namespace/scope；Session JWT 不作 host；legacy NULL 拒绝。
+- B：CLI 不解析 Session JWT；viewer config v2；`TOKIMEKI_PASSCODE` 发送
+  `X-Tokimeki-Passcode`；离线路径 = 显式预置 `TOKIMEKI_SESSION` +
+  `TOKIMEKI_SESSION_TOKEN`。
+- C：TokiAPI 负责 Session JWT 签发、invite、WS 代理与 xterm.js viewer；
+  tokimeki 提供 `docs/web-viewer.md` 与 e2e harness。
+- D：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`），与 6–8 位
+  TokiAPI 会话 token 是两套机制。
 
-- 不引入 SQLite namespace 目录/introspection/per-viewer JWT/refresh token/
-  撤销列表；不独立发布 web-client 包；不做组织/团队模型、浏览器 P2P；
-  wire version 保持 v1。
+### E 凭证模型（0.1.3）
+
+- Host 凭证唯一 `TOKIMEKI_TOKEN`（Host JWT 或静态 namespace token）；
+  `TOKIMEKI_NAMESPACE` 必填；`X-Tokimeki-Token` 唯一 host 头
+  （旧 `X-Tokimeki-Master` 拒绝）；`TOKIMEKI_NAMESPACE_TOKEN` 退役。
+- `TOKIMEKI_MASTER_TOKEN` 仅单人回退，启用有效
+  `TOKIMEKI_NAMESPACE_TOKENS` 后失效（root `*` 接管同时失效）。
+- Host JWT：ES256；JWKS 在 TokiAPI 管理台域 `/api/tokimeki/jwks.json`；
+  claims `iss/aud/sub/namespace/token_use/scope/iat/nbf/exp/jti`；
+  默认 TTL 30 天；relay 离线验签。
+- `TOKIMEKI_JWT_JWKS_URL` 未配置 = JWT 关闭；配置非法 fail-closed；
+  JWKS 不可达无缓存 = 503。
+- `Authorization: Bearer` 仅 JWT 模式 web/代理 Host JWT 第二载体；
+  CLI 不发送。
+
+## v1.4（规划中，2026-11-20 立项）
+
+状态：父任务 `.trellis/tasks/11-20-v1-4-user-onboarding` 与 10 个子任务
+（A–J）已创建，均为 planning，未启动实现。规划已完成收敛
+（2026-11-22）：Open Questions 已由代码库证据回答，各子任务
+implement/check jsonl 清单已配置；B 拆分为 B1/B2。
+2026-11-23 规划评审：B2 的 TokiAPI 契约已在本地 `cf-ai-gateway` 核实
+（`GET /api/config`、`POST /api/tokimeki/anon-host`、
+`POST /api/tokimeki/attach/cli`），B2 收窄为生产验证/跨仓冻结；A 的
+daemon 事件通道/schema、G 的日志视图键与阈值、E 的写入白名单已冻结。
+2026-11-23 追加 H（下载 config 文件 host + share URL attach）、I（ACP 9 种
+应用 + TUI 自动识别研究）、J（no-JWT 静态接入站）。
+**基线为 `develop`；`jwt`/0.1.4 已于 2026-11-23 并入 `develop`（合并门禁
+已解除）；实现启动仍需用户确认 TokiAPI 功能测试完成。**
+2026-11-23 安全审计（quick/scoped 设计级）：0 confirmed、7 needs_validation；
+可修项归入 H/A/J/E/D/G/I，限速/边缘加固归入 v1.7 R8，凭证/会话生命周期新建
+v1.8；摘要见
+`.trellis/tasks/11-20-v1-4-user-onboarding/audit/2026-11-23-security-audit.md`。
+
+目标：补齐用户途径——CLI 交互/守护模式、doctor-first host/attach 向导、
+默认 `relay.tokiapi.app` 的匿名 namespace/token 申请、F12 连接菜单、
+config.json 持久化与历史连接；外加托管 config/URL 快捷入口、ACP 9 种
+应用与 TUI 识别研究、no-JWT 静态接入站、CLI UX（F12 调整窗口、弹出式
+DEBUG 日志、宽终端侧栏）。进程接管仅规划。
+
+- **A CLI 模式/harness**：interactive/daemon、非 TTY、doctor-first、
+  结构化 ready/error，适配 harness。
+- **B Host 向导（拆分 B1/B2）**：relay 默认 `wss://relay.tokiapi.app`；
+  有 token 设 namespace/token；自部署 relay 无 token 时提示配置；
+  `relay.tokiapi.app` 无 token 时申请匿名 namespace/token。B1 向导
+  主体 + mock provisioning client 先行（不被跨仓契约阻塞）；B2 接
+  TokiAPI 现有 `anon-host`（本地 `cf-ai-gateway` 已核实契约），待生产
+  验证后 live 接通。
+- **C Attach 向导**：relay/session/sessionToken 分步；hello 连接测试
+  （复用同一连接，不加 relay 端点）；支持粘贴 v1 viewer JSON 或 TokiAPI
+  invite URL/code（`attach/cli` 兑换 Session JWT，不落盘）。
+- **D F12 菜单**：host 状态/会话/Token（匿名 host 的 inviteUrl 仅内存
+  显示/复制）；viewer/listener 状态、分享复制、重连/断开；不改变 PTY 尺寸。
+- **E config/history**：向导显式写入 `~/.tokimeki/config.json`（含 token，
+  0600、原子写、no-follow）；独立 `~/.tokimeki/history.json`（20 条 LRU）
+  可恢复/清理。**变更 v1.2/E 的 "CLI 只读 config.json" 安全规则。**
+- **F 进程接管**：仅 PRD/design，未来实现；禁止 ptrace/跨用户/提权。
+- **G CLI UX**：F12 host 菜单调整窗口大小（走现有 resize 管道）；
+  DEBUG 日志去底部常驻——窄终端整屏日志视图（tab 式切换）、宽终端
+  （≥阈值）右下角常驻日志区，尺寸变化自动切换。
+- **H 托管快捷入口**：`tokimeki --config <tokimeki-config.json>` 使用
+  TokiAPI 下载的 v2 envelope 直接 host；`tokimeki attach <share-url>`
+  （`#t-<code>`）经 `attach/cli` 兑换 Session JWT 后 attach。依赖
+  `jwt → develop` 合并。
+- **I ACP/TUI**：CLI 覆盖 TokiAPI 预定义的 9 种 ACP
+  （claude/pi/codex/gemini/cursor/aider/opencode/goose/amp）；先研究
+  TUI 自动识别（只读 PATH、不执行未知二进制），再按结论实现。
+- **J no-JWT 静态接入站**：与 relay 绑定、只适配 multi-namespace 静态
+  token、纯静态、无 JWT/后端；复用 TokiAPI（MIT）可用代码/UI 设计，
+  与 `relay.tokiapi.app` 一同部署。
+
+依赖/阻塞：
+
+- 依赖 0.1.3/0.1.4 的 CLI/relay 凭证模型。
+- B2 的匿名 namespace/token 申请使用 TokiAPI 现有公开契约
+  （`GET /api/config`、`POST /api/tokimeki/anon-host`、
+  `POST /api/tokimeki/attach/cli`）；只差生产验证/跨仓冻结，不再被
+  “未定义 API”阻塞。C 的 hosted invite 兑换依赖 0.1.4 的
+  Session JWT/passcode。
+- **基线（2026-11-23）**：`jwt`/0.1.4 已并入 `develop`，v1.4 基线 =
+  `develop`；H/C 的 hosted live 验证前置已满足。实现启动仍待用户确认
+  TokiAPI 功能测试完成；开始前不建实现分支、不启动任务。
+- H 依赖 `jwt → develop` 合并（已于 2026-11-23 完成）与 B/C 契约；I 研究
+  先行、无 JWT 依赖；
+  J 无 JWT 依赖、与 relay assets 同部署（生产部署需批准），可与 A–E
+  并行。
+- A 是 B/C/D 的基础；E 先于 B/C 的“保存”步骤；D 依赖 B/C/E；G 的
+  R2/R3 可与 A–E 并行、R1 依赖 D；F 未来。
+- E 的 token 落盘、匿名申请、F12 token 展示需安全审查；relay 仍要求
+  token，不匿名 host/viewer。
+
+## v1.5（规划中，2026-11-20 立项）
+
+状态：父任务 `.trellis/tasks/11-20-v1-5-agent-onboarding` 与 3 个子任务
+（A skill / B dsh 插件 / C 发布）已创建，均为 planning，未启动实现。
+
+启动前置（2026-11-23）：先对齐 v1.4 路线图（A/B/C/E/H/J）与 0.1.4
+凭证模型（推荐 `TOKIMEKI_TOKEN`，`TOKIMEKI_MASTER_TOKEN` 为 deprecated
+兼容别名）、one-click Cloudflare Deploy Button（skill 仅指导，不执行
+部署）、TokiAPI `anon-host` 生产验证；未记录对齐结论不启动 A/B/C。
+
+目标：让 AI agent 更容易接入 tokimeki——通用 skill、DeepSeek Harness
+插件，以及公开发布/分发。
+
+- **A 通用 tokimeki skill**：主仓库 `skills/tokimeki/SKILL.md`；安装用
+  `npx skills add limccn/tokimeki --skill tokimeki`（不存在短名）；
+  `docs/agent-install.md` 提供“安装 skill + npm 包 + doctor”的提示词；
+  覆盖三 host 路径/attach/安全/troubleshooting，不要求 agent 输出 token；
+  严格纯提示词、无 hook/script、默认只读、项目级安装缺口已记录。
+- **B tokimeki-dsh 插件**：独立 `tokimeki-dsh` 仓库，npm 包
+  `@limccn/tokimeki-dsh`；native dsh bundle（`dsh.bundle.patch` +
+  `cordis.patch.yml`），MCP 可选；工具 **只读/规划**
+  doctor/status/host_plan/attach_plan/share_plan；无 host_start/部署/
+  自动 host/attach；不执行任意 shell、不把 token 返回给模型。
+- **C 公开发布**：npm public + GitHub Release + skills CLI（git 源）+
+  dsh 社区目录（无官方 marketplace）；版本/CHANGELOG/provenance/
+  供应链/安全审查；实际 publish 需用户单独批准。
+
+依赖/阻塞：
+
+- 依赖 tokimeki CLI 0.1.3/0.1.4 的公开命令与配置模型。
+- skills CLI 只接受 `owner/repo`/Git URL/本地路径；不存在 registry 短名。
+  skills.sh 网站收录是独立 best-effort，不承诺时间。
+- dsh 插件依赖 `@deepseek-ai/cordis`/`@deepseek-ai/dsh-tools` 与独立仓库
+  发布节奏；dsh 没有官方 marketplace。
+- skill/plugin 会指导 agent 执行命令：需防 prompt injection、token 泄漏、
+  任意 shell；发布前安全审查。
+- 不阻塞 v2；与 v1.4 并行。
+
+## v1.7（规划中，2026-11-22 立项）
+
+状态：任务 `.trellis/tasks/11-22-v1-7-relay-rate-limit-hardening`
+（`prd.md` / `design.md` / `implement.md`）已创建，当前为 planning，未启动
+实现。安排在 v1.4/v1.5 之后、v2 之前；当前用户量不大，但应在大规模匿名
+onboarding 前完成。基线为 `release/0.1.4` / `jwt`（生产 0.1.4）；CLI/npm
+版本启动时确定（候选 0.1.5）。
+
+目标：在 relay/TokiAPI 侧补齐匿名/会话凭证的 **按 IP 限速** 与 **失败重试
+上限**，压低会话 token 枚举、passcode 分布式猜测和 429 无限重连风险。
+不改变现有 wire 协议、不新增错误码、不改变 relay 信任模型。
+
+- **relay `/ws` per-IP 限速**：Worker 边缘 `[[ratelimits]]` binding，覆盖会
+  进入 DO 的 upgrade 尝试；超限 429 + `Retry-After`；binding/IP 缺失时
+  fail-open 并记录日志。建议 30/60s/IP。
+- **失败 opaque session-token 锁限 + 统一 unauthorized**：session 不存在、
+  token 不匹配、锁限期间返回同一 `unauthorized`，移除存在性 oracle；对已
+  存在 session 按 IP+session 计数（建议 10/60s → 锁 60s），不做整 session
+  锁；不存在的 session 由边缘限速兜底，且不创建 schema。
+- **匿名 token 熵由 TokiAPI 决定**：relay 不假设 token 长度/字符集，只提供
+  配套限速；6–8 位数字或未来更长/字母数字 token 走同一路径。
+- **TokiAPI `/api/tokimeki/ws` per-IP 限速**：独立桶/绑定（建议
+  `TOKIMEKI_WS_LIMIT` 30/60s），429 + `Retry-After`，fail-open；同 zone
+  代理把可信客户端 IP 写入上游 `x-real-ip`，供 relay 按真实 IP 计数；
+  一次性 ticket/Origin/invite/passcode gate 顺序不变。
+- **CLI relay 429 重试上限**：连续 429 建议最多 6 次，保留 1s..30s 指数退避；
+  第 6 次连续 429 触发 `session_full` fatal（exit 1）；503/JWKS 恢复仍按现有
+  策略重试。
+- **passcode per-IP 失败限制**：per-IP 主锁（建议 IP+session 5/60s →
+  60s）；per-session 5/30s 改为高阈值兜底（建议 50/60s），避免单一来源
+  锁死所有 viewer/listener。
+- **Cloudflare 边缘/部署加固（R8，v1.4 审计 follow-up）**：credential-entry
+  页面 HTTPS-only/HSTS/secure-context；`/ws` 的 edge Rate Limiting/WAF 兜底；
+  Static Assets 路由不吞 relay 路径；no-JWT token 熵分工；owner 观察清单。
+- **测试/文档/观测/发布**：brute-force/统一错误、429、passcode、token 形态
+  回归；protocol/deployment/cli/roadmap/release notes；生产部署、密钥、
+  publish 均需单独批准。
+
+已知取舍：Cloudflare 限速是 per-location、eventually consistent 的尽力而为
+压制，不得表述为“已防住爆破”；NAT 共享出口可能误伤；分布式 IP 仍可尝试
+token 猜测，主要依赖 TokiAPI 的 token 熵；per-session passcode 高阈值全局锁
+仍可能被大量分布式来源触发；per-session open-socket 429 仍会暴露“session
+存在且繁忙”；计时侧信道不做强保证。
+
+## v1.8（规划中，2026-11-23 立项）
+
+状态：任务 `.trellis/tasks/11-23-v1-8-credential-lifecycle-hardening`
+（`prd.md` / `design.md` / `implement.md`）已创建，当前为 planning，未启动
+实现。安排在 v1.7 之后、v2 之前。来源：v1.4 设计安全审计的 deferred
+lifecycle 项。
+
+目标：补齐凭证与会话的 **生命周期** 安全边界：撤销、过期、轮换、陈旧
+config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
+
+- **匿名 Host JWT/invite 生命周期**：TTL 对齐、到期提示/重新申请；评估
+  TokiAPI 匿名 invite 撤销（或明确“仅 TTL”取舍）；不可枚举。
+- **Session JWT 撤销/驱逐/绑定**：`jti` denylist 或 viewer epoch；host 驱逐
+  viewer/listener；评估 client binding/更短 TTL；撤销存储有界、休眠恢复兼容。
+- **Host/session token 轮换**：显式确认；旧 viewer token 失效；config/history
+  不自动覆盖；namespace token 轮换运维流程。
+- **config/history 生命周期**：可选 `expiresAt`/`credentialKind`/`savedAt`；
+  过期/陈旧识别与清理命令；Session JWT/invite URL/passcode 仍不落盘。
+- **跨仓/兼容**：TokiAPI 撤销/epoch 契约独立任务；旧 CLI/viewer/relay
+  兼容；additive schema；生产部署/发布需批准。
+
+已知取舍：撤销代际依赖 TokiAPI 签发 epoch；短期只能 jti denylist 或重新
+兑换 invite；viewer 驱逐需限速/确认，避免 host/其他 viewer DoS。
 
 ## v2（独立任务）
+
+### Transport hardening 与多 namespace 设计（P2 暂缓）
+
+- `11-18-v1-1-censorship-resistance-p0-p2`：P0–P2 调研/设计，planning；P1
+  实现已拆到 `11-18-v2-0-p1-tcp-tls-443-transport`，延后到 v2.0 Go/Rust
+  客户端。P2（relay 承载 E2E AEAD，覆盖 `OUTPUT`/`INPUT`/`SNAPSHOT_TO`）
+  **暂缓（postponed，2026-11-23）**，未获用户重新启动前不实现。
+- `11-18-multi-namespace-design`（pre-P2 设计）：completed；设计稿
+  `docs/multi-namespace-design.md` 已交付（2026-11-22/23）。P2 的
+  AAD/KeyProvider 必须使用 `namespaceId/sessionId/epoch/keyId`。设计稿
+  记录 **TokiAPI（本地 `develop`）当前没有 `S_s` 分发通道**，且 hosted 的
+  host/viewer 不共享同一 secret：A/B 需新增跨仓契约；C 仅 OSS/manual
+  可用（非 relay-blind）。
+- 阻断/暂缓现状：v1.2 已实现 namespace 认证/路由（`<namespace>.<slug>`、
+  token/JWT 派生 namespace、`session_meta.namespace_id`），原设计任务的
+  namespace 范围已被覆盖；剩余 E2E 密钥层级/KeyProvider 设计已完成。
+  P2 暂缓的主因是 hosted relay-blind 需要 TokiAPI 新增 `S_s` 分发契约；
+  重新启动时先确认 §14 开放决策与 §15 门禁。
+- `11-18-v2-0-p1-tcp-tls-443-transport`：planning，延后至 v2.0 Go/Rust
+  客户端基线之后，不受多 namespace 设计阻塞。
 
 ### v2.0 前置决策：弱网注入可靠传输 A/B 验证（已押后）
 

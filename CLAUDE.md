@@ -18,10 +18,10 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.3)
+## Release identity (0.1.4)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.3`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.3`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.4`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.4`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@limccn/tokimeki-relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
@@ -75,6 +75,24 @@ assets/              README icon
   namespace from the verified credential only and injects
   `x-tokimeki-namespace` (`*` for the fallback root). Invalid/duplicate/short/
   oversized maps fail closed; unset keeps the fallback-only behavior.
+  `TOKIMEKI_JWT_ALLOW_HTTP=1` is a **test-only** loopback escape hatch for
+  `http://localhost` JWKS URLs (cross-repo e2e); never set it in production.
+- Session JWT (v1.2-A): when JWT mode is not disabled, a three-segment
+  `x-tokimeki-session` is verified by `verifySessionJwt` (`token_use=session`,
+  space-separated `attach`/`listen` scope, no `host`, `session` claim equals
+  the path, namespace prefix). The Worker injects
+  `x-tokimeki-session-claim`/`-scope`; `session-do.ts` re-checks
+  session/namespace/scope and skips `host_token_hash`, but only for
+  namespace-scoped rows (legacy `namespace_id=NULL` rejects Session JWTs).
+  A Session JWT is never a host credential. With JWT disabled the value stays
+  an opaque token.
+- Session passcode (v1.2-D): host `hello.passcode` carries a PBKDF2-SHA256
+  verifier (`{v:1,kdf,salt,iterations,hash}`); `session_passcode` stores it on
+  the first host hello. Viewers/listeners submit `x-tokimeki-passcode`;
+  five failures lock verification for 30 s. Error codes
+  `passcode_required`/`passcode_invalid`/`passcode_locked`/`passcode_mismatch`;
+  `welcome.capabilities.sessionSecurity.passcode=1` advertises support and the
+  CLI fails closed if a verifier was sent without it.
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
   host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
@@ -139,7 +157,10 @@ assets/              README icon
   default 1000 ms) that never pauses the PTY.
 - `attach/`: raw terminal, alternate screen, snapshot apply, seq reducer,
   reconnect/resync, terminal restore; listener mode sends no input/resize/ACK/
-  resync/P2P and Ctrl-C exits only the local listener.
+  resync/P2P and Ctrl-C exits only the local listener. `TOKIMEKI_SESSION_TOKEN`
+  may be an opaque token or a TokiAPI Session JWT (opaque to the CLI);
+  `TOKIMEKI_PASSCODE` adds `X-Tokimeki-Passcode` and is scrubbed from the PTY
+  environment/logs.
 - `transport/`: relay client, P2P peer (node-datachannel), fragmentation,
   ICE config/refresh, P2P retry policy, route selector, ICE/TURN config, signal
   limits.
@@ -227,6 +248,16 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   (fragmentation-independent ARQ tuning, Reed-Solomon/multi-loss FEC) is future.
   A v2.0 lossy-network A/B validation (SCTP reliable vs TUN SR-ARQ/FEC) is
   planned; see `docs/roadmap.md` and `docs/tunnel-reliability.md`.
+- v1.2 Session JWT (A) and optional passcode (D) are covered by relay
+  unit/Worker tests. A local cross-repo e2e (TokiAPI invite → Host JWT CLI host
+  → Session JWT CLI viewer → TokiAPI WS proxy web viewer with TURN stripped)
+  passes against local `wrangler dev` servers; a second passcode-specific e2e
+  (`scripts/e2e/v1.2-passcode-e2e.mjs`) covers host verifier, CLI viewer
+  passcode success/failure, and the Web proxy first-frame passcode gate.
+  Session JWTs have no revocation
+  list (short TTL); passcode lockout is per session and can be triggered by an
+  attacker (documented DoS trade-off). The web viewer itself lives in the
+  TokiAPI repo; tokimeki provides `docs/web-viewer.md` and the e2e harness.
 
 ## Documentation
 
