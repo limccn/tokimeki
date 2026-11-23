@@ -6,6 +6,29 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-23
+
+Agent onboarding (v1.5): universal skill, install prompt, and release
+distribution. The CLI code is unchanged from 0.1.5; the skill is distributed
+from this repository's `skills/tokimeki/` directory.
+
+### Added
+
+- `skills/tokimeki/SKILL.md` plus command/troubleshooting references: prompt-only
+  (no hooks/scripts/MCP/postinstall), default read-only, hard filesystem/
+  environment limits, host paths aligned with v1.4, token-safe attach, and
+  uninstall/removal instructions. Installed with
+  `npx skills add limccn/tokimeki --skill tokimeki` (project scope; `-g` for
+  global). There is no registry short name.
+- `docs/agent-install.md` copy-paste prompt covering skill installation, CLI
+  installation, and `tokimeki doctor` expectations.
+- Independent `@limccn/tokimeki-dsh` DeepSeek Harness plugin
+  (`https://github.com/limccn/tokimeki-dsh`): native dsh bundle with read-only/
+  plan-only `tokimeki_doctor`, `tokimeki_status`, `tokimeki_host_plan`,
+  `tokimeki_attach_plan`, and `tokimeki_share_plan`. No host_start, no
+  deployment, no arbitrary shell, no token/file-content reads, no plugin-owned
+  network calls.
+
 ## [0.1.5] - 2026-11-23
 
 v1.4 user onboarding: interactive/daemon modes, doctor-first host/attach
