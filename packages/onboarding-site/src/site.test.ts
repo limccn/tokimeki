@@ -9,7 +9,9 @@ import {
   shellEnvLine,
 } from "./lib/commands.js";
 import { buildHostConfigEnvelope, buildViewerConfigJson, parseWindowSize } from "./lib/config.js";
+import { highlightCode } from "./lib/highlight.js";
 import { isSecureEntry, relayUrlForLocation } from "./lib/relay.js";
+import { nextTabIndex } from "./lib/tabs.js";
 import { randomSlug, randomToken } from "./lib/token.js";
 import {
   SiteError,
@@ -155,6 +157,49 @@ describe("onboarding-site command generation", () => {
       window: { cols: 120, rows: 40 },
     });
     expect(parseWindowSize("bogus")).toBeUndefined();
+  });
+});
+
+describe("onboarding-site code highlighting", () => {
+  it("keeps shell text intact and labels keywords, keys, strings, flags", () => {
+    const command = "export TOKIMEKI_TOKEN='abc'\ntokimeki attach --listen";
+    const tokens = highlightCode(command, "shell");
+    expect(tokens.map((token) => token.text).join("")).toBe(command);
+    expect(tokens).toContainEqual({ text: "export", kind: "keyword" });
+    expect(tokens).toContainEqual({ text: "TOKIMEKI_TOKEN", kind: "key" });
+    expect(tokens).toContainEqual({ text: "'abc'", kind: "string" });
+    expect(tokens).toContainEqual({ text: "--listen", kind: "key" });
+  });
+
+  it("keeps JSON text intact and separates keys, strings, and numbers", () => {
+    const json = '{"version": 1, "session": "abcde.laptop"}';
+    const tokens = highlightCode(json, "json");
+    expect(tokens.map((token) => token.text).join("")).toBe(json);
+    expect(tokens).toContainEqual({ text: '"version"', kind: "key" });
+    expect(tokens).toContainEqual({ text: '"abcde.laptop"', kind: "string" });
+    expect(tokens).toContainEqual({ text: "1", kind: "number" });
+  });
+
+  it("returns no tokens for empty text", () => {
+    expect(highlightCode("", "shell")).toEqual([]);
+    expect(highlightCode("", "json")).toEqual([]);
+  });
+});
+
+describe("onboarding-site tab keyboard", () => {
+  it("wraps horizontal tab navigation", () => {
+    expect(nextTabIndex("ArrowRight", 0, 2)).toBe(1);
+    expect(nextTabIndex("ArrowRight", 1, 2)).toBe(0);
+    expect(nextTabIndex("ArrowLeft", 0, 2)).toBe(1);
+    expect(nextTabIndex("ArrowLeft", 1, 2)).toBe(0);
+    expect(nextTabIndex("Home", 1, 2)).toBe(0);
+    expect(nextTabIndex("End", 0, 2)).toBe(1);
+  });
+
+  it("ignores non-navigation keys and empty tablists", () => {
+    expect(nextTabIndex("Tab", 0, 2)).toBeUndefined();
+    expect(nextTabIndex("Enter", 1, 2)).toBeUndefined();
+    expect(nextTabIndex("ArrowRight", 0, 0)).toBeUndefined();
   });
 });
 
