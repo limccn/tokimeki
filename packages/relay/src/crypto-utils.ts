@@ -44,6 +44,30 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** Base64url encode a small byte array (PBKDF2 verifier material). */
+export function bytesToBase64Url(bytes: Uint8Array): string {
+  return bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+/** Strict base64url decode; `null` on malformed input. */
+export function base64UrlToBytes(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/u.test(value)) {
+    return null;
+  }
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padLength = (4 - (padded.length % 4)) % 4;
+  try {
+    const binary = atob(padded + "=".repeat(padLength));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * TURN REST credential: `base64(HMAC-SHA1(secret, message))`.
  *

@@ -7,8 +7,10 @@ import {
   type HostJwtClaims,
   looksLikeJwt,
   readJwtAuthConfigCached,
+  type SessionJwtClaims,
   selectHostCredential,
   verifyHostJwt,
+  verifySessionJwt,
 } from "./jwt-auth.js";
 import { createLogger, type Logger } from "./logging.js";
 import {
@@ -386,34 +388,87 @@ export default {
       return auth.response;
     }
 
+    const jwtStatus = readJwtAuthConfigCached(env);
+    const listenerHeader = request.headers.get("x-tokimeki-listener");
+    if (listenerHeader !== null && listenerHeader !== "1") {
+      logger.warn("invalid_listener_header", { sessionId });
+      return jsonResponse(400, { ok: false, error: "invalid_role" });
+    }
+    const wantsListener = listenerHeader === "1";
+
+    // A three-segment value in X-Tokimeki-Session is a TokiAPI Session JWT
+    // whenever JWT mode is not disabled. It is a viewer/listener credential
+    // only: it must never authenticate a host, and a broken JWT configuration
+    // fails closed instead of silently treating the value as an opaque token.
+    let sessionJwtClaims: SessionJwtClaims | null = null;
+    if (jwtStatus.status !== "disabled" && looksLikeJwt(presentedSession)) {
+      if (jwtStatus.status === "invalid") {
+        logger.warn("session_jwt_auth_failed", { sessionId, reason: "jwt_config_invalid" });
+        return jsonResponse(401, { ok: false, error: "unauthorized" });
+      }
+      if (auth.outcome === "host") {
+        // A Session JWT is never a host credential.
+        logger.warn("session_jwt_used_as_host", { sessionId });
+        return jsonResponse(401, { ok: false, error: "unauthorized" });
+      }
+      const verification = await verifySessionJwt(presentedSession, jwtStatus.config, {
+        fetchImpl: fetch,
+      });
+      if (!verification.ok) {
+        if (verification.reason === "jwks_unavailable") {
+          logger.warn("session_jwt_auth_failed", {
+            sessionId,
+            reason: verification.reason,
+          });
+          return jsonResponse(503, { ok: false, error: "jwks_unavailable" });
+        }
+        logger.warn("session_jwt_auth_failed", { sessionId, reason: verification.reason });
+        return jsonResponse(401, { ok: false, error: "unauthorized" });
+      }
+      if (verification.claims.session !== sessionId) {
+        logger.warn("session_jwt_auth_failed", { sessionId, reason: "session_mismatch" });
+        return jsonResponse(401, { ok: false, error: "unauthorized" });
+      }
+      const scopes = verification.claims.scopes;
+      if (wantsListener) {
+        if (!scopes.includes("listen")) {
+          logger.warn("session_jwt_auth_failed", { sessionId, reason: "listen_scope_missing" });
+          return jsonResponse(401, { ok: false, error: "unauthorized" });
+        }
+      } else if (!scopes.includes("attach")) {
+        logger.warn("session_jwt_auth_failed", { sessionId, reason: "attach_scope_missing" });
+        return jsonResponse(401, { ok: false, error: "unauthorized" });
+      }
+      sessionJwtClaims = verification.claims;
+    }
+
     // The CLI marks an explicit read-only listener connection. The header is
     // internal: it never reaches the DO, and a host credential always wins so
     // a host cannot accidentally be downgraded to listener.
     let role: "host" | "viewer" | "listener" = "viewer";
     if (auth.outcome === "host") {
       role = "host";
-    } else {
-      const listenerHeader = request.headers.get("x-tokimeki-listener");
-      if (listenerHeader !== null) {
-        if (listenerHeader !== "1") {
-          logger.warn("invalid_listener_header", { sessionId });
-          return jsonResponse(400, { ok: false, error: "invalid_role" });
-        }
-        role = "listener";
-      }
+    } else if (wantsListener) {
+      role = "listener";
     }
     const hostNamespace = auth.outcome === "host" ? auth.auth.hostNamespace : null;
 
-    const jwtStatus = readJwtAuthConfigCached(env);
     const headers = new Headers(request.headers);
+    // A viewer/listener passcode is the one client-supplied security value the
+    // DO needs; copy it into a trusted header after stripping the client one.
+    const presentedPasscode = request.headers.get("x-tokimeki-passcode");
     // Auth/internal headers are deleted before forwarding: the namespace is
     // derived from the verified credential only, and a client-supplied value
     // is never trusted, even for root hosts.
     headers.delete("x-tokimeki-token");
+    headers.delete("x-tokimeki-passcode");
     // The pre-rename host header is not a credential; strip it defensively.
     headers.delete("x-tokimeki-master");
     headers.delete("x-tokimeki-listener");
     headers.delete("x-tokimeki-namespace");
+    // The DO only trusts these two after the Worker verified a Session JWT.
+    headers.delete("x-tokimeki-session-claim");
+    headers.delete("x-tokimeki-session-scope");
     // Authorization is only ever relevant to the JWT path, and the DO never
     // reads it. In disabled JWT mode it is left untouched (v1.1 behavior).
     if (jwtStatus.status !== "disabled") {
@@ -422,6 +477,14 @@ export default {
     headers.set("x-tokimeki-role", role);
     if (role === "host" && hostNamespace !== null) {
       headers.set("x-tokimeki-namespace", hostNamespace);
+    }
+    if (sessionJwtClaims !== null) {
+      headers.set("x-tokimeki-namespace", sessionJwtClaims.namespace);
+      headers.set("x-tokimeki-session-claim", sessionJwtClaims.session);
+      headers.set("x-tokimeki-session-scope", wantsListener ? "listen" : "attach");
+    }
+    if (role !== "host" && presentedPasscode !== null && presentedPasscode.length > 0) {
+      headers.set("x-tokimeki-passcode", presentedPasscode);
     }
 
     const forwarded = new Request(request, { headers });

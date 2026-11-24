@@ -15,6 +15,12 @@
     // Realtime TURN verification path keeps TOKIMEKI_TURN_KEY_ID (an identifier;
     // the API token is a Worker secret) but is inactive while provider=coturn.
     // Set provider to "cloudflare" to re-enable that path.
+    // TokiAPI production Host/Session JWT verification (non-secret). The
+    // matching private JWK is a TokiAPI Worker secret; the relay only fetches
+    // the public JWKS. Keep issuer/audience aligned with TokiAPI.
+    "TOKIMEKI_JWT_JWKS_URL": "https://tokiapi.app/api/tokimeki/jwks.json",
+    "TOKIMEKI_JWT_ISSUER": "https://tokiapi.app",
+    "TOKIMEKI_JWT_AUDIENCE": "tokimeki-relay",
     "TOKIMEKI_TURN_PROVIDER": "coturn",
     "TOKIMEKI_TURN_KEY_ID": "56cd4b921b7cc7b11dbcd7cdb2459053",
     // JSON array or legacy comma-separated string. Every entry shares

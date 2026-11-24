@@ -46,6 +46,22 @@ export interface RelayClientOptions {
   /** User-Agent-like identity sent in `hello.client`. */
   readonly client?: ClientDescriptor;
   readonly capabilities: Capabilities;
+  /**
+   * Host-only PBKDF2 verifier (v1.2-D). The plaintext passcode never travels
+   * in the hello; only the derived verifier does.
+   */
+  readonly passcodeVerifier?: {
+    readonly v: 1;
+    readonly kdf: "pbkdf2-sha256";
+    readonly salt: string;
+    readonly iterations: number;
+    readonly hash: string;
+  };
+  /**
+   * Host-only fail-closed guard: refuse to stay connected when the host sent a
+   * verifier but the relay's welcome did not advertise sessionSecurity.passcode.
+   */
+  readonly requireSessionSecurityPasscode?: boolean;
   readonly logger: Logger;
 }
 
@@ -327,6 +343,9 @@ export class RelayClient {
       protocolVersion: PROTOCOL_VERSION,
       ...(options.client === undefined ? {} : { client: options.client }),
       capabilities: options.capabilities,
+      ...(options.role === "host" && options.passcodeVerifier !== undefined
+        ? { passcode: options.passcodeVerifier }
+        : {}),
       ...(options.cols === undefined ? {} : { cols: options.cols }),
       ...(options.rows === undefined ? {} : { rows: options.rows }),
     };
@@ -358,6 +377,16 @@ export class RelayClient {
         this.#handleFatal(
           "invalid_session",
           `relay welcomed session ${message.session} but ${this.#options.session} was requested`,
+        );
+        return;
+      }
+      if (
+        this.#options.requireSessionSecurityPasscode === true &&
+        message.capabilities?.sessionSecurity?.passcode !== 1
+      ) {
+        this.#handleFatal(
+          "not_implemented",
+          "relay does not support session passcode; refusing to connect without it",
         );
         return;
       }
@@ -404,6 +433,10 @@ export class RelayClient {
       case "session_full":
       case "invalid_client_id":
       case "duplicate_client_id":
+      case "passcode_required":
+      case "passcode_invalid":
+      case "passcode_locked":
+      case "passcode_mismatch":
         this.#handleFatal(message.code, message.message);
         return;
       case "host_offline":

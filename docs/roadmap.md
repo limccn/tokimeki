@@ -101,28 +101,27 @@ mDNS/peer fan-out 设计评估（fan-out 不实现、默认关闭）。至此 F0
 wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/<session>`
 斜杠路径。
 
-## v1.2（分阶段；E 当前，A–D 暂停）
+## v1.2（A–E 已交付，待发布）
 
-状态（2026-11-19）：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与
-**五个**子任务已创建。
+状态（2026-11-20）：父任务 `.trellis/tasks/11-18-v1-2-multi-namespace-web` 与
+五个子任务均已完成，代码在本地 `develop`（**未 push、未发布**）。
 
-- **E `11-19-v1-2-cli-tokiapi-host-jwt`**：当前权威切片，代码已实现（relay
-  Host JWT 最小验签 + CLI `TOKIMEKI_TOKEN`/只读 config.json），单测与 Worker
-  集成测试通过；2026-11-19 已轮换 namespace token 并部署生产
-  （`5cda681f`，no-JWT），生产 no-JWT live e2e（基础/secret 清洗/listener）
-  通过；待合并，真实 TokiAPI↔relay live e2e 仍 **pending**（需已部署 JWKS 的
-  relay 与真实 Host JWT）。
-  TokiAPI Host JWT/JWKS 已落地；E 负责 CLI + relay 最小 Host JWT 验签。
-- **A–D**（namespace-auth / cli-ux / web-ui / passcode）：**in_progress**；
-  PRD/design/implement 已按 E 的 Host JWT 模型重写，代码尚未开始。
-  A=Session JWT viewer/listener 验签；B=TokiAPI session 创建/Session JWT/
-  invite v2/offline fallback；C=Session JWT/Web viewer；D=可选 passcode。
-- TokiAPI Session JWT、session 创建、invite v2、Web viewer、passcode 仍需落地；
-  A–D 已恢复规划/实现准备。v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
-- **2026-11-19 审查结论**：E 合并/部署前必须确认 TokiAPI 5 位 namespace 唯一性、
-  生产 `TOKIMEKI_NAMESPACE_TOKENS` 轮换/分发 preflight，并更新过期的
-  `docs/relay-exposure-policy.md`；A–D 已补充 `looksLikeJwt`、legacy NULL、
-  token 类型判定、Web `web` 校验/TURN 剥离、passcode secret 清单等安全契约。
+- **E `11-19-v1-2-cli-tokiapi-host-jwt`**：Host JWT 最小验签 + CLI
+  `TOKIMEKI_TOKEN`/只读 config.json；已合入 `develop`。生产此前以 no-JWT
+  模式部署并完成 live e2e；JWT 生产部署仍待用户决定。
+- **A `11-18-v1-2-namespace-auth`**：Session JWT viewer/listener 验签
+  （`token_use=session`、attach/listen、session=路径、namespace 前缀、
+  DO hash bypass + 复核；legacy NULL 拒绝）。
+- **B `11-18-v1-2-cli-ux`**：按 TokiAPI `invites` 契约实现（**无**
+  `POST /api/tokimeki/sessions`）；CLI 接受 Session JWT（不解析）、
+  viewer config v2、`TOKIMEKI_PASSCODE` header、显式预置 env 离线路径。
+- **C `11-18-v1-2-web-ui`**：`docs/web-viewer.md` + 跨仓 e2e；Web viewer、
+  Session JWT 签发与 WS 代理在 TokiAPI 仓库实现。
+- **D `11-18-v1-2-passcode`**：PBKDF2 verifier、`X-Tokimeki-Passcode`、
+  5 次失败/30s 锁定、welcome capability、CLI/Web passcode 门禁。
+- TokiAPI 三个 Tokimeki 任务（master-token / share-link-attach /
+  getting-started）已完成；本地跨仓 e2e（普通 + passcode）通过。
+- v1.2 不阻塞 v2.0；v2.0 弱网 A/B 验证仍押后。
 
 ### E 已确认的凭证/路由
 
@@ -142,16 +141,18 @@ wire 统一使用 `<namespace>.<slug>`（点号），不引入 `/ws/<namespace>/
   CLI/relay 必须成对升级；生产部署前必须轮换/分发 namespace token，或清空
   secret 保持 fallback 模式，否则 host 认证锁死。
 
-### A–D（in_progress，代码未开始）
+### A–D 交付要点
 
-- A `11-18-v1-2-namespace-auth`：Session JWT viewer/listener 验签
-  （`X-Tokimeki-Session` 三段式、`token_use=session`、`attach`/`listen`、
-  `session`=路径、namespace 前缀、严格 `iss/aud/exp/nbf`；DO hash bypass；
-  listener 仍需 `X-Tokimeki-Listener: 1`；Session JWT 不作 host；无 invite）。
-- B `11-18-v1-2-cli-ux`：TokiAPI session 创建、Session JWT、invite v2、
-  offline fallback。
-- C `11-18-v1-2-web-ui`：TokiAPI Session JWT 签发、WS 代理、xterm.js viewer。
-- D `11-18-v1-2-passcode`：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`）。
+- A：`X-Tokimeki-Session` 三段式在 JWT 模式按 `token_use=session` 验签；
+  `attach`/`listen` scope、`session`=路径、namespace 前缀；DO hash bypass
+  但复核 session/namespace/scope；Session JWT 不作 host；legacy NULL 拒绝。
+- B：CLI 不解析 Session JWT；viewer config v2；`TOKIMEKI_PASSCODE` 发送
+  `X-Tokimeki-Passcode`；离线路径 = 显式预置 `TOKIMEKI_SESSION` +
+  `TOKIMEKI_SESSION_TOKEN`。
+- C：TokiAPI 负责 Session JWT 签发、invite、WS 代理与 xterm.js viewer；
+  tokimeki 提供 `docs/web-viewer.md` 与 e2e harness。
+- D：可选 session passcode（PBKDF2 + `X-Tokimeki-Passcode`），与 6–8 位
+  TokiAPI 会话 token 是两套机制。
 
 ### 边界
 

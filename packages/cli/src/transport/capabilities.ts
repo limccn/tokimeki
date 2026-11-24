@@ -25,6 +25,8 @@ export interface CapabilityOptions {
   readonly tunnelKeyMode?: TunnelKeyMode;
   /** Fixed-grid/viewport/log-panel rendering capabilities. */
   readonly display?: DisplayCapabilityOptions;
+  /** v1.2: advertise PBKDF2 session-passcode support. */
+  readonly sessionSecurity?: boolean;
 }
 
 /**
@@ -85,5 +87,6 @@ export function buildCapabilities(options: CapabilityOptions): Capabilities {
         }),
     ...(tunnelKeyMode === undefined ? {} : { tunnel: buildTunnelCapability(tunnelKeyMode) }),
     ...(options.listener === true ? { listener: { modes: ["snapshot-only"] } } : {}),
+    ...(options.sessionSecurity === true ? { sessionSecurity: { passcode: 1 } } : {}),
   };
 }

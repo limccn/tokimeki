@@ -26,7 +26,8 @@
 > 基础 host/viewer/重连/Ctrl-C；host secret 不进入 hosted PTY；只读
 > listener。`/healthz` 正常，`/auth/whoami` 返回
 > `authMode=namespace`/`namespace=e2e`，TURN provider 为 coturn。真实
-> TokiAPI Host JWT↔relay live e2e 仍 pending（生产未配置 JWKS/issuer）。
+> TokiAPI Host/Session JWT↔relay 的**本地**跨仓 e2e 已通过（含 Web 代理与
+> passcode）；生产仍未配置 JWKS/issuer，生产 JWT 部署联调仍 pending。
 >
 > 历史（2026-11-16）：v1 生产版本 `1104916c-f188-4cc5-8df6-e34ca557ffae`，
 > 含 v1.1 F2 只读 listener 角色；上一版本
@@ -116,6 +117,11 @@ Host 认证（v1.2）：
   且在转发 DO 前删除该头；未配置 JWT 时 `Authorization` 不解析、不剥离。
   relay 只做边缘离线验签（JWKS 内存缓存 + 未知 kid 30 秒限流刷新），不逐
   连接回调 TokiAPI；JWKS 不可达且无缓存返回 503 `jwks_unavailable`。
+  同一 JWT 模式还验 **Session JWT**（`X-Tokimeki-Session`，`token_use=session`、
+  `attach`/`listen` scope、session=路径），并接受可选
+  `X-Tokimeki-Passcode`；Session JWT 永远不是 host 凭证。
+  `TOKIMEKI_JWT_ALLOW_HTTP=1` 只用于本地 loopback 跨仓 e2e（允许
+  `http://localhost` JWKS），**生产禁止**。
 - 部署前检查（生产 preflight，**重要**）：2026-11-19 已完成一次轮换——
   `TOKIMEKI_NAMESPACE_TOKENS` 现为已知的 `e2e` namespace token（值仅保存在
   部署者的 0600 文件中，不写入仓库）。以后每次轮换仍须先更新/分发
@@ -447,9 +453,10 @@ HTTP 200。`/auth/whoami` 对缺失/错误的凭证返回 401，JWT 模式下 JW
   迁移完成后应移除。
 - 2026-11-19 生产 no-JWT live e2e（`E2E_P2P_MODE=off`，namespace `e2e`）
   三组通过：基础 host/viewer/重连/Ctrl-C、host secret 不进 PTY、只读
-  listener；`/auth/whoami` 返回 `authMode=namespace`。跨仓库 TokiAPI↔relay 的
-  live e2e（真实 Host JWT + 已配置 JWKS 的 relay）仍为 **pending**，不在本次
-  验收内。
+  listener；`/auth/whoami` 返回 `authMode=namespace`。2026-11-20 本地跨仓
+  e2e（`scripts/e2e/v1.2-cross-repo.mjs` + `v1.2-passcode-e2e.mjs`）通过；
+  生产 JWT 部署（真实 Host JWT + 已配置 JWKS 的 relay）仍为 **pending**，
+  不在本次验收内。
 - 2026-11-16 的发布为纯代码部署（`npm run deploy:prod`），**未轮换**
   `TOKIMEKI_MASTER_TOKEN`；生产 token 继续保存在仓库外受控位置，不写入仓库、日志或
   命令历史。

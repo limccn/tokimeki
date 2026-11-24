@@ -179,6 +179,7 @@ class AttachSession {
       url: this.#config.websocketUrl,
       headers: {
         "X-Tokimeki-Session": this.#config.sessionToken,
+        ...(this.#config.passcode === null ? {} : { "X-Tokimeki-Passcode": this.#config.passcode }),
         ...(this.#listener ? { "X-Tokimeki-Listener": "1" } : {}),
       },
       role: this.#config.role,
@@ -192,6 +193,7 @@ class AttachSession {
       capabilities: buildCapabilities({
         p2p: this.#config.p2p === "auto" && !this.#listener,
         listener: this.#listener,
+        sessionSecurity: this.#config.passcode !== null,
         ...(this.#config.tunnel === "auto" && !this.#listener
           ? { tunnelKeyMode: this.#config.tunnelKeyMode }
           : {}),

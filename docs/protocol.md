@@ -113,7 +113,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 
 | 消息 | 方向 | 必填字段 | 可选/默认字段 |
 |---|---|---|---|
-| `hello` | client → DO | `role`, `session`, `clientId` | `protocolVersion`（默认 1）、`client`、`capabilities`（默认 `{}`）、`cols`, `rows` |
+| `hello` | client → DO | `role`, `session`, `clientId` | `protocolVersion`（默认 1）、`client`、`capabilities`（默认 `{}`）、`cols`, `rows`、`passcode`（v1.2 host verifier） |
 | `welcome` | DO → client | `session`, `hostOnline`, `iceProvider`, `sessionTtlSeconds` | `protocolVersion`（默认 1）、`clients`（默认 `[]`）、`iceServers`（默认 `[]`）、`iceExpiresAt`、`transportPolicy`（默认 `all`）、`capabilities` |
 | `ice-refresh` | host/viewer → DO | 无 | `provider` |
 | `ice` | DO → client | `iceServers`, `iceProvider` | `iceExpiresAt` |
@@ -175,6 +175,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `keyMode`, `maxFrameSize` | v1.1 F1 使用 `version:1`、`arq:"selective-repeat"`、`crypto:"aes-256-gcm"`、`keyMode:"session-token"\|"shared-secret"`、`maxFrameSize:16339`；v1.1 F1.1 的 `fec:["none","xor"]`（XOR 单丢包 parity） |
 | `listener` | `modes: string[]` | v1.1 F2 使用 `snapshot-only`；`safe-boundary` 仍预留 |
 | `peerRelay` | `version`, `roles: string[]` | v1.1 预留 |
+| `sessionSecurity` | `passcode?: number` | v1.2-D：relay 在 `welcome` 广告 `passcode:1`；host 发送 verifier 前必须看到该字段 |
 
 所有 capability 的已知字段都是可选的，未知字段/未知值不得导致连接失败。v1 relay 不协商未知 capability，也不得据此改变行为。
 
@@ -207,7 +208,7 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
   "connectedAt": 1760000000000,
   "lastSeenAt": 1760000000000,
   "transport": { "mode": "p2p-direct", "state": "ready", "via": "host" },
-  "client": { "name": "tokimeki-cli", "version": "0.1.2", "kind": "cli" },
+  "client": { "name": "tokimeki-cli", "version": "0.1.4", "kind": "cli" },
   "capabilities": { "display": { "modes": ["viewport"] } }
 }
 ```
@@ -247,8 +248,8 @@ F2 的 listener 只声明 `transports.modes: ["relay"]` 与
 |---|---|
 | host | `wss://<relay>/ws/<session>`，`X-Tokimeki-Token: <Host JWT / namespace token / 单人回退 token>`，`X-Tokimeki-Session: <session token>` |
 | host（web/代理，JWT 模式） | 同上，但主头缺失/为空时可携带 `Authorization: Bearer <Host JWT>` |
-| viewer | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>` |
-| listener（v1.1） | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`，`X-Tokimeki-Listener: 1` |
+| viewer | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <opaque session token \| Session JWT>`；可选 `X-Tokimeki-Passcode: <passcode>` |
+| listener（v1.1） | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <opaque session token \| Session JWT>`，`X-Tokimeki-Listener: 1`；可选 `X-Tokimeki-Passcode` |
 | observer/agent | `wss://<relay>/ws/<session>`，`X-Tokimeki-Session: <session token>`（DO 支持，Worker 入口保留） |
 
 角色不放在 URL 中：Worker 依据认证头设置内部角色，并由 `hello.role` 与认证角色交叉校验。URL 只承载公开的会话名。v1.2 Worker 分配 `host` / `viewer` /
@@ -276,6 +277,36 @@ host 凭证在 `X-Tokimeki-Token` 内按值形态判定（顺序固定）：
 非 disabled 模式下 `Authorization` 在转发 DO 前删除，`disabled` 模式下不解析、
 不剥离。Bearer 永远只承载 Host JWT，不作为回退或 namespace token 的载体。
 CLI 只发送 `X-Tokimeki-Token`，从不发送 `Authorization`。
+
+### 5.1.1 Session JWT（v1.2-A）
+
+JWT 模式非 disabled 时，`X-Tokimeki-Session` 的三段式值按 **Session JWT**
+验签（ES256、同一 JWKS）而不是 opaque token：
+
+- `token_use="session"`；`scope` 是空格分隔字符串，必须包含 `attach`
+  （viewer）或 `listen`（listener），不得包含 `host`；`web` 允许但 relay
+  不据此改角色。
+- `session` claim 必须等于 URL session（`<namespace>.<slug>`，≤64），且
+  `namespace` 前缀匹配。
+- 验签通过后 Worker 注入内部 `x-tokimeki-session-claim` /
+  `x-tokimeki-session-scope`；SessionDO 复核 session/namespace/scope 后
+  **跳过 `host_token_hash`**。legacy `namespace_id=NULL` 会话拒绝 Session
+  JWT。listener 仍需 `X-Tokimeki-Listener: 1`。
+- Session JWT 永远不是 host 凭证；与 `X-Tokimeki-Token` 同时出现且解析为
+  host 时返回 401。JWT 关闭时三段式 session 值按 opaque token 处理。
+
+### 5.1.2 Session passcode（v1.2-D）
+
+- Host 在 `hello.passcode` 中发送 `{v:1,kdf:"pbkdf2-sha256",salt,iterations,hash}`（passcode 限制为 6..128 个可见 ASCII 字符，排除 `$`/`%`/`!`/`&`/空白/引号，避免 header 与 shell 解析问题）
+  （100k iterations、16-byte salt、32-byte hash；relay 接受 10k..200k）。
+  明文 passcode 不进入 hello/URL/日志。
+- viewer/listener 通过 `X-Tokimeki-Passcode` 提交；SessionDO 用存储的
+  salt/iterations 派生并常量时间比较。缺失 `passcode_required`、错误
+  `passcode_invalid`、5 次失败锁定 30s `passcode_locked`、host 验证器不一致
+  `passcode_mismatch`。
+- `welcome.capabilities.sessionSecurity.passcode=1` 广告支持；host 发送
+  verifier 但 welcome 未广告时 CLI fail-closed。未设置 passcode 的会话行为
+  不变。
 
 Worker 删除客户端自带的 `x-tokimeki-token` / `x-tokimeki-master` /
 `x-tokimeki-listener` / `x-tokimeki-namespace`（以及非 disabled 模式下的
@@ -567,6 +598,10 @@ v2h  = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
 | `slow_consumer` | 客户端长期不确认，触发背压上限 |
 | `transport_failed` | P2P/TURN 传输失败 |
 | `internal` | 未分类内部错误 |
+| `passcode_required` | 会话要求 passcode，但 viewer/listener 未提交 |
+| `passcode_invalid` | passcode 校验失败 |
+| `passcode_locked` | 连续失败触发 30s 锁定 |
+| `passcode_mismatch` | host 重连提交的 verifier 与已存储值不一致 |
 | `invalid_request` | Agent 请求非法（预留） |
 | `not_found` | Agent 资源不存在（预留） |
 | `lease_expired` | Agent 租约过期（预留） |

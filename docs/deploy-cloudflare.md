@@ -112,6 +112,12 @@ order:
 | `TOKIMEKI_JWT_AUDIENCE` | var | no | Expected `aud` claim; default `tokimeki-relay`. |
 | `TOKIMEKI_JWT_JWKS_TTL_SECONDS` | var | no | JWKS cache lifetime; default `3600`, clamped to 60–86400. Per-isolate memory cache with in-flight dedupe; an unknown `kid` triggers one refresh per 30 s. |
 | `TOKIMEKI_JWT_CLOCK_SKEW_SECONDS` | var | no | Allowed clock skew for `iat`/`nbf`/`exp`; default `60`, clamped to 0–300. |
+| `TOKIMEKI_JWT_ALLOW_HTTP` | var | no | **Test-only.** `1` allows an `http://` JWKS URL on `localhost`/`127.0.0.1`/`[::1]` for the local cross-repo e2e. Never set it in production. |
+
+JWT mode also verifies **Session JWTs** in `X-Tokimeki-Session`
+(`token_use=session`, `attach`/`listen` scope, `session` claim equal to the
+path) and accepts the optional `X-Tokimeki-Passcode` header. Session JWTs are
+never host credentials. See `docs/protocol.md` §5.1.1–5.1.2.
 
 Only `alg=ES256` tokens with `token_use=host`, a `scope` containing `host`, a
 valid `namespace` claim, and a matching `<namespace>.<slug>` session are

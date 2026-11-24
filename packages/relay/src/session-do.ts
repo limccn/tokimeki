@@ -28,7 +28,13 @@ import {
   u64StringToNumber,
 } from "@limccn/tokimeki-protocol";
 
-import { constantTimeEqualHex, sha256Hex } from "./crypto-utils.js";
+import {
+  base64UrlToBytes,
+  bytesToBase64Url,
+  constantTimeEqual,
+  constantTimeEqualHex,
+  sha256Hex,
+} from "./crypto-utils.js";
 import {
   iceTransportPolicy,
   maxClientsPerSession,
@@ -44,12 +50,16 @@ import { createLogger, type Logger } from "./logging.js";
 import { deriveNamespaceFromSessionId, isNamespaceSessionId } from "./namespace-tokens.js";
 import {
   clearHostExit,
+  clearPasscodeFailures,
   ensureRelaySchema,
   insertSessionMetadata,
   loadHostExit,
   loadSessionMetadata,
+  loadSessionPasscode,
   nextAgentLeaseExpiry,
+  recordPasscodeFailure,
   saveHostExit,
+  saveSessionPasscode,
   setAbsoluteDeadline,
   setHostOfflineDeadline,
   setRelayBytes,
@@ -88,7 +98,44 @@ const RELAY_CAPABILITIES = {
   transports: { modes: ["relay", "p2p-direct", "p2p-turn"] },
   snapshot: { formats: ["xterm-serialize"], maxBytes: 262_144 },
   listener: { modes: ["snapshot-only"] },
+  sessionSecurity: { passcode: 1 },
 } as const;
+
+/** Viewer/listener passcode policy (v1.2-D). */
+const MAX_PASSCODE_FAILURES = 5;
+const PASSCODE_LOCKOUT_MS = 30_000;
+const MIN_PASSCODE_INPUT_LENGTH = 6;
+const MAX_PASSCODE_INPUT_LENGTH = 128;
+const PASSCODE_DERIVED_BYTES = 32;
+
+/** PBKDF2-SHA256 verifier hash, base64url encoded; `null` on bad salt/passcode. */
+async function derivePasscodeHash(
+  passcode: string,
+  saltBase64Url: string,
+  iterations: number,
+): Promise<string | null> {
+  const salt = base64UrlToBytes(saltBase64Url);
+  if (salt === null) {
+    return null;
+  }
+  try {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(passcode),
+      "PBKDF2",
+      false,
+      ["deriveBits"],
+    );
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+      key,
+      PASSCODE_DERIVED_BYTES * 8,
+    );
+    return bytesToBase64Url(new Uint8Array(bits));
+  } catch {
+    return null;
+  }
+}
 
 const SERVER_OWNED_CONTROL_TYPES = new Set<string>([
   "welcome",
@@ -112,10 +159,20 @@ interface PendingAttachment {
   readonly tokenHash: string;
   /**
    * Internal namespace from the Worker's `x-tokimeki-namespace` header:
-   * `"*"` for a root-master host, the namespace name for a namespace token,
-   * `null` for viewer/listener or a direct DO connection.
+   * `"*"` for a root-master host, the namespace name for a namespace token or
+   * a verified Session JWT, `null` for an opaque viewer/listener or a direct
+   * DO connection.
    */
   readonly namespaceId: string | null;
+  /**
+   * Verified Session JWT session claim and role scope, injected only by the
+   * Worker after `verifySessionJwt`. Their presence makes hello skip the
+   * opaque host-token comparison, but never the session/namespace checks.
+   */
+  readonly sessionClaim: string | null;
+  readonly sessionScope: "attach" | "listen" | null;
+  /** Viewer/listener passcode from the Worker-trusted header (until hello). */
+  readonly passcode: string | null;
 }
 
 interface PendingAck {
@@ -235,6 +292,11 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         tokenHash: raw.tokenHash,
         // Missing on attachments persisted before namespace support.
         namespaceId: typeof raw.namespaceId === "string" ? raw.namespaceId : null,
+        // Missing unless the Worker verified a Session JWT for this socket.
+        sessionClaim: typeof raw.sessionClaim === "string" ? raw.sessionClaim : null,
+        sessionScope:
+          raw.sessionScope === "attach" || raw.sessionScope === "listen" ? raw.sessionScope : null,
+        passcode: typeof raw.passcode === "string" ? raw.passcode : null,
       };
     }
     return null;
@@ -344,6 +406,12 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
   private readonly messageTimestamps: number[] = [];
   /** Last activity-driven idle alarm reschedule; throttled to avoid write amplification. */
   private lastIdleScheduleAt = 0;
+  /**
+   * Serializes passcode verification/updates. PBKDF2 awaits would otherwise
+   * let concurrent hellos read the same failure counter and overwrite each
+   * other, defeating the lockout.
+   */
+  #passcodeQueue: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
@@ -437,12 +505,23 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     }
 
     const tokenHash = await sha256Hex(token);
-    // The Worker strips any client-supplied namespace header and injects this
-    // one from the verified host credential. Viewers/listeners never carry it.
+    // The Worker strips any client-supplied namespace/claim headers and
+    // injects them only from a verified host credential or Session JWT.
     const namespaceHeader = request.headers.get("x-tokimeki-namespace");
     const namespaceId =
-      roleHeader === "host" && namespaceHeader !== null && namespaceHeader.length > 0
-        ? namespaceHeader
+      namespaceHeader !== null && namespaceHeader.length > 0 ? namespaceHeader : null;
+    const sessionClaimHeader = request.headers.get("x-tokimeki-session-claim");
+    const sessionClaim =
+      sessionClaimHeader !== null && sessionClaimHeader.length > 0 ? sessionClaimHeader : null;
+    const sessionScopeHeader = request.headers.get("x-tokimeki-session-scope");
+    const sessionScope =
+      sessionScopeHeader === "attach" || sessionScopeHeader === "listen"
+        ? sessionScopeHeader
+        : null;
+    const passcodeHeader = request.headers.get("x-tokimeki-passcode");
+    const passcode =
+      roleHeader !== "host" && passcodeHeader !== null && passcodeHeader.length > 0
+        ? passcodeHeader
         : null;
 
     const pair = new WebSocketPair();
@@ -457,6 +536,9 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       deadline: now + HELLO_TIMEOUT_MS,
       tokenHash,
       namespaceId,
+      sessionClaim,
+      sessionScope,
+      passcode,
     });
     await this.rescheduleAlarm();
     this.logger.info("connection_opened", {
@@ -558,6 +640,70 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       return;
     }
 
+    // A verified Session JWT bypasses only the opaque host-token comparison.
+    // Session, namespace, and scope are re-checked here because the DO is the
+    // last line of defense for internal headers.
+    if (pending.sessionClaim !== null) {
+      if (role === "host") {
+        this.closeWithError(
+          ws,
+          "unauthorized",
+          "a session jwt is not a host credential",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+      if (
+        pending.namespaceId === null ||
+        pending.namespaceId === "*" ||
+        pending.sessionScope === null
+      ) {
+        this.closeWithError(
+          ws,
+          "unauthorized",
+          "session jwt is missing namespace or scope",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+      if (pending.sessionClaim !== hello.session) {
+        this.closeWithError(
+          ws,
+          "invalid_session",
+          "session jwt claim does not match this relay path",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+      if (!isNamespaceSessionId(hello.session, pending.namespaceId)) {
+        this.closeWithError(
+          ws,
+          "invalid_session",
+          "session does not belong to the session jwt namespace",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+      if (pending.sessionScope === "listen" && role !== "listener") {
+        this.closeWithError(
+          ws,
+          "invalid_role",
+          "listen scope requires the listener role",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+      if (pending.sessionScope === "attach" && role !== "viewer") {
+        this.closeWithError(
+          ws,
+          "invalid_role",
+          "attach scope requires the viewer role",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+    }
+
     // The effective namespace is derived only from the Worker-injected header:
     // `"*"` is the root master, a concrete name is a namespace token, and the
     // session id must carry the same `<namespace>.<slug>` prefix.
@@ -657,15 +803,30 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         );
         return;
       }
-      const tokenMatches = await constantTimeEqualHex(meta.hostTokenHash, pending.tokenHash);
-      if (!tokenMatches) {
-        this.closeWithError(
-          ws,
-          "unauthorized",
-          "session token does not match",
-          CLOSE_CODES.unauthorized,
-        );
-        return;
+      if (pending.sessionClaim !== null) {
+        // A Session JWT needs a namespace-scoped session row; legacy
+        // `namespace_id=NULL` sessions have no trustworthy namespace and must
+        // keep accepting only the opaque session token.
+        if (meta.namespaceId === null || meta.namespaceId !== pending.namespaceId) {
+          this.closeWithError(
+            ws,
+            "invalid_session",
+            "session jwt namespace does not match this session",
+            CLOSE_CODES.unauthorized,
+          );
+          return;
+        }
+      } else {
+        const tokenMatches = await constantTimeEqualHex(meta.hostTokenHash, pending.tokenHash);
+        if (!tokenMatches) {
+          this.closeWithError(
+            ws,
+            "unauthorized",
+            "session token does not match",
+            CLOSE_CODES.unauthorized,
+          );
+          return;
+        }
       }
       // Defense in depth: a session created under a namespace must only ever
       // accept connections on its own `<namespace>.<slug>` path.
@@ -683,7 +844,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     // The token check yields to the runtime. Re-read session state and recheck
     // duplicates/capacity synchronously before saving the attachment so two
     // concurrent hellos cannot both pass the pre-await checks (SEC-02).
-    const latestMeta = loadSessionMetadata(this.ctx.storage.sql);
+    let latestMeta = loadSessionMetadata(this.ctx.storage.sql);
     if (latestMeta !== null && meta !== null && latestMeta.hostTokenHash !== meta.hostTokenHash) {
       this.closeWithError(
         ws,
@@ -720,20 +881,65 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       await this.purgeSession("absolute_ttl");
       return;
     }
+    if (!(await this.serializePasscode(() => this.handlePasscode(ws, role, hello, pending, now)))) {
+      return;
+    }
+
+    // The passcode check awaits PBKDF2. Another host can create the session in
+    // that window, so re-read and re-run every host check against fresh state
+    // before deciding whether to insert. Otherwise a host credential holder
+    // without this session token could overwrite a brand-new session's hash,
+    // TTL, and quotas with `INSERT OR REPLACE`.
+    latestMeta = loadSessionMetadata(this.ctx.storage.sql);
+    if (latestMeta !== null && meta !== null && latestMeta.hostTokenHash !== meta.hostTokenHash) {
+      this.closeWithError(
+        ws,
+        "unauthorized",
+        "session token changed during hello",
+        CLOSE_CODES.unauthorized,
+      );
+      return;
+    }
+    if (role === "host" && meta === null && latestMeta !== null) {
+      const tokenMatches = await constantTimeEqualHex(latestMeta.hostTokenHash, pending.tokenHash);
+      if (!tokenMatches) {
+        this.closeWithError(
+          ws,
+          "unauthorized",
+          "session token does not match",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+    }
+    if (
+      latestMeta !== null &&
+      role === "host" &&
+      pending.namespaceId !== "*" &&
+      latestMeta.namespaceId !== pending.namespaceId
+    ) {
+      this.closeWithError(
+        ws,
+        "invalid_session",
+        "session namespace changed during hello",
+        CLOSE_CODES.unauthorized,
+      );
+      return;
+    }
+    if (
+      sessionMaxTtlSeconds(this.env) > 0 &&
+      latestMeta !== null &&
+      latestMeta.absoluteDeadline !== null &&
+      latestMeta.absoluteDeadline <= now
+    ) {
+      await this.purgeSession("absolute_ttl");
+      return;
+    }
+
     const latestExisting = this.findActive(hello.clientId);
     let replacedSocket: ActiveSocket | null = null;
 
     if (role === "host") {
-      if (meta === null && latestMeta !== null) {
-        // Another host created the session while this hello was awaiting.
-        this.closeWithError(
-          ws,
-          "duplicate_client_id",
-          "a host is already online for this session",
-          CLOSE_CODES.invalidMessage,
-        );
-        return;
-      }
       if (latestMeta !== null) {
         const onlineHost = this.findHost();
         if (onlineHost !== null && onlineHost.att.clientId !== hello.clientId) {
@@ -818,6 +1024,28 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           absoluteDeadline: maxTtl > 0 ? now + maxTtl * 1000 : null,
           relayBytes: 0,
         });
+        // `INSERT OR IGNORE`: if another first host won the race, verify the
+        // persisted hash before this socket becomes an active host.
+        const created = loadSessionMetadata(this.ctx.storage.sql);
+        if (created === null) {
+          this.closeWithError(
+            ws,
+            "internal",
+            "failed to create session metadata",
+            CLOSE_CODES.internalError,
+          );
+          return;
+        }
+        if (!(await constantTimeEqualHex(created.hostTokenHash, pending.tokenHash))) {
+          this.closeWithError(
+            ws,
+            "unauthorized",
+            "session token does not match",
+            CLOSE_CODES.unauthorized,
+          );
+          return;
+        }
+        latestMeta = created;
       } else if (replacedSocket !== null) {
         this.supersedeSocket(
           replacedSocket,
@@ -2100,6 +2328,149 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       // so a dropped scheduling attempt cannot expire an active session.
       void this.rescheduleAlarm().catch(() => undefined);
     }
+  }
+
+  /**
+   * Optional per-session passcode (v1.2-D).
+   *
+   * The host stores a PBKDF2 verifier in `hello.passcode` on the first hello;
+   * viewers/listeners submit the plaintext through the Worker-trusted
+   * `X-Tokimeki-Passcode` header (kept only in the pending attachment until
+   * hello). Five failures lock all viewer/listener verification for 30 s.
+   * No passcode, verifier, or hash is ever logged.
+   */
+  private async serializePasscode<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.#passcodeQueue;
+    let release!: () => void;
+    this.#passcodeQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  private async handlePasscode(
+    ws: WebSocket,
+    role: Role,
+    hello: HelloMessage,
+    pending: PendingAttachment,
+    now: number,
+  ): Promise<boolean> {
+    let stored: ReturnType<typeof loadSessionPasscode>;
+    try {
+      stored = loadSessionPasscode(this.ctx.storage.sql);
+    } catch {
+      this.closeWithError(
+        ws,
+        "internal",
+        "passcode store is unavailable",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
+    if (role === "host") {
+      const presented = hello.passcode;
+      if (presented === undefined) {
+        return true;
+      }
+      if (stored === null) {
+        saveSessionPasscode(
+          this.ctx.storage.sql,
+          this.sessionId,
+          {
+            kdf: presented.kdf,
+            salt: presented.salt,
+            iterations: presented.iterations,
+            hash: presented.hash,
+          },
+          now,
+        );
+        return true;
+      }
+      const sameParams =
+        stored.kdf === presented.kdf &&
+        stored.salt === presented.salt &&
+        stored.iterations === presented.iterations;
+      if (!sameParams || !(await constantTimeEqual(stored.hash, presented.hash))) {
+        this.closeWithError(
+          ws,
+          "passcode_mismatch",
+          "host passcode verifier does not match this session",
+          CLOSE_CODES.unauthorized,
+        );
+        return false;
+      }
+      return true;
+    }
+
+    if (stored === null) {
+      return true;
+    }
+    if (stored.lockedUntil !== null && stored.lockedUntil > now) {
+      this.closeWithError(
+        ws,
+        "passcode_locked",
+        "session passcode is locked; retry later",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
+    const presented = pending.passcode;
+    if (presented === null || presented.length === 0) {
+      this.closeWithError(
+        ws,
+        "passcode_required",
+        "this session requires a passcode",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
+    if (
+      presented.length < MIN_PASSCODE_INPUT_LENGTH ||
+      presented.length > MAX_PASSCODE_INPUT_LENGTH
+    ) {
+      this.closeWithError(
+        ws,
+        "passcode_invalid",
+        "session passcode is invalid",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
+    const derived = await derivePasscodeHash(presented, stored.salt, stored.iterations);
+    if (derived !== null && (await constantTimeEqual(derived, stored.hash))) {
+      clearPasscodeFailures(this.ctx.storage.sql, this.sessionId, now);
+      return true;
+    }
+    const failures = stored.failedAttempts + 1;
+    if (failures >= MAX_PASSCODE_FAILURES) {
+      recordPasscodeFailure(
+        this.ctx.storage.sql,
+        this.sessionId,
+        0,
+        now + PASSCODE_LOCKOUT_MS,
+        now,
+      );
+      this.closeWithError(
+        ws,
+        "passcode_locked",
+        "too many failed passcode attempts; retry later",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
+    recordPasscodeFailure(this.ctx.storage.sql, this.sessionId, failures, null, now);
+    this.closeWithError(
+      ws,
+      "passcode_invalid",
+      "session passcode is invalid",
+      CLOSE_CODES.unauthorized,
+    );
+    return false;
   }
 
   private saveAttachment(ws: WebSocket, attachment: SocketAttachment): void {
