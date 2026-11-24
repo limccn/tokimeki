@@ -103,9 +103,9 @@ export interface HostConfig extends CommonConfig {
   readonly windowSize: TerminalSize;
   /** Commands that opt into the fixed TUI window when `windowMode=tui`. */
   readonly windowTuiCommands: ReadonlySet<string>;
-  /** Debug log panel rows; 0 disables the panel. */
-  readonly logPanelRows: number;
-  /** Local key that reopens the viewer-config overlay. */
+  /** Debug log-ring capacity (corner log area / full-screen log view); 0 disables. */
+  readonly logViewRows: number;
+  /** Local key that opens the connection menu. */
   readonly inviteKey: InviteKey;
   readonly scrollbackLines: number;
   readonly snapshotMaxBytes: number;
@@ -118,8 +118,10 @@ export interface AttachConfig extends CommonConfig {
   /** `listener` is the v1.1 read-only snapshot-only mode (`attach --listen`). */
   readonly role: "viewer" | "listener";
   readonly sessionToken: string;
-  /** Debug log panel rows; 0 disables the panel. */
-  readonly logPanelRows: number;
+  /** Local key that opens the connection menu. */
+  readonly inviteKey: InviteKey;
+  /** Debug log-ring capacity (corner log area / full-screen log view); 0 disables. */
+  readonly logViewRows: number;
 }
 
 export interface DoctorConfig {
@@ -169,6 +171,9 @@ export const MAX_LISTENER_SNAPSHOT_MS = 60_000;
 export const DEFAULT_TERM = "xterm-256color";
 export const DEFAULT_COLORTERM = "truecolor";
 export const DEFAULT_WINDOW_SIZE: TerminalSize = { cols: 120, rows: 40 };
+export const DEFAULT_LOG_VIEW_ROWS = 200;
+export const MAX_LOG_VIEW_ROWS = 2000;
+/** @deprecated Use TOKIMEKI_LOG_VIEW_ROWS; kept as a compatibility fallback. */
 export const DEFAULT_LOG_PANEL_ROWS = 8;
 export const MAX_LOG_PANEL_ROWS = 200;
 
@@ -469,10 +474,31 @@ function parseWindowMode(env: NodeJS.ProcessEnv): WindowMode {
   return parseEnum("TOKIMEKI_WINDOW", optionalEnv(env, "TOKIMEKI_WINDOW"), WINDOW_MODES, "tui");
 }
 
-function parseLogPanelRows(env: NodeJS.ProcessEnv): number {
-  const raw = optionalEnv(env, "TOKIMEKI_LOG_PANEL_ROWS");
-  if (raw === undefined) return DEFAULT_LOG_PANEL_ROWS;
-  return parseInteger("TOKIMEKI_LOG_PANEL_ROWS", raw, { min: 0, max: MAX_LOG_PANEL_ROWS });
+/**
+ * Debug log-ring capacity.
+ *
+ * `TOKIMEKI_LOG_VIEW_ROWS` is the v1.4 key (default 200, max 2000, 0 disables).
+ * The retired `TOKIMEKI_LOG_PANEL_ROWS` is still parsed as a compatibility
+ * fallback when the new key is unset; it no longer affects layout.
+ */
+function parseLogViewRows(env: NodeJS.ProcessEnv, warnings: string[]): number {
+  const viewRaw = optionalEnv(env, "TOKIMEKI_LOG_VIEW_ROWS");
+  const panelRaw = optionalEnv(env, "TOKIMEKI_LOG_PANEL_ROWS");
+  if (viewRaw !== undefined) {
+    if (panelRaw !== undefined) {
+      warnings.push(
+        "TOKIMEKI_LOG_PANEL_ROWS is deprecated and ignored when TOKIMEKI_LOG_VIEW_ROWS is set",
+      );
+    }
+    return parseInteger("TOKIMEKI_LOG_VIEW_ROWS", viewRaw, { min: 0, max: MAX_LOG_VIEW_ROWS });
+  }
+  if (panelRaw !== undefined) {
+    warnings.push(
+      "TOKIMEKI_LOG_PANEL_ROWS is deprecated; using it as the log-view capacity (set TOKIMEKI_LOG_VIEW_ROWS)",
+    );
+    return parseInteger("TOKIMEKI_LOG_PANEL_ROWS", panelRaw, { min: 0, max: MAX_LOG_PANEL_ROWS });
+  }
+  return DEFAULT_LOG_VIEW_ROWS;
 }
 
 function parseLogLevel(env: NodeJS.ProcessEnv, warnings: string[]): LogLevel {
@@ -726,7 +752,7 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
     ptySize: parsePtySize(env),
     windowSize: parseWindowSize(env),
     windowTuiCommands: parseTuiCommandList(env.TOKIMEKI_WINDOW_TUI),
-    logPanelRows: parseLogPanelRows(env),
+    logViewRows: parseLogViewRows(env, common.warnings),
     inviteKey: parseEnum(
       "TOKIMEKI_INVITE_KEY",
       optionalEnv(env, "TOKIMEKI_INVITE_KEY"),
@@ -768,7 +794,13 @@ export function loadAttachConfig(
     ...common,
     role,
     sessionToken,
-    logPanelRows: parseLogPanelRows(env),
+    inviteKey: parseEnum(
+      "TOKIMEKI_INVITE_KEY",
+      optionalEnv(env, "TOKIMEKI_INVITE_KEY"),
+      INVITE_KEYS,
+      "f12",
+    ),
+    logViewRows: parseLogViewRows(env, common.warnings),
     secrets: [...common.secrets, sessionToken],
   };
 }

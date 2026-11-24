@@ -170,7 +170,8 @@ function attachConfig(
     secrets: [],
     role,
     sessionToken: "session-token-9876",
-    logPanelRows: 8,
+    inviteKey: "f12",
+    logViewRows: 8,
     ...overrides,
   };
 }

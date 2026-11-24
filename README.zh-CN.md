@@ -128,7 +128,7 @@ tokimeki attach
 
 ### v1.2：托管认证、分享链接与 Web 终端
 
-`0.1.4` 的 relay 支持：
+该 relay 支持：
 
 - **Host JWT**：`TOKIMEKI_TOKEN` + `TOKIMEKI_NAMESPACE`（由 TokiAPI 或任意
   ES256/JWKS 签发方提供）。relay 未启用 JWT 时，静态 namespace token 与
@@ -249,11 +249,11 @@ relay、ICE 凭据到期前自动刷新、TURN provider 失败后重试一次再
 
 ## 状态
 
-`0.1.4` — 当前发布版本。包含 v1.2 托管认证工作
+`0.1.5` — 当前发布版本。包含 v1.2 托管认证工作与 v1.4 CLI onboarding、ACP、F12 菜单/日志视图和 no-JWT 站点。
 （Host/Session JWT、passcode、分享链接与 Web 终端集成）。从
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装（同时镜像到 GitHub
 Packages，见 [docs/release.md](docs/release.md)），或查看
-[v0.1.4 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.4)。
+[v0.1.5 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.5)。
 P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1
 功能演进见 [CHANGELOG.md](CHANGELOG.md) 与 [`CLAUDE.md`](CLAUDE.md)。
 

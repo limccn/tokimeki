@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/protocol" },
     { "path": "./packages/relay" },
-    { "path": "./packages/cli" }
+    { "path": "./packages/cli" },
+    { "path": "./packages/onboarding-site" }
   ]
 }

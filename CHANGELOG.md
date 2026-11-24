@@ -6,6 +6,65 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-23
+
+v1.4 user onboarding: interactive/daemon modes, doctor-first host/attach
+wizards, TokiAPI anonymous provisioning, hosted config-file/share-URL entry,
+F12 connection menu, config/history persistence, ACP catalog, CLI UX, and the
+no-JWT static onboarding site.
+
+### Added
+
+- CLI modes: top-level `--interactive`/`--daemon`, `TOKIMEKI_MODE`, TTY
+  detection, non-TTY+interactive config error, and daemon events on stderr
+  (`tokimeki-event: ` + JSON schema v1: ready/status/error/report). Events are
+  independent of log level/muting; stdout stays terminal bytes/doctor report.
+- Doctor-first host/attach startup. Host wizard paths: existing token
+  (recommended `TOKIMEKI_TOKEN`; master deprecated alias), self-hosted guidance
+  (one-click Cloudflare Deploy Button + docs; never runs wrangler), and TokiAPI
+  anonymous host (`GET /api/config`, `POST /api/tokimeki/anon-host`; 24h
+  default, 429/503, invite URL memory-only). Attach wizard accepts invite
+  URL/code, viewer config JSON, history, or manual input, with a same-connection
+  pre-ready test and retry/re-enter.
+- `tokimeki --config <file>` / `TOKIMEKI_CONFIG_FILE` (v1/v2 envelope,
+  host-only, regular/no-symlink/≤64 KiB/0600, partial-file relay+credential
+  guard) and `tokimeki attach <share-url>` / `TOKIMEKI_ATTACH_URL`/`-`
+  (provider `api/config` + `attach/cli` exchange, wss/origin binding, 410/429/
+  503/passcodeRequired, Session JWT memory-only).
+- Explicit config/history persistence: wizard-only `writeUserConfig` (five-key
+  whitelist, 0600/atomic/no-follow/lock, JWT-shaped session token rejected) and
+  `~/.tokimeki/history.json` (20-entry LRU, no host tokens/Session JWTs);
+  `tokimeki history [list|remove|clear]`.
+- F12 connection menu replacing the invite-only overlay: host status/session/
+  token (masked, reveal/copy), viewer-config OSC 52 copy, anonymous invite URL
+  (memory only), viewer/listener reconnect/disconnect, log-view entry; PTY size
+  unchanged and keys never reach the PTY. F11 full-screen log view; wide-terminal
+  40x8 bottom-right debug log area with 120/118 hysteresis; `TOKIMEKI_LOG_VIEW_ROWS`
+  (default 200/max 2000/0 off); `TOKIMEKI_LOG_PANEL_ROWS` deprecated.
+- ACP catalog: claude/pi/codex/gemini/cursor/aider/opencode/goose/amp are the
+  default fixed-window/dynamic allow-list; `tokimeki acp list [--detect]`
+  (read-only PATH scan; never executes binaries) and `.com` suffix handling.
+- no-JWT onboarding site (`packages/onboarding-site`) served by the relay
+  through Workers Static Assets: same-origin `wss://` relay, host/attach
+  command generation, v1 config/viewer JSON downloads, CSP
+  `connect-src 'none'`, no storage/analytics/backend/JWT. Both Wrangler configs
+  add `assets` with `not_found_handling: "none"` so `/ws`, `/healthz`, and
+  `/auth` stay Worker routes.
+- Host TUI child environment scrub covers `TOKIMEKI_CONFIG_FILE`,
+  `TOKIMEKI_ATTACH_URL`, and `TOKIMEKI_PASSCODE`; daemon startup suppresses the
+  sessionToken-bearing banner.
+
+### Known limitations
+
+- Fixed-window live resize from the F12 menu is deferred to v1.8: v1 has no
+  wire message to update viewers' fixed-grid capabilities, so applying a new
+  PTY size would desync existing viewers. Non-fixed `latest`/`min`/`pinned`
+  policies support the resize editor.
+- TokiAPI anonymous host live verification relies on the user-confirmed
+  production functional tests (2026-11-23); local e2e uses a mock provider.
+- v1.7 per-IP rate limiting and v1.8 credential/session lifecycle (revocation,
+  rotation, stale config cleanup) remain unimplemented.
+
 ## [0.1.4] - 2026-11-21
 
 JWT/hosted-auth line, based on 0.1.3: Session JWT viewer/listener verification, share links/web viewer contract, optional passcode, and cross-repo e2e.

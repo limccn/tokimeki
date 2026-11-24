@@ -18,10 +18,10 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.4)
+## Release identity (0.1.5)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.4`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.4`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.5`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.5`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@limccn/tokimeki-relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
@@ -41,7 +41,8 @@ control. It is self-hostable on Cloudflare Workers + Durable Objects.
 ```text
 packages/protocol/   wire contract: constants, zod control messages, frames, u64, goldens
 packages/relay/      Worker + SessionDO: auth, routing, flow control, TURN issuance, storage
-packages/cli/        CLI: cli/config, host PTY, attach viewer, transport, terminal mirror
+packages/cli/        CLI: cli/config, onboarding wizards, host PTY, attach viewer, transport, terminal mirror
+packages/onboarding-site/  static no-JWT multi-namespace onboarding page (Workers Static Assets)
 scripts/e2e/         live e2e / cross-machine helpers
 scripts/perf/        local + cross-NAT performance harnesses (results gitignored)
 scripts/release/     version bump/check helper used by the release workflow
@@ -129,6 +130,11 @@ assets/              README icon
   `SNAPSHOT_TO` in v1.
 - SQLite schema in `storage.ts`; migrations in the Wrangler config
   (`new_sqlite_classes`). TURN cache is provider-keyed with expiry.
+- Static assets (v1.4): both Wrangler configs declare
+  `assets.directory` pointing at `packages/onboarding-site/dist` with
+  `not_found_handling: "none"`. Existing assets are served first; unmatched
+  paths (`/ws/*`, `/healthz`, `/auth/*`) reach the Worker. `npm run build:site`
+  must run before deploy/dry-run and in CI. No SPA fallback or `_redirects`.
 - TURN: `TOKIMEKI_TURN_PROVIDER=auto|coturn|cloudflare|none`; coturn REST
   (HMAC) preferred, then static TURN, then Cloudflare Realtime TURN, then
   STUN-only. The CLI (libjuice) uses TURN UDP; include a
@@ -138,12 +144,16 @@ assets/              README icon
 
 ## CLI notes
 
-- `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, `attach` (`--listen` for
-  read-only listener mode), `doctor`; all runtime config comes from env
-  (`.env.example` is the reference) merged with a read-only
-  `~/.tokimeki/config.json` (`config-file.ts`: env > `TOKIMEKI_CONFIG` >
-  config.json > defaults; host credentials are selected per source layer; the
-  file is never written). Host auth accepts `TOKIMEKI_TOKEN` (opaque Host JWT
+- `cli.ts` wires `claude`, `pi`, `run -- <cmd>`, the 9-command ACP
+  allow-list (`acp list [--detect]`), `attach` (`--listen`; optional share
+  URL/`TOKIMEKI_ATTACH_URL`), `doctor`, and `history`; top-level
+  `--interactive`/`--daemon`/`--config` flags are consumed before the command.
+  Runtime config comes from env (`.env.example` is the reference) merged with
+  `--config`/`TOKIMEKI_CONFIG_FILE` > `TOKIMEKI_CONFIG` > config.json >
+  defaults (`config-file.ts`; host credentials are selected per source layer).
+  Daemon mode emits `tokimeki-event: ` JSON on stderr (ready/status/error/
+  report); stdout stays terminal bytes or the doctor report. See
+  `cli-mode.ts`, `events.ts`, `doctor-gate.ts`, and `onboarding/`. Host auth accepts `TOKIMEKI_TOKEN` (opaque Host JWT
   or namespace token; requires `TOKIMEKI_NAMESPACE`, auto-prefixes
   `<namespace>.` sessions and rejects an explicit `TOKIMEKI_SESSION` without
   it) or `TOKIMEKI_MASTER_TOKEN` (single-owner fallback). `TOKIMEKI_TOKEN`
@@ -152,9 +162,17 @@ assets/              README icon
   sends `X-Tokimeki-Token` (never `Authorization`) via
   `buildHostAuthHeaders`.
 - `host/`: node-pty, Windows ConPTY, headless xterm mirror, mode tracker,
-  resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup, and a
-  separate periodic listener snapshot timer (`TOKIMEKI_LISTENER_SNAPSHOT_MS`,
-  default 1000 ms) that never pauses the PTY.
+  resize policy (`latest|min|pinned`), snapshot/flow-control, P2P setup, the
+  F12 connection menu, and a separate periodic listener snapshot timer
+  (`TOKIMEKI_LISTENER_SNAPSHOT_MS`, default 1000 ms) that never pauses the PTY.
+- `terminal/viewport/`: L-shaped wide-terminal layout with a 40x8 corner debug
+  log area (120/118 hysteresis), F11 full-screen log view, and the F12/F11 key
+  router (`menu.ts`, `log-ring.ts`). `TOKIMEKI_LOG_VIEW_ROWS` replaces the
+  deprecated `TOKIMEKI_LOG_PANEL_ROWS` as the ring/view capacity.
+- Persistence exception: `persist.ts` may write config/history only on an
+  explicit wizard/menu save; writer whitelist, 0600/atomic/no-follow, JWT
+  session-token rejection, and partial `--config` relay/credential binding are
+  enforced there. Config-file reading stays read-only.
 - `attach/`: raw terminal, alternate screen, snapshot apply, seq reducer,
   reconnect/resync, terminal restore; listener mode sends no input/resize/ACK/
   resync/P2P and Ctrl-C exits only the local listener. `TOKIMEKI_SESSION_TOKEN`
@@ -174,6 +192,12 @@ assets/              README icon
 - Exit codes: `0` success, `1` runtime/connection (including a failed
   `doctor` check and Commander usage errors), `2` invalid `TOKIMEKI_*`
   configuration at host/attach startup.
+- Persistence (v1.4): the onboarding wizard may write `~/.tokimeki/config.json`
+  only on explicit save (five-key whitelist, 0600/atomic/no-follow/lock); a
+  separate `~/.tokimeki/history.json` holds ≤20 connections without host
+  tokens or hosted Session JWTs. `--config` envelopes are read-only and
+  host-only; a file that sets relayUrl without a same-layer credential is
+  rejected.
 - Logs go to stderr and are redacted; stdout carries terminal bytes only.
 
 ## Development
@@ -190,7 +214,8 @@ npm run dev:relay     # local relay, packages/relay/wrangler.jsonc
 ```
 
 Live e2e: `scripts/e2e/live-e2e.mjs` (needs a running relay + tokens from
-env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
+env); self-contained v1.4 onboarding e2e:
+`npm run e2e:v1.4` (builds CLI+site, starts `wrangler dev` and a mock TokiAPI). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 `scripts/perf/remote/`.
 
 ## Deployment configs
@@ -225,7 +250,7 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
 - Production deploy/provider/secret changes need explicit user approval.
 - Scan changes for master/session/TURN secrets before committing.
 
-## Known limitations (0.1)
+## Known limitations (0.1.5)
 
 - Strict NAT↔NAT (including P2P attempts and relay fallback) and real Claude/pi
   TUI interaction were manually confirmed at the e2e layer on 2026-11-16; this
@@ -248,6 +273,17 @@ env). Performance: `scripts/perf/README.md`; cross-NAT harnesses under
   (fragmentation-independent ARQ tuning, Reed-Solomon/multi-loss FEC) is future.
   A v2.0 lossy-network A/B validation (SCTP reliable vs TUN SR-ARQ/FEC) is
   planned; see `docs/roadmap.md` and `docs/tunnel-reliability.md`.
+- v1.4 (0.1.5) local verification: 601 unit tests (5 skipped), relay suites
+  (155+15+23+8+12), `npm run build:site`, both Wrangler dry-runs, basic and
+  `E2E_WINDOW=1` live e2e against `wrangler dev`, and the self-contained
+  `scripts/e2e/v1.4-onboarding-e2e.mjs` (v2 config-file host, daemon events,
+  passcode enforcement, share-URL attach, static assets, no persistence).
+  Fixed-window live resize via the F12 menu is deferred to v1.8 because v1
+  has no wire message to update viewers’ fixed-grid capability; non-fixed
+  `latest`/`min`/`pinned` hosts support the resize editor. The TokiAPI
+  anonymous path was not re-run against production in this round (the user
+  confirmed functional coverage on 2026-11-23); the local e2e uses a mock
+  provider.
 - v1.2 Session JWT (A) and optional passcode (D) are covered by relay
   unit/Worker tests. A local cross-repo e2e (TokiAPI invite → Host JWT CLI host
   → Session JWT CLI viewer → TokiAPI WS proxy web viewer with TURN stripped)

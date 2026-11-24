@@ -4,8 +4,8 @@ import { computeCamera, computeViewportFrame } from "./geometry.js";
 import { MouseInputTranslator } from "./mouse.js";
 
 const logical = { cols: 120, rows: 40 };
-const frame = computeViewportFrame({ cols: 100, rows: 30 }, logical, 8);
-const camera = computeCamera(logical, frame.viewport, { x: 60, y: 20 });
+const frame = computeViewportFrame({ cols: 100, rows: 30 }, logical);
+const camera = computeCamera(logical, frame.mergedViewport, { x: 60, y: 20 });
 
 const decoder = new TextDecoder();
 
@@ -20,33 +20,33 @@ describe("MouseInputTranslator", () => {
   it("maps SGR clicks from the viewport into the logical grid", () => {
     const mouse = translator(true);
     const output = decoder.decode(mouse.translate(Buffer.from("\x1b[<0;1;1M")));
-    expect(output).toBe("\x1b[<0;11;11M");
+    expect(output).toBe("\x1b[<0;11;7M");
   });
 
   it("preserves release, wheel, and modifier buttons", () => {
     const mouse = translator(true);
-    expect(decoder.decode(mouse.translate(Buffer.from("\x1b[<0;1;1m")))).toBe("\x1b[<0;11;11m");
-    expect(decoder.decode(mouse.translate(Buffer.from("\x1b[<64;2;2M")))).toBe("\x1b[<64;12;12M");
-    expect(decoder.decode(mouse.translate(Buffer.from("\x1b[<18;3;3M")))).toBe("\x1b[<18;13;13M");
+    expect(decoder.decode(mouse.translate(Buffer.from("\x1b[<0;1;1m")))).toBe("\x1b[<0;11;7m");
+    expect(decoder.decode(mouse.translate(Buffer.from("\x1b[<64;2;2M")))).toBe("\x1b[<64;12;8M");
+    expect(decoder.decode(mouse.translate(Buffer.from("\x1b[<18;3;3M")))).toBe("\x1b[<18;13;9M");
   });
 
   it("re-encodes to legacy X10 when the remote did not enable SGR", () => {
     const mouse = translator(false);
     const output = mouse.translate(Buffer.from("\x1b[<0;1;1M"));
-    expect([...output]).toEqual([0x1b, 0x5b, 0x4d, 32, 32 + 11, 32 + 11]);
+    expect([...output]).toEqual([0x1b, 0x5b, 0x4d, 32, 32 + 11, 32 + 7]);
 
     const release = mouse.translate(Buffer.from("\x1b[<0;1;1m"));
-    expect([...release]).toEqual([0x1b, 0x5b, 0x4d, 32 + 3, 32 + 11, 32 + 11]);
+    expect([...release]).toEqual([0x1b, 0x5b, 0x4d, 32 + 3, 32 + 11, 32 + 7]);
   });
 
   it("drops clicks in letterbox margins or outside the logical grid", () => {
-    const fitted = computeViewportFrame({ cols: 140, rows: 50 }, logical, 8);
-    const fitCamera = computeCamera(logical, fitted.viewport, { x: 0, y: 0 });
+    const fitted = computeViewportFrame({ cols: 140, rows: 50 }, logical);
+    const fitCamera = computeCamera(logical, fitted.mergedViewport, { x: 0, y: 0 });
     const mouse = new MouseInputTranslator();
     mouse.setMap({ frame: fitted, camera: fitCamera });
     mouse.setEncodeSgr(true);
     expect(mouse.translate(Buffer.from("\x1b[<0;1;1M")).byteLength).toBe(0);
-    expect(mouse.translate(Buffer.from("\x1b[<0;11;1M")).byteLength).toBeGreaterThan(0);
+    expect(mouse.translate(Buffer.from("\x1b[<0;11;5M")).byteLength).toBeGreaterThan(0);
 
     const cropped = translator(true);
     expect(cropped.translate(Buffer.from("\x1b[<0;101;1M")).byteLength).toBe(0);
@@ -56,7 +56,7 @@ describe("MouseInputTranslator", () => {
     const mouse = translator(true);
     expect(mouse.translate(Buffer.from("\x1b[<0;1")).byteLength).toBe(0);
     expect(mouse.hasPending).toBe(true);
-    expect(decoder.decode(mouse.translate(Buffer.from(";1M")))).toBe("\x1b[<0;11;11M");
+    expect(decoder.decode(mouse.translate(Buffer.from(";1M")))).toBe("\x1b[<0;11;7M");
 
     const lone = translator(true);
     expect(lone.translate(Buffer.from("\x1b")).byteLength).toBe(0);

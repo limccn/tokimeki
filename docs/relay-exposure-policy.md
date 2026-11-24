@@ -3,7 +3,8 @@
 > 状态：设计稿（2026-11-19）。本文定义 relay 对外暴露与准入策略，不描述
 > 已实现行为；代码落地前以现有 `docs/protocol.md` / `docs/deployment.md` 为准。
 > 相关设计：`.trellis/tasks/11-18-relay-exposure-policy`（决策与调研）、
-> v1.2 JWT/JWKS（namespace 模型）、`docs/multi-namespace-design.md`（规划）。
+> v1.2 JWT/JWKS（namespace 模型）、`docs/multi-namespace-design.md`（设计稿，
+> 2026-11-22，待验收）。
 >
 > 已部分实现（2026-11-19，`11-19-relay-exposure-hardening`、
 > `11-19-relay-namespace-tokens` 与 `11-19-relay-quotas-ttl` 已进入

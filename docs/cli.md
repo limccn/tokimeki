@@ -22,13 +22,56 @@ uses `node-pty` and `node-datachannel` native modules.
 |---|---|
 | `tokimeki claude [args...]` | Host the `claude` CLI in a PTY |
 | `tokimeki pi [args...]` | Host the `pi` CLI in a PTY |
+| `tokimeki codex\|gemini\|cursor\|aider\|opencode\|goose\|amp [args...]` | Host a catalog ACP command (v1.4; allow-listed by default) |
 | `tokimeki run -- <cmd...>` | Host any command in a PTY (`--` protects flags) |
-| `tokimeki attach` | Attach to a hosted session (shared control) |
+| `tokimeki attach [share-url]` | Attach to a hosted session (shared control) |
 | `tokimeki attach --listen` | Attach as a read-only snapshot-only listener (v1.1) |
 | `tokimeki doctor` | Check config, PTY support, and relay reachability |
+| `tokimeki acp list [--detect]` | List the ACP catalog; `--detect` scans PATH read-only |
+| `tokimeki history [list\|remove <session>\|clear]` | Inspect/clear saved connection history |
+
+Global flags must appear before the command:
+
+```bash
+tokimeki --interactive claude     # force interactive onboarding (TTY required)
+tokimeki --daemon attach          # force daemon/harness mode (no prompts)
+tokimeki --config tokimeki-config.json claude
+```
 
 `claude`/`pi` arguments are passed through. `tokimeki claude --help` runs the
-local `claude --help` without requiring relay configuration.
+local `claude --help` without requiring relay configuration. Flags after a
+hosted `claude`/`pi` command belong to that TUI; `tokimeki --config f claude`
+reads the file, while `tokimeki claude --config f` passes it through.
+
+## Modes and onboarding (v1.4, CLI >= 0.1.5)
+
+- **interactive** (TTY default): doctor-first startup; missing relay/token
+  configuration opens the host or attach wizard. `--interactive` forces it and
+  exits 2 without a TTY.
+- **daemon** (non-TTY default): no prompts, no stdin interaction. `--daemon` or
+  `TOKIMEKI_MODE=daemon` forces it.
+- Daemon events go to **stderr** as one-line JSON prefixed `tokimeki-event: `
+  (`ready`/`status`/`error`/`report`, schema v1). stdout stays terminal bytes,
+  or the doctor report. Do not merge stdout/stderr when parsing events. Events
+  are not suppressed by `TOKIMEKI_LOG_LEVEL=silent` or the local viewport.
+- Exit codes: `0` success, `1` runtime/connection, `2` configuration.
+- `tokimeki acp list --detect` reports only “a same-named executable exists in
+  PATH”; it never executes detected binaries, never edits `TOKIMEKI_WINDOW_TUI`,
+  and never auto-hosts.
+
+## Onboarding shortcuts (v1.4, CLI >= 0.1.5)
+
+- `tokimeki --config <tokimeki-config.json> claude` hosts directly from a
+  TokiAPI-downloaded v1/v2 envelope. `TOKIMEKI_CONFIG_FILE` is the equivalent
+  env input for harnesses; `--config` wins with a warning. The file must be a
+  regular, non-symlink file, ≤64 KiB, and 0600 on POSIX when it contains
+  secrets. `--config` is host-only (claude/pi/run/ACP).
+- `tokimeki attach https://tokiapi.app/#t-<code>` exchanges the invite through
+  `POST /api/tokimeki/attach/cli` and attaches. `TOKIMEKI_ATTACH_URL` is the
+  equivalent env input; the value `-` reads one line from stdin. The share URL
+  is a capability secret; prefer env/stdin over argv.
+- `TOKIMEKI_CONFIG_FILE` and `TOKIMEKI_ATTACH_URL` are removed from the hosted
+  PTY environment along with the token/passcode/tunnel secrets.
 
 ## Host a session
 
@@ -75,14 +118,27 @@ written to disk, argv, URLs, or logs, and it is removed from the hosted PTY
 environment like the other secrets. `TOKIMEKI_NAMESPACE_TOKEN` is **retired**:
 a non-empty value exits 2 with a hint to rename it to `TOKIMEKI_TOKEN`.
 
-The CLI can also read a **read-only** `~/.tokimeki/config.json`
+The CLI can read `~/.tokimeki/config.json`
 (`%USERPROFILE%\.tokimeki\config.json` on Windows): a flat JSON object of
 `TOKIMEKI_*` keys with string/number/boolean values. Precedence is explicit
-environment variables > `TOKIMEKI_CONFIG` > config.json > defaults. Host
-credentials are selected per source layer, so a stale credential in the file
-cannot shadow an explicit environment credential. The file must be `0600` on
-POSIX when it contains credentials (`chmod 600 ~/.tokimeki/config.json`); the
-CLI never creates or writes it.
+environment variables > `--config`/`TOKIMEKI_CONFIG_FILE` > `TOKIMEKI_CONFIG`
+> config.json > defaults. Host credentials are selected per source layer, so a
+stale credential in the file cannot shadow an explicit environment credential.
+
+Since v1.4 (CLI >= 0.1.5) the onboarding wizard may **write** this file only
+after the user explicitly confirms “save”: only
+`TOKIMEKI_RELAY_URL`, `TOKIMEKI_NAMESPACE`, `TOKIMEKI_TOKEN`,
+`TOKIMEKI_SESSION`, and `TOKIMEKI_SESSION_TOKEN` are written, with 0600
+(POSIX), atomic replacement, no-follow, and a 0700 directory. It never writes
+master/passcode/tunnel/TURN/JWT secrets, invite URLs, or `TOKIMEKI_MODE`; a
+JWT-shaped session token is rejected. An existing file with insecure
+permissions or invalid JSON is refused (never auto-chmodded). A separate
+`~/.tokimeki/history.json` (0600, ≤20 entries) stores relay/session and, when
+the user saves it, an opaque OSS session token; host tokens, passcodes, invite
+URLs, and hosted Session JWTs are never written. `tokimeki history` lists
+non-secret metadata, `history remove <session>` deletes one entry, and
+`history clear` empties the file. Delete either file to fall back to env/
+defaults.
 
 On startup the host prints a banner:
 
@@ -99,49 +155,74 @@ The viewer config line is the complete JSON envelope a viewer needs. Treat it
 as a secret. The host owns the PTY; closing the host or pressing Ctrl-C in the
 hosted program ends the session.
 
-### Viewer config and the F12 overlay
+### Viewer config and the F12 connection menu
 
-`TOKIMEKI_CONFIG` accepts a JSON object (no YAML, no files written by the CLI).
-Fields map to the usual `TOKIMEKI_*` variables; explicit environment variables
-win, and empty environment placeholders do not erase config values.
+`TOKIMEKI_CONFIG` accepts a JSON object (no YAML). Fields map to the usual
+`TOKIMEKI_*` variables; explicit environment variables win, and empty
+environment placeholders do not erase config values.
 
 ```powershell
 $env:TOKIMEKI_CONFIG='{"v":1,"relayUrl":"wss://relay.example.com","session":"demo","sessionToken":"...","window":{"cols":120,"rows":40}}'
 tokimeki attach
 ```
 
-In the host's full-screen viewport, press **F12** to reopen the viewer config
-overlay after the startup banner has scrolled away. The overlay shows the
-session, relay, token, and exact config JSON. Press `c` to copy the exact JSON
-through OSC 52 (terminal-native clipboard), and F12 or Esc to close. Other keys
-are consumed while the overlay is open so they do not reach the TUI.
+In the host's full-screen viewport, press **F12** to open the connection menu
+(v1.4; the old invite-only overlay is gone). The menu shows relay/namespace/
+session, the viewer session token masked by default, viewer/listener counts,
+transport/relay state, and the window size. Items:
 
-- `TOKIMEKI_INVITE_KEY` selects the key: `f12` (default), `ctrl-]`, or `off`.
-- The overlay is host-side only and requires the full-screen viewport. Legacy
-  `TOKIMEKI_WINDOW=off` and headless hosts only have the startup banner.
-- `TOKIMEKI_CONFIG` and its mapped token fields are removed from the hosted
-  PTY environment; the config is never written to disk or uploaded to the
-  relay.
+1. Refresh status
+2. Show/hide the session token
+3. Copy the exact viewer config JSON (OSC 52)
+4. Copy the anonymous-host invite URL (only when the host was started from the
+   TokiAPI anonymous path; memory-only, never saved)
+5. Open the log view (debug mode)
+6. Resize the hosted window (host only; enters an arrow-key editor, Enter
+   applies through the normal resize pipeline)
 
-If the banner has scrolled away and the overlay is disabled, there is no
+Viewers/listeners get status, show/hide token, copy viewer config,
+reconnect/resync, and disconnect (local only). Listeners remain read-only and
+send no input/ACK/resize. Host credentials (`TOKIMEKI_TOKEN`/master) are never
+shown. Press `s` to toggle reveal, `c` to copy, digits to select, Esc to close;
+menu bytes never reach the hosted PTY.
+
+- `TOKIMEKI_INVITE_KEY` selects the menu key: `f12` (default), `ctrl-]`, or
+  `off`. F11 toggles the log view even when the menu is off.
+- The menu requires the full-screen viewport. Legacy `TOKIMEKI_WINDOW=off` and
+  headless hosts only have the startup banner.
+- `TOKIMEKI_CONFIG` and its mapped token fields are removed from the hosted PTY
+  environment; the config is never written to disk or uploaded to the relay.
+
+If the banner has scrolled away and the menu is disabled, there is no
 protocol-only way to recover the token: it exists only in the host process and
-the terminal output. Set `TOKIMEKI_SESSION_TOKEN` explicitly if you need a
-stable, externally supplied credential.
+terminal output. Set `TOKIMEKI_SESSION_TOKEN` explicitly if you need a stable,
+externally supplied credential.
 
 ### Fixed TUI window
 
-For commands listed in `TOKIMEKI_WINDOW_TUI` (default `claude,pi`), the host
-creates one session-level logical grid (`TOKIMEKI_WINDOW_SIZE`, default
-`120x40`). Viewer `resize` messages and local terminal resizes no longer change
-the hosted PTY; the TUI is not laid out again when someone attaches.
+For commands listed in `TOKIMEKI_WINDOW_TUI` (default: the 9 ACP commands
+`claude,pi,codex,gemini,cursor,aider,opencode,goose,amp`), the host creates one
+session-level logical grid (`TOKIMEKI_WINDOW_SIZE`, default `120x40`). Viewer
+`resize` messages and local terminal resizes no longer change the hosted PTY;
+the TUI is not laid out again when someone attaches. The F12 host menu can
+resize the window for the session (fixed windows update an in-memory pinned
+size; `latest`/`min` follow their normal policy).
 
 The local terminal is split into:
 
 ```text
 TUI viewport        (letterboxed when larger, cursor-following crop when smaller)
-debug log panel     (only with TOKIMEKI_LOG_LEVEL=debug, default 8 rows)
+corner log area     (debug only, wide terminals >=120 cols: 40x8 bottom-right)
 status bar          (always the bottom row; no token)
 ```
+
+Narrow debug terminals no longer reserve a bottom panel: press **F11** (or the
+F12 menu item) for a full-screen, scrollable log view; F11/Esc returns. The
+viewport stays L-shaped on wide terminals and the camera is computed over the
+merged top+corner rectangle. Hysteresis switches layouts at 120/118 columns.
+`TOKIMEKI_LOG_VIEW_ROWS` sets the ring/view capacity (default 200, max 2000,
+`0` disables); `TOKIMEKI_LOG_PANEL_ROWS` is deprecated and only acts as a
+fallback capacity when the new key is unset.
 
 `TOKIMEKI_WINDOW=off` restores the legacy raw/resize behavior. A headless host
 (stdout not a TTY) still keeps the PTY fixed; it just does not draw a local
@@ -180,11 +261,16 @@ Useful host variables:
 | `TOKIMEKI_RESIZE_POLICY` | `latest` | `latest`, `min`, or `pinned`; ignored when the fixed TUI window is active |
 | `TOKIMEKI_PTY_SIZE` | — | `<cols>x<rows>`; overrides `TOKIMEKI_WINDOW_SIZE` when set |
 | `TOKIMEKI_WINDOW` | `tui` | `tui`: use `TOKIMEKI_WINDOW_TUI`; `on`: every host command; `off`: legacy raw/resize behavior |
-| `TOKIMEKI_WINDOW_TUI` | `claude,pi` | Comma-separated command basenames that use the fixed TUI window; also enables `tokimeki <cmd>` |
-| `TOKIMEKI_WINDOW_SIZE` | `120x40` | Fixed logical TUI window; cannot be changed by viewers |
-| `TOKIMEKI_LOG_PANEL_ROWS` | `8` | Debug log panel rows (`0` disables); shown only at `TOKIMEKI_LOG_LEVEL=debug` |
-| `TOKIMEKI_INVITE_KEY` | `f12` | Host overlay key: `f12`, `ctrl-]`, or `off` |
-| `TOKIMEKI_CONFIG` | — | Optional JSON config envelope; maps fields to `TOKIMEKI_*` variables; explicit env wins, then `~/.tokimeki/config.json` (read-only); JSON only, never written by the CLI |
+| `TOKIMEKI_WINDOW_TUI` | 9 ACP commands | Comma-separated command basenames that use the fixed TUI window and dynamic dispatch (`claude,pi,codex,gemini,cursor,aider,opencode,goose,amp` by default); an explicit list replaces the default |
+| `TOKIMEKI_WINDOW_SIZE` | `120x40` | Fixed logical TUI window; viewers cannot change it; the F12 host menu can resize it for the session |
+| `TOKIMEKI_LOG_VIEW_ROWS` | `200` | Debug log-ring/view capacity (max 2000; `0` disables the corner area and F11 view) |
+| `TOKIMEKI_LOG_PANEL_ROWS` | — | **Deprecated.** Parsed only as a fallback capacity when `TOKIMEKI_LOG_VIEW_ROWS` is unset; no longer affects layout (v1.4) |
+| `TOKIMEKI_INVITE_KEY` | `f12` | Local connection-menu key: `f12`, `ctrl-]`, or `off`; F11 log view stays available |
+| `TOKIMEKI_MODE` | — | `interactive` or `daemon`; top-level `--interactive`/`--daemon` override it; non-TTY defaults to daemon |
+| `TOKIMEKI_CONFIG_FILE` | — | Envelope file layer for host commands (same as `--config`); host-only |
+| `TOKIMEKI_ATTACH_URL` | — | Share URL input for `tokimeki attach`; `-` reads one line from stdin |
+| `TOKIMEKI_TOKIAPI_URL` | `https://tokiapi.app` | TokiAPI provider base override for local/test harnesses; https or loopback http only |
+| `TOKIMEKI_CONFIG` | — | Optional JSON config envelope; maps fields to `TOKIMEKI_*` variables; explicit env > `--config` file > this string > `~/.tokimeki/config.json`; JSON only |
 | `TOKIMEKI_TERM` | `xterm-256color` | PTY TERM |
 | `TOKIMEKI_COLORTERM` | `truecolor` | PTY COLORTERM |
 | `TOKIMEKI_HEARTBEAT_SECONDS` | `25` | WebSocket heartbeat; `0` disables |
@@ -209,6 +295,28 @@ tokimeki attach
 Attach needs `TOKIMEKI_SESSION` and `TOKIMEKI_SESSION_TOKEN`; it does **not**
 need the relay master token. The viewer enters the alternate screen, applies
 the current snapshot, and forwards keyboard input.
+
+Interactive first-time attach (v1.4, CLI >= 0.1.5) runs doctor first, then the
+attach wizard: paste a TokiAPI invite URL/code, paste a v1/v2 viewer config
+JSON, restore a saved history entry, or enter relay/session/token manually.
+The connection test reuses the real attach connection; a pre-ready failure
+returns to the wizard without leaving raw mode/alternate screen behind. Hosted
+Session JWTs and invite codes stay in memory and are never written to
+config/history.
+
+Share URL form:
+
+```bash
+tokimeki attach "https://tokiapi.app/#t-<code>"
+# equivalent: TOKIMEKI_ATTACH_URL='https://...#t-<code>' tokimeki attach
+# stdin (no shell history): echo '<url>' | tokimeki attach -
+```
+
+The URL origin is the TokiAPI provider; the returned `tokimekiRelayUrl` must be
+wss and bound to that origin, otherwise the CLI refuses the exchange. 410
+(invalid/expired), 429 (Retry-After), 503 (not configured), and a required
+passcode are reported without automatic retry storms. `mode=listener` attaches
+as a listener automatically; a viewer invite combined with `--listen` exits 2.
 
 `TOKIMEKI_SESSION_TOKEN` may be either the host's opaque session token or a
 TokiAPI **Session JWT** issued by an invite (`POST /api/tokimeki/attach/cli`).
@@ -361,10 +469,12 @@ top of an unreliable/unordered WebRTC DataChannel:
   `not_implemented`. TUN is P2P-only in this release.
 
 Logs redact known tokens. When a fixed viewport owns the screen,
-`TOKIMEKI_LOG_LEVEL=debug` routes logs to the bottom panel
-(`TOKIMEKI_LOG_PANEL_ROWS`, default 8); non-debug logs are buffered and written
-back to stderr after the viewport exits. Legacy/non-TTY sessions keep the
-existing stderr behavior.
+`TOKIMEKI_LOG_LEVEL=debug` routes logs to the 40x8 corner area on wide
+terminals (≥120 cols) and to the F11 full-screen view on narrow terminals
+(`TOKIMEKI_LOG_VIEW_ROWS`, default 200); non-debug logs are buffered and
+written back to stderr after the viewport exits. Control characters are
+stripped at the render boundary. Legacy/non-TTY sessions keep the existing
+stderr behavior.
 
 ## Troubleshooting
 
@@ -374,8 +484,12 @@ existing stderr behavior.
 | `host_offline` | Host is connected to the same relay/session and still running |
 | `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
 | Viewer shows only part of the TUI | Local terminal is smaller than `TOKIMEKI_WINDOW_SIZE`; enlarge it or set a smaller fixed size at host start. The status bar shows `view:WxH@x,y` and the camera follows the TUI cursor |
-| F12 does not open the viewer config | The overlay needs the full-screen host viewport (`TOKIMEKI_WINDOW=off` and headless hosts do not have it). Try `TOKIMEKI_INVITE_KEY=ctrl-]` if the terminal intercepts F12 |
-| `TOKIMEKI_CONFIG` is ignored | It must be valid JSON; explicit non-empty `TOKIMEKI_*` env vars override its fields |
+| F12 does not open the connection menu | The menu needs the full-screen host viewport (`TOKIMEKI_WINDOW=off` and headless hosts do not have it). Try `TOKIMEKI_INVITE_KEY=ctrl-]` if the terminal intercepts F12 |
+| F11 does not open the log view | The terminal may intercept F11; the debug F12 menu's “Open log view” item is the fallback. Set `TOKIMEKI_LOG_VIEW_ROWS>0` and `TOKIMEKI_LOG_LEVEL=debug` |
+| `TOKIMEKI_CONFIG` is ignored | It must be valid JSON; precedence is explicit env > `--config` file > `TOKIMEKI_CONFIG` > config.json |
+| `--config` says “host commands only” | `--config`/`TOKIMEKI_CONFIG_FILE` are host-only; use `tokimeki attach <share-url>` or the attach wizard |
+| `--config sets TOKIMEKI_RELAY_URL without a host credential` | A partial config file would send another layer's token to the file's relay; put the token in the same file or set relay+credential in explicit env |
+| attach share URL returns 401/410/429/503 | Session JWT expired/invalid (410), rate limited (429, back off), provider disabled (503); exchange again rather than looping |
 | Fixed window never activates | Relay must echo `capabilities` in `welcome.clients`; upgrade/redeploy the relay. Old relays fall back to legacy rendering |
 | `tokimeki omp` says unknown command | Add `omp` to `TOKIMEKI_WINDOW_TUI` or use `tokimeki run -- omp` |
 | P2P never opens | Corporate UDP firewall; try TURN or `TOKIMEKI_P2P=off` |

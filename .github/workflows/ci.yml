@@ -26,6 +26,7 @@ jobs:
       - run: npm test
       - run: npm run test:relay
       - run: npm run build
+      - run: npm run build:site
       - name: Wrangler dry run (open-source config)
         run: npx wrangler deploy --dry-run
       - name: Wrangler dry run (production config)

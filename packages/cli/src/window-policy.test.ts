@@ -12,7 +12,17 @@ describe("window policy", () => {
   });
 
   it("parses the TUI command list with defaults and explicit emptiness", () => {
-    expect([...parseTuiCommandList(undefined)]).toEqual(["claude", "pi"]);
+    expect([...parseTuiCommandList(undefined)]).toEqual([
+      "claude",
+      "pi",
+      "codex",
+      "gemini",
+      "cursor",
+      "aider",
+      "opencode",
+      "goose",
+      "amp",
+    ]);
     expect([...parseTuiCommandList("")]).toEqual([]);
     expect([...parseTuiCommandList(" omp, OMP ,, pi.exe ")]).toEqual(["omp", "pi"]);
     expect([...parseTuiCommandList("claude, omp")]).toEqual(["claude", "omp"]);
