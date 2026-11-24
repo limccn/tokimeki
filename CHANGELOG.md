@@ -6,6 +6,41 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-24
+
+Security hardening for v1.4/v1.5 code across the CLI, relay, onboarding site,
+and the separate `tokimeki-dsh` plugin. No wire-protocol or credential-format
+change.
+
+### Security
+
+- CLI: sanitize remote log/provider text before terminal/log output; scrub
+  `TOKIMEKI_ATTACH_URL`/`TOKIMEKI_CONFIG_FILE` from the hosted PTY; reject
+  non-loopback plaintext relay URLs; cap authenticated `/auth/whoami` bodies;
+  reject symlinked `~/.tokimeki/config.json`; drop stale cross-relay
+  credentials on save; validate `TOKIMEKI_MASTER_TOKEN` header safety.
+- Onboarding site: IPv6 loopback support, stale-output invalidation, short
+  session-token compatibility, window cell/dimension limits, `windowMode` in
+  the downloaded host config, host/session token equality, delayed blob revoke.
+- Relay: bounded peer-joined capabilities; retain host-exit/TURN fallback
+  diagnostics; remove the `change-me` master placeholder from
+  `.dev.vars.example`.
+- `tokimeki-dsh` (separate repository): Windows doctor current-directory
+  hardening, timeout escalation, expanded redaction, and config-path quoting;
+  its public npm release is deferred until `NPM_TOKEN` is configured.
+
+### Fixed
+
+- Prompt EOF aborts instead of hanging; master mode clears an inherited
+  namespace; share-URL attach reads config-layer passcode/`TOKIMEKI_ATTACH_URL`;
+  history writes are serialized inside the lock; empty history tokens are
+  treated as missing; non-TTY attach no longer resizes the shared PTY.
+
+### Changed
+
+- Onboarding label is now “Show token fields”; the site build cleans `dist`;
+  the v1.4 e2e asserts asset CSP/nosniff/referrer/no-store headers.
+
 ## [0.1.6] - 2026-11-23
 
 Agent onboarding (v1.5): universal skill, install prompt, and release
@@ -355,7 +390,10 @@ First public release.
 > P2P-only AEAD/ARQ tunnel; F1.1 added opt-in XOR parity for single-loss
 > recovery. The 0.1.0 limitation above is kept as the release-time record.
 
-[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/limccn/tokimeki/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/limccn/tokimeki/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/limccn/tokimeki/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/limccn/tokimeki/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/limccn/tokimeki/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/limccn/tokimeki/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/limccn/tokimeki/releases/tag/v0.1.2

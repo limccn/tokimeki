@@ -184,8 +184,8 @@ The `0.1.5` CLI adds the user onboarding path:
 - `skills/tokimeki/SKILL.md` with
   `npx skills add limccn/tokimeki --skill tokimeki` (project scope; `-g` for
   global). There is no registry short name. The skill is on
-  `develop`/`release/0.1.6`; default-branch installation becomes available
-  after the maintainer merges `release/0.1.6` into `main`.
+  `develop`/`release/0.1.7`; default-branch installation becomes available
+  after the maintainer merges `release/0.1.7` into `main`.
 - `docs/agent-install.md` has a copy-paste install prompt (skill + CLI +
   doctor).
 - `@limccn/tokimeki-dsh` is an independent DeepSeek Harness plugin with
@@ -334,13 +334,14 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 
 ## Status
 
-`0.1.6` — current release. It includes the v1.2 hosted-auth work
+`0.1.7` — current release. It includes the v1.2 hosted-auth work
 (Host/Session JWT, passcode, share-link and web-viewer integration), the
-v1.4 CLI onboarding path/ACP catalog/F12 menu/no-JWT site, and the v1.5 agent
-skill plus the independent `@limccn/tokimeki-dsh` plugin. Install
+v1.4 CLI onboarding path/ACP catalog/F12 menu/no-JWT site, the v1.5 agent
+skill plus the independent `@limccn/tokimeki-dsh` plugin, and the 0.1.7
+security hardening for the CLI, relay, and onboarding site. Install
 from [npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to
 GitHub Packages; see [docs/release.md](docs/release.md)) or read the
-[v0.1.6 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.6).
+[v0.1.7 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.7).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
 limitations and the v1.1 feature history.
