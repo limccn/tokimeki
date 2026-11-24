@@ -31,6 +31,21 @@ describe("doctor gate", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("rejects malformed master tokens", () => {
+    const result = runDoctorGate({
+      command: "host",
+      env: {
+        TOKIMEKI_RELAY_URL: "wss://relay.example",
+        TOKIMEKI_MASTER_TOKEN: "bad token value",
+      },
+      mode: "daemon",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((issue) => issue.message.includes("TOKIMEKI_MASTER_TOKEN"))).toBe(
+      true,
+    );
+  });
+
   it("reports missing/paired credentials without printing values", () => {
     const result = runDoctorGate({
       command: "host",

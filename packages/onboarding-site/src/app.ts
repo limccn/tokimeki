@@ -19,6 +19,7 @@ import {
   validateNamespace,
   validateRelayUrl,
   validateSession,
+  validateSessionToken,
   validateToken,
   validateWindow,
 } from "./lib/validate.js";
@@ -92,7 +93,8 @@ function downloadText(filename: string, text: string): void {
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  // Give the browser time to start the blob download before revoking it.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 function setCodeOutput(id: string, text: string, language: CodeLanguage): void {
@@ -235,6 +237,25 @@ export function start(): void {
   wireCodeField("attach-output");
   wireCodeField("attach-json");
 
+  let lastHost: HostDraft | null = null;
+
+  function invalidateHostOutput(): void {
+    lastHost = null;
+    setCodeOutput("host-output", "", "shell");
+    setText("host-copy-status", "");
+    setText("host-download-status", "");
+    setButtonDisabled("host-copy", true);
+    setButtonDisabled("host-download", true);
+  }
+
+  function invalidateAttachOutput(): void {
+    setCodeOutput("attach-output", "", "shell");
+    setCodeOutput("attach-json", "", "json");
+    setText("attach-copy-status", "");
+    setButtonDisabled("attach-copy", true);
+    setButtonDisabled("attach-copy-json", true);
+  }
+
   byId("host-generate-session").addEventListener("click", () => {
     const namespace = input("host-namespace").value.trim();
     if (namespace.length === 0) {
@@ -244,6 +265,7 @@ export function start(): void {
     try {
       validateNamespace(namespace);
       input("host-session").value = `${namespace}.${randomSlug()}`;
+      invalidateHostOutput();
       setError("host-error", null);
     } catch (error) {
       setError("host-error", error instanceof Error ? error.message : "invalid namespace");
@@ -252,10 +274,9 @@ export function start(): void {
 
   byId("host-generate-token").addEventListener("click", () => {
     input("host-session-token").value = randomToken();
+    invalidateHostOutput();
     setError("host-error", null);
   });
-
-  let lastHost: HostDraft | null = null;
 
   byId("host-generate").addEventListener("click", () => {
     try {
@@ -272,7 +293,10 @@ export function start(): void {
       validateNamespace(namespace);
       validateToken(token, "Host token");
       validateSession(session, namespace);
-      validateToken(sessionToken, "Session token");
+      validateSessionToken(sessionToken, "Session token");
+      if (token === sessionToken) {
+        throw new SiteError("Host token and session token must be different");
+      }
       validateWindow(windowSize);
       if (acpId === "custom") validateCustomCommand(customCommand);
       const shell = select("host-shell").value as Shell;
@@ -305,12 +329,7 @@ export function start(): void {
       setButtonDisabled("host-download", false);
       setError("host-error", null);
     } catch (error) {
-      lastHost = null;
-      setCodeOutput("host-output", "", "shell");
-      setText("host-copy-status", "");
-      setText("host-download-status", "");
-      setButtonDisabled("host-copy", true);
-      setButtonDisabled("host-download", true);
+      invalidateHostOutput();
       setError("host-error", error instanceof Error ? error.message : "could not generate");
     }
   });
@@ -344,7 +363,7 @@ export function start(): void {
       const namespace = session.includes(".") ? (session.split(".")[0] ?? "") : "";
       validateNamespace(namespace);
       validateSession(session, namespace);
-      validateToken(sessionToken, "Session token");
+      validateSessionToken(sessionToken, "Session token");
       const shell = select("attach-shell").value as Shell;
       const listener = input("attach-listener").checked;
       const command = generateAttachCommand({
@@ -365,11 +384,7 @@ export function start(): void {
       setButtonDisabled("attach-copy-json", false);
       setError("attach-error", null);
     } catch (error) {
-      setCodeOutput("attach-output", "", "shell");
-      setCodeOutput("attach-json", "", "json");
-      setText("attach-copy-status", "");
-      setButtonDisabled("attach-copy", true);
-      setButtonDisabled("attach-copy-json", true);
+      invalidateAttachOutput();
       setError("attach-error", error instanceof Error ? error.message : "could not generate");
     }
   });
@@ -380,6 +395,28 @@ export function start(): void {
   byId("attach-copy-json").addEventListener("click", () => {
     void copyText(byId<HTMLTextAreaElement>("attach-json").value, "attach-copy-status");
   });
+
+  // Any edit invalidates generated output so Copy/Download cannot silently
+  // return a stale command or config after the form changes.
+  for (const id of [
+    "host-namespace",
+    "host-token",
+    "host-session",
+    "host-session-token",
+    "host-custom-command",
+    "host-window",
+  ]) {
+    input(id).addEventListener("input", invalidateHostOutput);
+  }
+  select("host-acp").addEventListener("change", invalidateHostOutput);
+  select("host-shell").addEventListener("change", invalidateHostOutput);
+  for (const preset of windowPresets) preset.addEventListener("change", invalidateHostOutput);
+
+  for (const id of ["attach-session", "attach-token"]) {
+    input(id).addEventListener("input", invalidateAttachOutput);
+  }
+  select("attach-shell").addEventListener("change", invalidateAttachOutput);
+  input("attach-listener").addEventListener("change", invalidateAttachOutput);
 
   const tabs = [...document.querySelectorAll<HTMLButtonElement>("[data-tab]")];
 

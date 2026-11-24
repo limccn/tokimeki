@@ -6,8 +6,9 @@
 # Unset/blank rejects all fallback hosts (fail-closed). Once
 # TOKIMEKI_NAMESPACE_TOKENS below has a valid entry, this token and root "*"
 # takeover stop working — migrate hosts to TOKIMEKI_TOKEN instead.
-# Replace change-me with a strong random value before deploying.
-TOKIMEKI_MASTER_TOKEN=change-me
+# Leave blank to disable the fallback. Set a strong random value only when
+# intentionally running a single-owner relay; never deploy a placeholder.
+TOKIMEKI_MASTER_TOKEN=
 
 # Optional: static namespace host tokens as a JSON object.
 # Each value must be a unique random token >= 32 bytes and differ from the

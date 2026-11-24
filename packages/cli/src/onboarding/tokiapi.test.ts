@@ -148,6 +148,15 @@ describe("TokiAPI anonymous host request", () => {
       kind: "schema",
     });
   });
+
+  it("rejects invite URLs containing terminal controls", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse(200, { ...grant, inviteUrl: "https://tokiapi.app/#t-code\n\u001b" }),
+    );
+    await expect(requestAnonymousHost("https://tokiapi.app", { fetchImpl })).rejects.toMatchObject({
+      kind: "schema",
+    });
+  });
 });
 
 describe("TokiAPI attach exchange", () => {
@@ -185,6 +194,20 @@ describe("TokiAPI attach exchange", () => {
         fetchImpl: fetchMock as unknown as typeof fetch,
       }),
     ).rejects.toMatchObject({ kind: "invalid_invite" });
+  });
+
+  it("strips terminal controls from provider error messages", async () => {
+    const fetchImpl = mockFetch(jsonResponse(410, { error: { message: "expired\n\u001b[2J" } }));
+    try {
+      await exchangeAttachCode("https://tokiapi.app", "code123", { fetchImpl });
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(TokiApiError);
+      const message = (error as Error).message;
+      expect(message).toContain("expired");
+      expect(message).not.toContain("\u001b");
+      expect(message).not.toContain("\n");
+    }
   });
 
   it("rejects an invalid code locally", async () => {

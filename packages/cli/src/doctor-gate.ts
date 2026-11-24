@@ -77,6 +77,19 @@ function hostIssues(env: NodeJS.ProcessEnv): DoctorGateIssue[] {
       ),
     );
   }
+  if (master !== null) {
+    if (master.length > MAX_HOST_TOKEN_LENGTH) {
+      issues.push(
+        issue(
+          "config_invalid",
+          `TOKIMEKI_MASTER_TOKEN must be at most ${MAX_HOST_TOKEN_LENGTH} characters`,
+        ),
+      );
+    }
+    if (/\s/.test(master)) {
+      issues.push(issue("config_invalid", "TOKIMEKI_MASTER_TOKEN must not contain whitespace"));
+    }
+  }
   if (token !== null) {
     if (token.length > MAX_HOST_TOKEN_LENGTH) {
       issues.push(

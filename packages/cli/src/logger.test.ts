@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createRedactor, Logger } from "./logger.js";
+import { createRedactor, Logger, sanitizeLogText } from "./logger.js";
 
 function captureLogger(level: "debug" | "info" | "warn" | "error" | "silent") {
   const lines: string[] = [];
@@ -24,6 +24,19 @@ describe("createRedactor", () => {
   it("ignores unset and very short values", () => {
     const redact = createRedactor([undefined, "", "abc"]);
     expect(redact("abc")).toBe("abc");
+  });
+});
+
+describe("sanitizeLogText", () => {
+  it("strips ANSI/OSC, C1, bidi controls, and line breaks", () => {
+    expect(sanitizeLogText("a\u001b]52;c;x\u0007b\nc\u009bd‮e")).toBe("a]52;c;xb cde");
+  });
+
+  it("keeps a remote reason from forging a second log line", () => {
+    const { logger, lines } = captureLogger("warn");
+    logger.warn("viewer reason x\u001b]0;title\u0007y\n[tokimeki] warn: forged");
+    expect(lines).toHaveLength(1);
+    expect(sanitizeLogText(lines[0] ?? "")).toBe(lines[0]);
   });
 });
 

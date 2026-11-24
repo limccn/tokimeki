@@ -198,7 +198,7 @@ class AttachSession {
     this.#interactive = this.#stdin.isTTY === true && this.#stdout.isTTY === true;
     this.#installLocalTerminal();
 
-    const localSize = this.#localSize();
+    const wireSize = this.#sizeForWire();
     const clientOptions: RelayClientOptions = {
       url: this.#config.websocketUrl,
       headers: {
@@ -209,9 +209,9 @@ class AttachSession {
       role: this.#config.role,
       session: this.#config.session,
       clientId: this.#clientId,
-      // Listeners must not drive PTY sizing (and hello dims would be ignored
-      // by the relay anyway); omit them entirely.
-      ...(this.#listener ? {} : { cols: localSize.cols, rows: localSize.rows }),
+      // Only an interactive local terminal may drive PTY sizing; non-TTY
+      // attach and zero-dimension TTYs must not resize the shared PTY.
+      ...(wireSize === null ? {} : { cols: wireSize.cols, rows: wireSize.rows }),
       heartbeatSeconds: this.#config.heartbeatSeconds,
       client: buildClientDescriptor({ platform: this.#platform }),
       capabilities: buildCapabilities({
@@ -273,6 +273,21 @@ class AttachSession {
       cols: Math.max(1, typeof sized.columns === "number" ? sized.columns : 80),
       rows: Math.max(1, typeof sized.rows === "number" ? sized.rows : 24),
     };
+  }
+
+  /** Dimensions safe to send over the wire; null when this client must not resize. */
+  #sizeForWire(): { cols: number; rows: number } | null {
+    if (!this.#interactive || this.#listener) return null;
+    const sized = this.#stdout as SizedWriteStream;
+    if (
+      typeof sized.columns !== "number" ||
+      typeof sized.rows !== "number" ||
+      sized.columns < 1 ||
+      sized.rows < 1
+    ) {
+      return null;
+    }
+    return { cols: sized.columns, rows: sized.rows };
   }
 
   #installLocalTerminal(): void {
@@ -538,7 +553,8 @@ class AttachSession {
 
   #sendResize(): void {
     if (this.#closing || this.#listener) return;
-    const size = this.#localSize();
+    const size = this.#sizeForWire();
+    if (size === null) return;
     this.#client?.sendControl({
       v: PROTOCOL_VERSION,
       type: "resize",

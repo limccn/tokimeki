@@ -257,12 +257,18 @@ export function parseBooleanish(name: string, raw: string | undefined, fallback:
   throw new ConfigError(`${name} must be a boolean-like value (1/0/true/false)`);
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
 /**
  * Normalize a relay URL to a WebSocket base URL.
  *
  * `https://` becomes `wss://`, `http://` becomes `ws://`, trailing slashes are
  * stripped, and query strings/hashes are rejected because credentials must
- * never be placed in a URL.
+ * never be placed in a URL. Plaintext ws/http is loopback-only; credentials
+ * must not cross a non-loopback network without TLS.
  */
 export function normalizeRelayBaseUrl(raw: string): string {
   let parsed: URL;
@@ -295,6 +301,9 @@ export function normalizeRelayBaseUrl(raw: string): string {
       throw new ConfigError(
         `TOKIMEKI_RELAY_URL must use http(s):// or ws(s):// (received ${parsed.protocol})`,
       );
+  }
+  if (protocol === "ws:" && !isLoopbackHostname(parsed.hostname)) {
+    throw new ConfigError("TOKIMEKI_RELAY_URL must use wss:// (ws:// is loopback-only)");
   }
   const pathname = parsed.pathname.replace(/\/+$/, "");
   return `${protocol}//${parsed.host}${pathname}`;
@@ -685,6 +694,9 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
 
   if (token !== null) {
     validateHostTokenValue("TOKIMEKI_TOKEN", token);
+  }
+  if (masterToken !== null) {
+    validateHostTokenValue("TOKIMEKI_MASTER_TOKEN", masterToken);
   }
 
   let authMode: HostAuthMode;

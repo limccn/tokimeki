@@ -14,6 +14,7 @@ import {
   relayWhoamiUrl,
 } from "../config.js";
 import type { ReportCheck } from "../events.js";
+import { readJsonObjectCapped } from "../http-body.js";
 import { createRedactor, formatError } from "../logger.js";
 
 export interface DoctorDeps {
@@ -277,10 +278,12 @@ export async function runDoctor(config: DoctorConfig, deps: DoctorDeps = {}): Pr
       try {
         const response = await fetchImpl(whoamiUrl, {
           headers: buildHostAuthHeaders(effectiveToken),
+          redirect: "error",
+          credentials: "omit",
           signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
         });
         if (response.ok) {
-          const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+          const body = await readJsonObjectCapped(response).catch(() => null);
           describeWhoami(body, config, warn, ok);
         } else if (response.status === 401 || response.status === 404) {
           const hint =

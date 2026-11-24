@@ -19,7 +19,9 @@ import {
   validateNamespace,
   validateRelayUrl,
   validateSession,
+  validateSessionToken,
   validateToken,
+  validateWindow,
 } from "./lib/validate.js";
 
 const hostInput = {
@@ -51,9 +53,27 @@ describe("onboarding-site validation", () => {
   it("accepts wss and loopback ws only", () => {
     expect(() => validateRelayUrl("wss://relay.example")).not.toThrow();
     expect(() => validateRelayUrl("ws://127.0.0.1:8787")).not.toThrow();
+    expect(() => validateRelayUrl("ws://[::1]:8787")).not.toThrow();
+    expect(() => validateRelayUrl("wss://[::1]:8787")).not.toThrow();
     expect(() => validateRelayUrl("ws://relay.example")).toThrow(/wss/);
+    expect(() => validateRelayUrl("ws://[2001:db8::1]:8787")).toThrow(/wss/);
     expect(() => validateRelayUrl("https://relay.example")).toThrow(/wss/);
     expect(() => validateRelayUrl("wss://relay.example/path")).toThrow(/path/);
+  });
+
+  it("allows CLI-compatible short session tokens but keeps the host-token floor", () => {
+    expect(() => validateSessionToken("abc", "Session token")).not.toThrow();
+    expect(() => validateSessionToken("", "Session token")).toThrow(/required/);
+    expect(() => validateSessionToken(`${"a".repeat(8193)}`, "Session token")).toThrow(/at most/);
+    expect(() => validateToken("short", "Host token")).toThrow(/at least 32/);
+    expect(() => validateToken(`${"a".repeat(8193)}`, "Host token")).toThrow(/at most/);
+  });
+
+  it("enforces the protocol window cell limit", () => {
+    expect(() => validateWindow("2000x2000")).not.toThrow();
+    expect(() => validateWindow("2000x2001")).toThrow(/cell limit/);
+    expect(() => validateWindow("9999x9999")).toThrow(/cell limit/);
+    expect(() => validateWindow("120x40")).not.toThrow();
   });
 
   it("rejects custom commands with shell characters", () => {
@@ -140,6 +160,7 @@ describe("onboarding-site command generation", () => {
       session: "abcde.laptop",
       sessionToken: hostInput.sessionToken,
       windowSize: "120x40",
+      windowMode: "on",
     });
     expect(envelope).not.toMatch(/passcode|inviteUrl|expiresAt|jwt/i);
 

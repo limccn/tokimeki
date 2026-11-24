@@ -51,6 +51,10 @@ const ALLOWED_FIELDS = new Set([
   "kind",
   "limit",
   "observed",
+  // Host lifecycle and TURN fallback diagnostics (numeric/boolean/short enum).
+  "exitCode",
+  "signal",
+  "fallback",
 ]);
 
 function parseLogLevel(raw: string | undefined): LogLevel {

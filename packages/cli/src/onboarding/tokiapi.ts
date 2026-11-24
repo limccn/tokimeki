@@ -13,6 +13,8 @@
 
 import { isValidSessionId } from "@limccn/tokimeki-protocol";
 import { HOST_NAMESPACE_PATTERN, isNamespaceScopedSession } from "../config.js";
+import { readBodyCapped } from "../http-body.js";
+import { sanitizeLogText } from "../logger.js";
 
 export const DEFAULT_TOKIAPI_ORIGIN = "https://tokiapi.app";
 export const DEFAULT_HOSTED_RELAY_URL = "wss://relay.tokiapi.app";
@@ -148,35 +150,6 @@ export function validateProviderRelayUrl(raw: string, providerOrigin: string): s
   return `${relay.protocol}//${relay.host}${pathname}`;
 }
 
-async function readBodyCapped(response: Response): Promise<string> {
-  const reader = response.body?.getReader();
-  if (reader === undefined) return "";
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value === undefined) continue;
-    total += value.byteLength;
-    if (total > TOKIAPI_MAX_BODY_BYTES) {
-      try {
-        await reader.cancel();
-      } catch {
-        // best effort
-      }
-      throw new TokiApiError("schema", "the TokiAPI response is too large");
-    }
-    chunks.push(value);
-  }
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(merged);
-}
-
 function parseRetryAfter(response: Response): number | null {
   const header = response.headers.get("retry-after");
   if (header === null) return null;
@@ -209,7 +182,7 @@ async function requestJson(
   const retryAfter = parseRetryAfter(response);
   let text = "";
   try {
-    text = await readBodyCapped(response);
+    text = await readBodyCapped(response, TOKIAPI_MAX_BODY_BYTES);
   } catch (error) {
     if (error instanceof TokiApiError) throw error;
     throw new TokiApiError("network", "unable to read the TokiAPI response");
@@ -228,17 +201,40 @@ async function requestJson(
   return { status: response.status, body, retryAfter };
 }
 
+function hasControlCharacters(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (
+      code < 0x20 ||
+      code === 0x7f ||
+      (code >= 0x80 && code <= 0x9f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
+      code === 0x061c ||
+      code === 0x200e ||
+      code === 0x200f
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function safeProviderMessage(value: string): string | null {
+  if (value.length === 0 || value.length > 300) return null;
+  const cleaned = sanitizeLogText(value).trim();
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 function providerMessage(body: Record<string, unknown> | null): string | null {
   const error = body?.error;
-  if (typeof error === "string" && error.length > 0 && error.length <= 300) return error;
+  if (typeof error === "string") return safeProviderMessage(error);
   if (typeof error === "object" && error !== null) {
     const message = (error as Record<string, unknown>).message;
-    if (typeof message === "string" && message.length > 0 && message.length <= 300) return message;
+    if (typeof message === "string") return safeProviderMessage(message);
   }
   const message = body?.message;
-  return typeof message === "string" && message.length > 0 && message.length <= 300
-    ? message
-    : null;
+  return typeof message === "string" ? safeProviderMessage(message) : null;
 }
 
 function mapHttpError(
@@ -278,7 +274,13 @@ function mapHttpError(
 
 function requireString(record: Record<string, unknown>, name: string, max = 8192): string {
   const value = record[name];
-  if (typeof value !== "string" || value.length === 0 || value.length > max || /\s/.test(value)) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > max ||
+    /\s/.test(value) ||
+    hasControlCharacters(value)
+  ) {
     throw new TokiApiError("schema", `TokiAPI response field ${name} is invalid`);
   }
   return value;
@@ -287,7 +289,7 @@ function requireString(record: Record<string, unknown>, name: string, max = 8192
 function optionalString(record: Record<string, unknown>, name: string, max = 8192): string | null {
   const value = record[name];
   if (value === undefined || value === null) return null;
-  if (typeof value !== "string" || value.length > max) {
+  if (typeof value !== "string" || value.length > max || hasControlCharacters(value)) {
     throw new TokiApiError("schema", `TokiAPI response field ${name} is invalid`);
   }
   return value;

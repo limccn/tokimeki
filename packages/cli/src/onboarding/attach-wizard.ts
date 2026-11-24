@@ -342,6 +342,7 @@ export async function runAttachWizard(deps: AttachWizardDeps): Promise<AttachWiz
   let initialRelay = env.TOKIMEKI_RELAY_URL ?? historyEntry?.relayUrl ?? null;
   let initialSession = env.TOKIMEKI_SESSION ?? historyEntry?.session ?? null;
   let initialToken = env.TOKIMEKI_SESSION_TOKEN ?? historyEntry?.sessionToken ?? null;
+  if (initialToken !== null && initialToken.length === 0) initialToken = null;
   let namespace = env.TOKIMEKI_NAMESPACE ?? historyEntry?.namespace ?? null;
   let passcode = env.TOKIMEKI_PASSCODE ?? null;
   let hostedJwt = false;

@@ -25,6 +25,36 @@ export function isLogLevel(value: string): value is LogLevel {
 }
 
 /**
+ * Strip terminal-control characters from text that may come from a remote
+ * peer or provider. Keeps tabs/newlines as spaces so log records cannot forge
+ * a second line or emit ANSI/OSC/C1/bidi control sequences.
+ */
+export function sanitizeLogText(text: string): string {
+  let result = "";
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      result += " ";
+      continue;
+    }
+    if (
+      code < 0x20 ||
+      code === 0x7f ||
+      (code >= 0x80 && code <= 0x9f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
+      code === 0x061c ||
+      code === 0x200e ||
+      code === 0x200f
+    ) {
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+/**
  * Build a function that replaces every occurrence of a secret with a marker.
  *
  * Longest secrets are replaced first so that a secret containing another
@@ -101,13 +131,13 @@ export class Logger {
 
   /** Write a line without the level prefix and without muting (session info). */
   raw(message: string): void {
-    this.#write(this.#redact(message));
+    this.#write(sanitizeLogText(this.#redact(message)));
   }
 
   #log(level: Exclude<LogLevel, "silent">, message: string): void {
     if (this.#muted) return;
     if (LEVEL_ORDER[level] < LEVEL_ORDER[this.#level]) return;
-    this.#write(this.#redact(`[tokimeki] ${level}: ${message}`));
+    this.#write(sanitizeLogText(this.#redact(`[tokimeki] ${level}: ${message}`)));
   }
 }
 

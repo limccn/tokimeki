@@ -202,6 +202,7 @@ async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
 function makeSession(
   role: AttachConfig["role"],
   overrides: Partial<AttachConfig> = {},
+  tty: { stdin?: boolean; stdout?: boolean } = {},
 ): {
   client: FakeRelayClient;
   transport: FakeTransport;
@@ -213,6 +214,8 @@ function makeSession(
   const transport = new FakeTransport();
   const stdin = new FakeInput();
   const stdout = new FakeOutput();
+  if (tty.stdin === false) stdin.isTTY = false;
+  if (tty.stdout === false) stdout.isTTY = false;
   const logger = new Logger({ level: "silent", write: () => {} });
   const done = runAttachSession(attachConfig(role, overrides), {
     logger,
@@ -327,6 +330,29 @@ describe("attach fixed viewport", () => {
 
     client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
     await expect(done).resolves.toBe(0);
+  });
+});
+
+describe("attach sizing safety", () => {
+  it("does not send hello dimensions or resize from a non-TTY attach", async () => {
+    const { client, done } = makeSession("viewer", {}, { stdout: false });
+    await waitFor(() => client.options.role !== undefined && client.started);
+    expect(client.options.cols).toBeUndefined();
+    expect(client.options.rows).toBeUndefined();
+
+    client.emitWelcome(welcomeMessage());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(
+      client.controls.filter(
+        (control) =>
+          typeof control === "object" &&
+          control !== null &&
+          (control as { type?: string }).type === "resize",
+      ),
+    ).toHaveLength(0);
+
+    client.emitFatal({ code: "network", message: "test done" });
+    await expect(done).resolves.toBe(1);
   });
 });
 

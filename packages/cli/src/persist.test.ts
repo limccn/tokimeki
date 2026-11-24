@@ -68,7 +68,43 @@ describe("config writer", () => {
     const merged = readUserConfigRaw({ homeDir }) as Record<string, unknown>;
     expect(merged.CUSTOM_KEY).toBe("keep-me");
     expect(merged.TOKIMEKI_RELAY_URL).toBe("wss://relay2.example");
-    expect(merged.TOKIMEKI_TOKEN).toBe("host-token-1234");
+    // A relay change must not carry the previous relay's credentials/session.
+    expect(merged.TOKIMEKI_TOKEN).toBeUndefined();
+    expect(merged.TOKIMEKI_NAMESPACE).toBeUndefined();
+    expect(merged.TOKIMEKI_SESSION).toBeUndefined();
+    expect(merged.TOKIMEKI_SESSION_TOKEN).toBeUndefined();
+  });
+
+  it("keeps credentials supplied in the same relay-changing save", () => {
+    const homeDir = tempHome();
+    writeUserConfig(
+      {
+        relayUrl: "wss://relay.example",
+        namespace: "abcde",
+        token: "host-token-1234",
+        session: "abcde.laptop",
+        sessionToken: "session-token-1234",
+      },
+      { homeDir },
+    );
+    writeUserConfig(
+      {
+        relayUrl: "wss://relay2.example",
+        namespace: "fghij",
+        token: "host-token-5678",
+        session: "fghij.desktop",
+        sessionToken: "session-token-5678",
+      },
+      { homeDir },
+    );
+    const merged = readUserConfigRaw({ homeDir }) as Record<string, unknown>;
+    expect(merged).toMatchObject({
+      TOKIMEKI_RELAY_URL: "wss://relay2.example",
+      TOKIMEKI_NAMESPACE: "fghij",
+      TOKIMEKI_TOKEN: "host-token-5678",
+      TOKIMEKI_SESSION: "fghij.desktop",
+      TOKIMEKI_SESSION_TOKEN: "session-token-5678",
+    });
   });
 
   posixOnly("creates a 0600 file under a 0700 directory", () => {

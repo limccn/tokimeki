@@ -48,7 +48,7 @@ export function buildHostConfigEnvelope(input: HostConfigInput): string {
       namespace: input.namespace,
       session: input.session,
       sessionToken: input.sessionToken,
-      ...(window === undefined ? {} : { windowSize: input.windowSize }),
+      ...(window === undefined ? {} : { windowSize: input.windowSize, windowMode: "on" }),
     },
     null,
     2,

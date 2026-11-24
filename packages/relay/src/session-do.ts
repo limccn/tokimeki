@@ -1177,7 +1177,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           type: "peer-joined",
           clientId: active.clientId,
           role: active.role,
-          capabilities: hello.capabilities,
+          capabilities: boundedCapabilities(hello.capabilities),
         });
       }
     }
