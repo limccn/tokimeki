@@ -375,8 +375,10 @@ config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
 - 固定窗口实时 resize：新增 additive `display-size`/capability 刷新路径，
   更新 relay DO、协议文档/goldens、viewer 重连行为；恢复 F12 fixed 菜单项并补
   多 viewer e2e。
-- 公开发布 `tokimeki-dsh`：用户创建/授权 `limccn/tokimeki-dsh` 公开仓库、
-  配置 `NPM_TOKEN`，推送 `main`/`v0.1.0`，由 CI 发布 npm + GitHub Release。
+- 公开发布 `tokimeki-dsh`（用户 2026-11-24 决定暂缓到 v1.8）：用户创建/授权
+  `limccn/tokimeki-dsh` 公开仓库、配置 `NPM_TOKEN`，推送 `main`/`v0.1.0`，
+  由 CI 发布 npm + GitHub Release；本地源码/测试保留在
+  `D:/Workspace/tokimeki-dsh`（commit `9464dad`）。
 - skill 分发：合并 `release/0.1.6` → `main` 后验证默认分支
   `npx skills add limccn/tokimeki --skill tokimeki`、卸载与 skills.sh
   indexing request（best-effort）。
