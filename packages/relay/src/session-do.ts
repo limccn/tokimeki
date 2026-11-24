@@ -34,9 +34,14 @@ import {
   maxClientsPerSession,
   maxListenersPerSession,
   type RelayEnv,
+  sessionIdleTtlSeconds,
+  sessionMaxBytes,
+  sessionMaxMessagesPerSecond,
+  sessionMaxTtlSeconds,
   sessionTtlSeconds,
 } from "./env.js";
 import { createLogger, type Logger } from "./logging.js";
+import { deriveNamespaceFromSessionId, isNamespaceSessionId } from "./namespace-tokens.js";
 import {
   clearHostExit,
   ensureRelaySchema,
@@ -45,10 +50,12 @@ import {
   loadSessionMetadata,
   nextAgentLeaseExpiry,
   saveHostExit,
+  setAbsoluteDeadline,
   setHostOfflineDeadline,
+  setRelayBytes,
   updateLastActivity,
 } from "./storage.js";
-import { issueIceConfig } from "./turn.js";
+import { issueIceConfig, stunOnlyIceConfig } from "./turn.js";
 
 /** Anonymous sockets must send `hello` within this window. */
 const HELLO_TIMEOUT_MS = 10_000;
@@ -65,6 +72,16 @@ const RESYNC_THROTTLE_MS = 500;
  * listener never grows relay memory or blocks the host/viewers.
  */
 const LISTENER_SNAPSHOT_BUFFER_LIMIT = 1 * 1024 * 1024;
+/**
+ * Persist the session byte counter in this granularity. Hibernation between
+ * flushes can lose at most this window, so the configured byte cap is an
+ * approximate hard limit rather than an exact meter.
+ */
+const BYTES_FLUSH_THRESHOLD = 1 * 1024 * 1024;
+/** Minimum interval between idle-TTL alarm reschedules triggered by activity. */
+const IDLE_RESCHEDULE_INTERVAL_MS = 30_000;
+/** Sliding window for `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND`. */
+const MESSAGE_RATE_WINDOW_MS = 1_000;
 
 const RELAY_CAPABILITIES = {
   protocolVersion: PROTOCOL_VERSION,
@@ -93,6 +110,12 @@ interface PendingAttachment {
   readonly connectedAt: number;
   readonly deadline: number;
   readonly tokenHash: string;
+  /**
+   * Internal namespace from the Worker's `x-tokimeki-namespace` header:
+   * `"*"` for a root-master host, the namespace name for a namespace token,
+   * `null` for viewer/listener or a direct DO connection.
+   */
+  readonly namespaceId: string | null;
 }
 
 interface PendingAck {
@@ -132,6 +155,8 @@ interface ActiveAttachment {
   client?: ClientDescriptor;
   /** Rendering capabilities echoed in welcome/presence (v0.1.2). */
   capabilities?: Capabilities;
+  /** Effective namespace recorded for hosts; diagnostic only. */
+  namespaceId?: string | null;
 }
 
 type SocketAttachment = PendingAttachment | ActiveAttachment;
@@ -208,6 +233,8 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         connectedAt: raw.connectedAt,
         deadline: raw.deadline,
         tokenHash: raw.tokenHash,
+        // Missing on attachments persisted before namespace support.
+        namespaceId: typeof raw.namespaceId === "string" ? raw.namespaceId : null,
       };
     }
     return null;
@@ -257,6 +284,7 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         // so new display/client fields survive hibernation without a migration.
         ...(isRecord(raw.client) ? { client: raw.client as ClientDescriptor } : {}),
         ...(isRecord(raw.capabilities) ? { capabilities: raw.capabilities as Capabilities } : {}),
+        ...(typeof raw.namespaceId === "string" ? { namespaceId: raw.namespaceId } : {}),
       };
     }
     return null;
@@ -307,6 +335,15 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
   private purged = false;
   /** Pending trailing-resize timers, keyed by viewer socket. */
   private readonly resizeTimers = new Map<WebSocket, ReturnType<typeof setTimeout>>();
+  /** Authoritative relayed-byte counter while this DO instance is awake. */
+  private sessionBytes = 0;
+  /** Bytes counted since the last `relay_bytes` flush. */
+  private sessionBytesUnflushed = 0;
+  private sessionBytesLoaded = false;
+  /** Inbound active-socket messages inside the rate window. */
+  private readonly messageTimestamps: number[] = [];
+  /** Last activity-driven idle alarm reschedule; throttled to avoid write amplification. */
+  private lastIdleScheduleAt = 0;
 
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
@@ -324,6 +361,16 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       ensureRelaySchema(this.ctx.storage.sql);
       this.schemaReady = true;
       this.purged = false;
+      // A new/recreated session starts from its persisted counters; a stale
+      // in-memory total from a purged session must never leak into it. The rate
+      // window is reset as well: otherwise a session purged for a rate breach
+      // and recreated on the same DO instance within one second would inherit
+      // the old timestamps and close immediately.
+      this.sessionBytes = 0;
+      this.sessionBytesUnflushed = 0;
+      this.sessionBytesLoaded = false;
+      this.messageTimestamps.length = 0;
+      this.lastIdleScheduleAt = 0;
     }
   }
 
@@ -390,6 +437,13 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     }
 
     const tokenHash = await sha256Hex(token);
+    // The Worker strips any client-supplied namespace header and injects this
+    // one from the verified host credential. Viewers/listeners never carry it.
+    const namespaceHeader = request.headers.get("x-tokimeki-namespace");
+    const namespaceId =
+      roleHeader === "host" && namespaceHeader !== null && namespaceHeader.length > 0
+        ? namespaceHeader
+        : null;
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -402,12 +456,14 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       connectedAt: now,
       deadline: now + HELLO_TIMEOUT_MS,
       tokenHash,
+      namespaceId,
     });
     await this.rescheduleAlarm();
     this.logger.info("connection_opened", {
       sessionId: this.sessionId,
       role: roleHeader,
       hasToken: token.length > 0,
+      ...(namespaceId === null ? {} : { namespace: namespaceId }),
     });
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -438,10 +494,17 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       // superseded socket can never route output, signals, or lifecycle events.
       return;
     }
+    // The per-session message rate is enforced only for authenticated active
+    // sockets: an anonymous pending socket must not be able to close a session
+    // with a guessed id and an arbitrary token.
+    if (this.exceedsMessageRate(now)) {
+      await this.closeForQuota("rate");
+      return;
+    }
     if (typeof message === "string") {
       await this.handleControl(ws, attachment, message, now);
     } else {
-      this.handleBinary(ws, attachment, new Uint8Array(message), now);
+      await this.handleBinary(ws, attachment, new Uint8Array(message), now);
     }
   }
 
@@ -495,6 +558,25 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       return;
     }
 
+    // The effective namespace is derived only from the Worker-injected header:
+    // `"*"` is the root master, a concrete name is a namespace token, and the
+    // session id must carry the same `<namespace>.<slug>` prefix.
+    if (role === "host" && pending.namespaceId !== null && pending.namespaceId !== "*") {
+      if (!isNamespaceSessionId(hello.session, pending.namespaceId)) {
+        this.closeWithError(
+          ws,
+          "invalid_session",
+          "session does not belong to the host namespace",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
+    }
+    const resolvedNamespaceId: string | null =
+      pending.namespaceId === "*"
+        ? deriveNamespaceFromSessionId(hello.session)
+        : pending.namespaceId;
+
     // Fast-path duplicate check. Host duplicates are deferred until the token is
     // verified: an authenticated host may replace a stale host socket or a
     // viewer that squatted its client id while the host was offline (SEC-09).
@@ -542,6 +624,18 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           );
           return;
         }
+        // Root hosts may take over any session; a namespace host only its own
+        // namespace; a namespace-less (legacy/direct) host never a namespaced
+        // session. A legacy row is `namespaceId: null` and stays root-only.
+        if (pending.namespaceId !== "*" && meta.namespaceId !== pending.namespaceId) {
+          this.closeWithError(
+            ws,
+            "invalid_session",
+            "host namespace does not match this session",
+            CLOSE_CODES.unauthorized,
+          );
+          return;
+        }
         const onlineHost = this.findHost();
         if (onlineHost !== null && onlineHost.att.clientId !== hello.clientId) {
           this.closeWithError(
@@ -573,6 +667,17 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         );
         return;
       }
+      // Defense in depth: a session created under a namespace must only ever
+      // accept connections on its own `<namespace>.<slug>` path.
+      if (meta.namespaceId !== null && !isNamespaceSessionId(hello.session, meta.namespaceId)) {
+        this.closeWithError(
+          ws,
+          "invalid_session",
+          "session prefix does not match its namespace",
+          CLOSE_CODES.unauthorized,
+        );
+        return;
+      }
     }
 
     // The token check yields to the runtime. Re-read session state and recheck
@@ -586,6 +691,33 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         "session token changed during hello",
         CLOSE_CODES.unauthorized,
       );
+      return;
+    }
+    if (
+      latestMeta !== null &&
+      role === "host" &&
+      pending.namespaceId !== "*" &&
+      latestMeta.namespaceId !== pending.namespaceId
+    ) {
+      this.closeWithError(
+        ws,
+        "invalid_session",
+        "session namespace changed during hello",
+        CLOSE_CODES.unauthorized,
+      );
+      return;
+    }
+    // The absolute lifetime cannot be extended by a reconnect. If the alarm
+    // has not run yet, an authenticated hello is the next authoritative point
+    // to enforce it. The persisted deadline is ignored while the cap is
+    // disabled, so `TOKIMEKI_SESSION_MAX_TTL_SECONDS=0` rolls back cleanly.
+    if (
+      sessionMaxTtlSeconds(this.env) > 0 &&
+      latestMeta !== null &&
+      latestMeta.absoluteDeadline !== null &&
+      latestMeta.absoluteDeadline <= now
+    ) {
+      await this.purgeSession("absolute_ttl");
       return;
     }
     const latestExisting = this.findActive(hello.clientId);
@@ -672,6 +804,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     }
 
     if (role === "host") {
+      const maxTtl = sessionMaxTtlSeconds(this.env);
       if (latestMeta === null) {
         insertSessionMetadata(this.ctx.storage.sql, {
           sessionId: this.sessionId,
@@ -681,12 +814,20 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           sessionTtlSeconds: sessionTtlSeconds(this.env),
           maxClients,
           hostOfflineDeadline: null,
+          namespaceId: resolvedNamespaceId,
+          absoluteDeadline: maxTtl > 0 ? now + maxTtl * 1000 : null,
+          relayBytes: 0,
         });
       } else if (replacedSocket !== null) {
         this.supersedeSocket(
           replacedSocket,
           replacedSocket.att.role === "host" ? "host-reconnect" : "host-takeover",
         );
+      }
+      // A legacy row created before absolute TTLs existed gets one full window
+      // on its next host hello; once set it is never extended again.
+      if (latestMeta !== null && latestMeta.absoluteDeadline === null && maxTtl > 0) {
+        setAbsoluteDeadline(this.ctx.storage.sql, now + maxTtl * 1000);
       }
       // A new host means the session is live again: clear the offline TTL and
       // any stale exit marker. These writes run only after the capacity check
@@ -715,15 +856,23 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       ...(hello.rows === undefined ? {} : { rows: hello.rows }),
       ...(client === undefined ? {} : { client }),
       ...(displayCapabilities === undefined ? {} : { capabilities: displayCapabilities }),
+      ...(role === "host" && resolvedNamespaceId !== null
+        ? { namespaceId: resolvedNamespaceId }
+        : {}),
     };
     this.saveAttachment(ws, active);
     updateLastActivity(this.ctx.storage.sql, now);
 
-    const ice = await issueIceConfig({
-      env: this.env,
-      clientId: active.clientId,
-      sql: this.ctx.storage.sql,
-    });
+    // Listeners receive snapshots only. They can never use P2P/TURN, so they
+    // must never receive TURN credentials either.
+    const ice =
+      role === "listener"
+        ? stunOnlyIceConfig(this.env)
+        : await issueIceConfig({
+            env: this.env,
+            clientId: active.clientId,
+            sql: this.ctx.storage.sql,
+          });
     if (ice.fallbackReason !== undefined) {
       this.logger.warn("turn_fallback", {
         sessionId: this.sessionId,
@@ -815,6 +964,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       clientId: active.clientId,
       role: active.role,
       clientCount: this.activeSockets().length,
+      ...(active.namespaceId === undefined ? {} : { namespace: active.namespaceId }),
     });
     await this.rescheduleAlarm();
   }
@@ -1219,6 +1369,13 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     att: ActiveAttachment,
     requestedProvider: IceProvider | undefined,
   ): Promise<void> {
+    if (att.role === "listener") {
+      this.sendControl(
+        ws,
+        errorMessage("invalid_role", "listeners do not receive TURN credentials"),
+      );
+      return;
+    }
     const ice = await issueIceConfig({
       env: this.env,
       clientId: att.clientId,
@@ -1248,7 +1405,12 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     });
   }
 
-  private handleBinary(ws: WebSocket, att: ActiveAttachment, bytes: Uint8Array, now: number): void {
+  private async handleBinary(
+    ws: WebSocket,
+    att: ActiveAttachment,
+    bytes: Uint8Array,
+    now: number,
+  ): Promise<void> {
     let frame: ReturnType<typeof decodeFrame>;
     try {
       frame = decodeFrame(bytes);
@@ -1269,6 +1431,16 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
 
     if (frame.type === "tunnel" || frame.type === "tunnel_to") {
       this.sendControl(ws, createNotImplementedErrorMessage({ detail: "binary tunnel frames" }));
+      return;
+    }
+
+    // Count relay-delivered terminal frames exactly once per session: host
+    // OUTPUT/SNAPSHOT_TO and viewer INPUT. Invalid frames, control messages,
+    // TUNNEL records, and P2P/TUN data are outside this budget.
+    const relayed =
+      (att.role === "host" && (frame.type === "output" || frame.type === "snapshot_to")) ||
+      (att.role === "viewer" && frame.type === "input");
+    if (relayed && (await this.recordRelayBytes(bytes.byteLength))) {
       return;
     }
 
@@ -1498,6 +1670,140 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     );
   }
 
+  /**
+   * Account one relay-delivered terminal frame against the session byte cap.
+   *
+   * Returns `true` when the cap was reached and the session has been closed;
+   * the caller must not route the frame. With the cap disabled (default `0`)
+   * no counter is kept at all.
+   */
+  private async recordRelayBytes(bytes: number): Promise<boolean> {
+    const limit = sessionMaxBytes(this.env);
+    if (limit <= 0) {
+      return false;
+    }
+    this.loadRelayBytes();
+    this.sessionBytes += bytes;
+    this.sessionBytesUnflushed += bytes;
+    if (this.sessionBytesUnflushed >= BYTES_FLUSH_THRESHOLD) {
+      this.flushRelayBytes();
+    }
+    if (this.sessionBytes >= limit) {
+      await this.closeForQuota("bytes");
+      return true;
+    }
+    return false;
+  }
+
+  /** Adopt the persisted byte total once per DO instance (or per new session). */
+  private loadRelayBytes(): void {
+    if (this.sessionBytesLoaded) {
+      return;
+    }
+    const meta = this.purged ? null : loadSessionMetadata(this.ctx.storage.sql);
+    this.sessionBytes = meta?.relayBytes ?? 0;
+    this.sessionBytesUnflushed = 0;
+    this.sessionBytesLoaded = true;
+  }
+
+  /** Persist the in-memory byte total; called at most once per flush window. */
+  private flushRelayBytes(): void {
+    if (this.sessionBytesUnflushed === 0) {
+      return;
+    }
+    setRelayBytes(this.ctx.storage.sql, this.sessionBytes);
+    this.sessionBytesUnflushed = 0;
+  }
+
+  /**
+   * Slide the per-session inbound message window and report whether it
+   * exceeded `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND`.
+   *
+   * The window is per DO instance; hibernation/eviction resets it. The limit
+   * protects against short bursts, not exact billing.
+   */
+  private exceedsMessageRate(now: number): boolean {
+    const limit = sessionMaxMessagesPerSecond(this.env);
+    if (limit <= 0) {
+      return false;
+    }
+    const cutoff = now - MESSAGE_RATE_WINDOW_MS;
+    while (this.messageTimestamps.length > 0 && (this.messageTimestamps[0] ?? 0) < cutoff) {
+      this.messageTimestamps.shift();
+    }
+    this.messageTimestamps.push(now);
+    return this.messageTimestamps.length > limit;
+  }
+
+  /**
+   * Close the whole session for a hard-quota breach.
+   *
+   * Reuses the existing `session_full`/4002 capacity semantics (no new wire
+   * error code) and deletes the session state. The shared PTY is never paused;
+   * the host sees the same explicit close as every other socket.
+   */
+  private async closeForQuota(kind: "bytes" | "rate"): Promise<void> {
+    if (this.purged) {
+      return;
+    }
+    this.flushRelayBytes();
+    const meta = loadSessionMetadata(this.ctx.storage.sql);
+    const limit =
+      kind === "bytes" ? sessionMaxBytes(this.env) : sessionMaxMessagesPerSecond(this.env);
+    const observed = kind === "bytes" ? this.sessionBytes : this.messageTimestamps.length;
+    const sockets = this.ctx.getWebSockets();
+    this.purged = true;
+    this.logger.warn("quota_exceeded", {
+      sessionId: this.sessionId,
+      socketCount: sockets.length,
+      kind,
+      limit,
+      observed,
+      ...(meta?.namespaceId == null ? {} : { namespace: meta.namespaceId }),
+    });
+    for (const socket of sockets) {
+      this.closeWithError(
+        socket,
+        "session_full",
+        "session quota exceeded",
+        CLOSE_CODES.sessionFull,
+        undefined,
+        false,
+      );
+    }
+    this.schemaReady = false;
+    await this.ctx.storage.deleteAll();
+  }
+
+  /**
+   * Purge an expired session and close every socket with the existing
+   * `host_exited`/4004 lifecycle semantics (no new wire error code). Used by
+   * the absolute TTL, idle TTL, and host-offline TTL paths.
+   */
+  private async purgeSession(
+    reason: "absolute_ttl" | "idle_ttl" | "host_offline_ttl",
+  ): Promise<void> {
+    if (this.purged) {
+      return;
+    }
+    this.purged = true;
+    this.logger.info("session_expired", {
+      sessionId: this.sessionId,
+      reason,
+    });
+    const message =
+      reason === "absolute_ttl"
+        ? "session reached its absolute lifetime limit"
+        : reason === "idle_ttl"
+          ? "session expired after inactivity"
+          : "session expired after the host stayed offline past its TTL";
+    for (const socket of this.ctx.getWebSockets()) {
+      this.closeWithError(socket, "host_exited", message, CLOSE_CODES.hostExited, undefined, false);
+    }
+    this.schemaReady = false;
+    await this.ctx.storage.deleteAll();
+  }
+
   private notifyHostFlow(clientId: string, kind: "pause" | "resume"): void {
     const host = this.findHost();
     if (host === null) {
@@ -1642,32 +1948,38 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       }
     }
 
-    const hostOnline = this.isHostOnline();
     const meta = this.purged ? null : loadSessionMetadata(this.ctx.storage.sql);
-    if (
-      meta !== null &&
-      !hostOnline &&
-      meta.hostOfflineDeadline !== null &&
-      meta.hostOfflineDeadline <= now
-    ) {
-      this.purged = true;
-      this.logger.info("session_expired", {
-        sessionId: this.sessionId,
-        reason: "host_offline_ttl",
-      });
-      for (const ws of this.ctx.getWebSockets()) {
-        this.closeWithError(
-          ws,
-          "host_exited",
-          "session expired after the host stayed offline past its TTL",
-          CLOSE_CODES.hostExited,
-          undefined,
-          false,
-        );
+    if (meta !== null) {
+      // Flush the approximate byte meter before evaluating expiry so a restart
+      // after purging does not resurrect a stale (lower) persisted total.
+      if (sessionMaxBytes(this.env) > 0) {
+        this.loadRelayBytes();
+        this.flushRelayBytes();
       }
-      this.schemaReady = false;
-      await this.ctx.storage.deleteAll();
-      return;
+      // Priority: absolute TTL -> idle TTL -> host-offline TTL. A persisted
+      // absolute deadline is ignored while the cap is disabled so the env
+      // switch is a real rollback for pre-existing sessions too.
+      if (
+        sessionMaxTtlSeconds(this.env) > 0 &&
+        meta.absoluteDeadline !== null &&
+        meta.absoluteDeadline <= now
+      ) {
+        await this.purgeSession("absolute_ttl");
+        return;
+      }
+      const idleTtl = sessionIdleTtlSeconds(this.env);
+      if (idleTtl > 0 && meta.lastActivityAt + idleTtl * 1000 <= now) {
+        await this.purgeSession("idle_ttl");
+        return;
+      }
+      if (
+        !this.isHostOnline() &&
+        meta.hostOfflineDeadline !== null &&
+        meta.hostOfflineDeadline <= now
+      ) {
+        await this.purgeSession("host_offline_ttl");
+        return;
+      }
     }
 
     await this.rescheduleAlarm();
@@ -1687,8 +1999,19 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       }
     }
     const meta = this.purged ? null : loadSessionMetadata(this.ctx.storage.sql);
-    if (meta !== null && !this.isHostOnline() && meta.hostOfflineDeadline !== null) {
-      deadlines.push(meta.hostOfflineDeadline);
+    if (meta !== null) {
+      // Absolute and idle deadlines apply even while the host is online, but
+      // only while their env switches are enabled (rollback = turn them off).
+      if (sessionMaxTtlSeconds(this.env) > 0 && meta.absoluteDeadline !== null) {
+        deadlines.push(meta.absoluteDeadline);
+      }
+      const idleTtl = sessionIdleTtlSeconds(this.env);
+      if (idleTtl > 0) {
+        deadlines.push(meta.lastActivityAt + idleTtl * 1000);
+      }
+      if (!this.isHostOnline() && meta.hostOfflineDeadline !== null) {
+        deadlines.push(meta.hostOfflineDeadline);
+      }
     }
     const leaseExpiry = this.purged ? null : nextAgentLeaseExpiry(this.ctx.storage.sql, now);
     if (leaseExpiry !== null) {
@@ -1761,8 +2084,21 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
   private touch(ws: WebSocket, att: ActiveAttachment, now: number): void {
     att.lastSeenAt = now;
     this.saveAttachment(ws, att);
-    if (!this.purged) {
-      updateLastActivity(this.ctx.storage.sql, now);
+    if (this.purged) {
+      return;
+    }
+    updateLastActivity(this.ctx.storage.sql, now);
+    // Rescheduling on every message would be one SQLite write per frame; the
+    // alarm re-reads `last_activity_at` when it fires, so a throttled trailing
+    // reschedule is enough to move the idle deadline forward.
+    if (
+      sessionIdleTtlSeconds(this.env) > 0 &&
+      now - this.lastIdleScheduleAt >= IDLE_RESCHEDULE_INTERVAL_MS
+    ) {
+      this.lastIdleScheduleAt = now;
+      // Trailing reschedule only; the next alarm re-reads `last_activity_at`,
+      // so a dropped scheduling attempt cannot expire an active session.
+      void this.rescheduleAlarm().catch(() => undefined);
     }
   }
 

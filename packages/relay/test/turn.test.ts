@@ -276,6 +276,58 @@ describe("TURN credentials", () => {
     expect(issued.fallbackReason).toBeUndefined();
   });
 
+  it("defaults TURN credentials to a 15 minute TTL", async () => {
+    const issued = await issueIceConfig({
+      env: {
+        TOKIMEKI_COTURN_URLS: [STUN_URL],
+        TOKIMEKI_COTURN_SECRET: "coturn-rest-secret",
+        TOKIMEKI_STUN_URLS: "stun:stun.test.invalid:3478",
+      },
+      clientId: "client-A",
+      now: 1_000,
+    });
+    expect(issued.iceProvider).toBe("coturn");
+    expect(issued.iceExpiresAt).toBe(1_000 + 15 * 60 * 1000);
+    const turnServer = issued.iceServers.find((server) => server.username !== undefined);
+    expect(turnServer?.username).toBe("901:client-A");
+    expect(turnServer?.credential).toBe(await hmacSha1Base64("coturn-rest-secret", "901:client-A"));
+  });
+
+  it("requests the default Cloudflare TTL and clamps explicit overrides", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ iceServers: [{ urls: "turn:cf.test.invalid:3478" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const defaulted = await issueIceConfig({
+        env: { ...CLOUDFLARE, TOKIMEKI_TURN_PROVIDER: "cloudflare" },
+        clientId: "client-A",
+        now: 1_000,
+      });
+      expect(defaulted.iceProvider).toBe("cloudflare");
+      expect(defaulted.iceExpiresAt).toBe(1_000 + 15 * 60 * 1000);
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ ttl: 900 });
+
+      const clamped = await issueIceConfig({
+        env: {
+          ...CLOUDFLARE,
+          TOKIMEKI_TURN_PROVIDER: "cloudflare",
+          TOKIMEKI_TURN_TTL_SECONDS: "999999",
+        },
+        clientId: "client-B",
+        now: 0,
+      });
+      expect(clamped.iceExpiresAt).toBe(172_800_000);
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ ttl: 172_800 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("marks a configured TURN provider failure as a STUN fallback", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);

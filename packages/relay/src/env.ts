@@ -8,6 +8,7 @@ export type CoturnUrlConfig = string | readonly string[];
  *
  * Secrets are provided with `wrangler secret put`:
  * - `TOKIMEKI_MASTER_TOKEN`
+ * - `TOKIMEKI_NAMESPACE_TOKENS`
  * - `TOKIMEKI_COTURN_SECRET`
  * - `TOKIMEKI_TURN_API_TOKEN`
  *
@@ -17,7 +18,17 @@ export type CoturnUrlConfig = string | readonly string[];
 export interface RelayEnv {
   readonly SESSIONS: DurableObjectNamespace;
   readonly TOKIMEKI_MASTER_TOKEN?: string;
+  /** JSON object `{ "<namespace>": "<token>" }` for static namespace hosts. */
+  readonly TOKIMEKI_NAMESPACE_TOKENS?: string;
   readonly TOKIMEKI_SESSION_TTL_SECONDS?: string;
+  /** Absolute session lifetime from `created_at` in seconds (0 = off). */
+  readonly TOKIMEKI_SESSION_MAX_TTL_SECONDS?: string;
+  /** Inactivity lifetime from `last_activity_at` in seconds (0 = off). */
+  readonly TOKIMEKI_SESSION_IDLE_TTL_SECONDS?: string;
+  /** Relay-delivered terminal bytes allowed per session (0 = off). */
+  readonly TOKIMEKI_SESSION_MAX_BYTES?: string;
+  /** Inbound WebSocket messages per second per session (0 = off). */
+  readonly TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND?: string;
   readonly TOKIMEKI_MAX_CLIENTS_PER_SESSION?: string;
   /** Independent limit for read-only listeners (default 8). */
   readonly TOKIMEKI_MAX_LISTENERS?: string;
@@ -33,10 +44,26 @@ export interface RelayEnv {
   readonly TOKIMEKI_TURN_API_TOKEN?: string;
   readonly TOKIMEKI_TURN_TTL_SECONDS?: string;
   readonly TOKIMEKI_ICE_TRANSPORT_POLICY?: string;
+  /**
+   * Host JWT verification (all optional; unset `TOKIMEKI_JWT_JWKS_URL` =
+   * JWT mode disabled). The JWKS lives on the TokiAPI dashboard origin
+   * (`https://<dashboard>/api/tokimeki/jwks.json`), never on the relay.
+   */
+  readonly TOKIMEKI_JWT_JWKS_URL?: string;
+  /** Required when the JWKS URL is set; compared exactly against `iss`. */
+  readonly TOKIMEKI_JWT_ISSUER?: string;
+  /** Defaults to `tokimeki-relay` when the JWKS URL is set. */
+  readonly TOKIMEKI_JWT_AUDIENCE?: string;
+  readonly TOKIMEKI_JWT_JWKS_TTL_SECONDS?: string;
+  readonly TOKIMEKI_JWT_CLOCK_SKEW_SECONDS?: string;
   readonly TOKIMEKI_LOG_LEVEL?: string;
 }
 
 export const DEFAULT_SESSION_TTL_SECONDS = 86_400;
+/** Absolute session lifetime default (24h); 0 disables the cap. */
+export const DEFAULT_SESSION_MAX_TTL_SECONDS = 86_400;
+/** Upper bound on configurable session TTLs (30 days). */
+export const MAX_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const DEFAULT_MAX_CLIENTS_PER_SESSION = 8;
 export const DEFAULT_MAX_LISTENERS = 8;
 export const DEFAULT_STUN_URLS = "stun:stun.cloudflare.com:3478";
@@ -52,9 +79,68 @@ export function parsePositiveInt(
   return Math.min(Math.trunc(value), maximum);
 }
 
+/**
+ * Parse a non-negative integer environment value.
+ *
+ * `0` is meaningful for the session limits (it disables the limiter), so it is
+ * preserved instead of falling back. Negative, empty, and non-numeric values
+ * fall back to the default; values above `maximum` are clamped.
+ */
+export function parseNonNegativeInt(
+  raw: string | undefined,
+  fallback: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw.trim(), 10);
+  const value = Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  return Math.min(Math.trunc(value), maximum);
+}
+
 /** Session TTL in seconds (`TOKIMEKI_SESSION_TTL_SECONDS`, default 24h). */
 export function sessionTtlSeconds(env: RelayEnv): number {
   return parsePositiveInt(env.TOKIMEKI_SESSION_TTL_SECONDS, DEFAULT_SESSION_TTL_SECONDS);
+}
+
+/**
+ * Absolute session lifetime in seconds from `created_at`
+ * (`TOKIMEKI_SESSION_MAX_TTL_SECONDS`, default 24h, `0` = no absolute cap).
+ */
+export function sessionMaxTtlSeconds(env: {
+  readonly TOKIMEKI_SESSION_MAX_TTL_SECONDS?: string;
+}): number {
+  return parseNonNegativeInt(
+    env.TOKIMEKI_SESSION_MAX_TTL_SECONDS,
+    DEFAULT_SESSION_MAX_TTL_SECONDS,
+    MAX_SESSION_TTL_SECONDS,
+  );
+}
+
+/**
+ * Idle session lifetime in seconds from `last_activity_at`
+ * (`TOKIMEKI_SESSION_IDLE_TTL_SECONDS`, default 0 = off).
+ */
+export function sessionIdleTtlSeconds(env: {
+  readonly TOKIMEKI_SESSION_IDLE_TTL_SECONDS?: string;
+}): number {
+  return parseNonNegativeInt(env.TOKIMEKI_SESSION_IDLE_TTL_SECONDS, 0, MAX_SESSION_TTL_SECONDS);
+}
+
+/**
+ * Relay-delivered terminal bytes allowed per session
+ * (`TOKIMEKI_SESSION_MAX_BYTES`, default 0 = off).
+ */
+export function sessionMaxBytes(env: { readonly TOKIMEKI_SESSION_MAX_BYTES?: string }): number {
+  return parseNonNegativeInt(env.TOKIMEKI_SESSION_MAX_BYTES, 0);
+}
+
+/**
+ * Inbound WebSocket messages per second allowed for an active session
+ * (`TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND`, default 0 = off).
+ */
+export function sessionMaxMessagesPerSecond(env: {
+  readonly TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND?: string;
+}): number {
+  return parseNonNegativeInt(env.TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND, 0);
 }
 
 /** Maximum active clients per session (`TOKIMEKI_MAX_CLIENTS_PER_SESSION`, default 8). */

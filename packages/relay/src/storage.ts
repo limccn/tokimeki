@@ -10,9 +10,23 @@ export interface SessionMetadata {
   readonly createdAt: number;
   readonly lastActivityAt: number;
   readonly hostTokenHash: string;
+  /** Host-offline grace TTL (`TOKIMEKI_SESSION_TTL_SECONDS`). */
   readonly sessionTtlSeconds: number;
   readonly maxClients: number;
   readonly hostOfflineDeadline: number | null;
+  /**
+   * Namespace recorded when the session was created. `null` marks a legacy or
+   * root session without a `<namespace>.<slug>` prefix.
+   */
+  readonly namespaceId: string | null;
+  /**
+   * Epoch milliseconds at which the session lifetime ends regardless of host
+   * activity (`TOKIMEKI_SESSION_MAX_TTL_SECONDS`); `null` means no absolute cap
+   * (the feature is disabled or the legacy row has not seen a host hello yet).
+   */
+  readonly absoluteDeadline: number | null;
+  /** Relay-delivered terminal bytes persisted for this session so far. */
+  readonly relayBytes: number;
 }
 
 export interface HostExitRecord {
@@ -42,7 +56,10 @@ const SCHEMA_STATEMENTS = [
     host_token_hash TEXT NOT NULL,
     session_ttl_seconds INTEGER NOT NULL,
     max_clients INTEGER NOT NULL,
-    host_offline_deadline INTEGER
+    host_offline_deadline INTEGER,
+    namespace_id TEXT,
+    absolute_deadline INTEGER,
+    relay_bytes INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS session_lifecycle (
     session_id TEXT PRIMARY KEY,
@@ -117,26 +134,115 @@ const SCHEMA_STATEMENTS = [
     ON agent_runners (status, last_seen_at)`,
 ] as const;
 
+/**
+ * Additive, idempotent column migration for `session_meta`.
+ *
+ * Tables created by older releases lack newer columns, and `CREATE TABLE IF
+ * NOT EXISTS` does not add them. A fresh table already has every column, so
+ * the duplicate-column error is expected and ignored.
+ */
+function tryAddColumn(sql: SqlStorage, column: string, definition: string): void {
+  try {
+    sql.exec(`ALTER TABLE session_meta ADD COLUMN ${column} ${definition}`);
+  } catch {
+    // Column already present (or the table was just created with it).
+  }
+}
+
 /** Create the relay and reserved agent tables if they do not exist. */
 export function ensureRelaySchema(sql: SqlStorage): void {
   for (const statement of SCHEMA_STATEMENTS) {
     sql.exec(statement);
   }
+  tryAddColumn(sql, "namespace_id", "TEXT");
+  tryAddColumn(sql, "absolute_deadline", "INTEGER");
+  tryAddColumn(sql, "relay_bytes", "INTEGER NOT NULL DEFAULT 0");
 }
 
-/** Load the single session metadata row, if the session exists. */
+// A type alias (not an interface) so it satisfies SqlStorage's row-record
+// constraint through the implicit index signature.
+type SessionMetadataRow = {
+  session_id: string;
+  created_at: number;
+  last_activity_at: number;
+  host_token_hash: string;
+  session_ttl_seconds: number;
+  max_clients: number;
+  host_offline_deadline: number | null;
+  namespace_id: string | null;
+  absolute_deadline: number | null;
+  relay_bytes: number;
+};
+
+type PreQuotaSessionMetadataRow = Omit<SessionMetadataRow, "absolute_deadline" | "relay_bytes">;
+
+type PreNamespaceSessionMetadataRow = Omit<PreQuotaSessionMetadataRow, "namespace_id">;
+
+function mapSessionMetadataRow(
+  row: SessionMetadataRow | PreQuotaSessionMetadataRow | PreNamespaceSessionMetadataRow,
+): SessionMetadata {
+  return {
+    sessionId: row.session_id,
+    createdAt: row.created_at,
+    lastActivityAt: row.last_activity_at,
+    hostTokenHash: row.host_token_hash,
+    sessionTtlSeconds: row.session_ttl_seconds,
+    maxClients: row.max_clients,
+    hostOfflineDeadline: row.host_offline_deadline,
+    namespaceId: "namespace_id" in row ? (row.namespace_id ?? null) : null,
+    absoluteDeadline: "absolute_deadline" in row ? (row.absolute_deadline ?? null) : null,
+    relayBytes: "relay_bytes" in row ? (row.relay_bytes ?? 0) : 0,
+  };
+}
+
+/**
+ * Load the single session metadata row, if the session exists.
+ *
+ * The additive migrations may not have run when an old DO wakes before its
+ * next host `hello`, so the loader falls back through the historical column
+ * lists. Missing columns are treated as defaults (`namespaceId: null`,
+ * `absoluteDeadline: null`, `relayBytes: 0`).
+ */
 export function loadSessionMetadata(sql: SqlStorage): SessionMetadata | null {
   try {
     const rows = sql
-      .exec<{
-        session_id: string;
-        created_at: number;
-        last_activity_at: number;
-        host_token_hash: string;
-        session_ttl_seconds: number;
-        max_clients: number;
-        host_offline_deadline: number | null;
-      }>(
+      .exec<SessionMetadataRow>(
+        `SELECT session_id, created_at, last_activity_at, host_token_hash,
+                session_ttl_seconds, max_clients, host_offline_deadline,
+                namespace_id, absolute_deadline, relay_bytes
+           FROM session_meta
+          LIMIT 1`,
+      )
+      .toArray();
+    const row = rows[0];
+    return row === undefined ? null : mapSessionMetadataRow(row);
+  } catch {
+    return loadPreQuotaSessionMetadata(sql);
+  }
+}
+
+function loadPreQuotaSessionMetadata(sql: SqlStorage): SessionMetadata | null {
+  try {
+    const rows = sql
+      .exec<PreQuotaSessionMetadataRow>(
+        `SELECT session_id, created_at, last_activity_at, host_token_hash,
+                session_ttl_seconds, max_clients, host_offline_deadline,
+                namespace_id
+           FROM session_meta
+          LIMIT 1`,
+      )
+      .toArray();
+    const row = rows[0];
+    return row === undefined ? null : mapSessionMetadataRow(row);
+  } catch {
+    return loadPreNamespaceSessionMetadata(sql);
+  }
+}
+
+function loadPreNamespaceSessionMetadata(sql: SqlStorage): SessionMetadata | null {
+  try {
+    const rows = sql
+      .exec<PreNamespaceSessionMetadataRow>(
         `SELECT session_id, created_at, last_activity_at, host_token_hash,
                 session_ttl_seconds, max_clients, host_offline_deadline
            FROM session_meta
@@ -144,18 +250,7 @@ export function loadSessionMetadata(sql: SqlStorage): SessionMetadata | null {
       )
       .toArray();
     const row = rows[0];
-    if (row === undefined) {
-      return null;
-    }
-    return {
-      sessionId: row.session_id,
-      createdAt: row.created_at,
-      lastActivityAt: row.last_activity_at,
-      hostTokenHash: row.host_token_hash,
-      sessionTtlSeconds: row.session_ttl_seconds,
-      maxClients: row.max_clients,
-      hostOfflineDeadline: row.host_offline_deadline,
-    };
+    return row === undefined ? null : mapSessionMetadataRow(row);
   } catch {
     // The table may have been removed by `deleteAll()`; treat as no session.
     return null;
@@ -167,8 +262,9 @@ export function insertSessionMetadata(sql: SqlStorage, meta: SessionMetadata): v
   sql.exec(
     `INSERT OR REPLACE INTO session_meta
        (session_id, created_at, last_activity_at, host_token_hash,
-        session_ttl_seconds, max_clients, host_offline_deadline)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        session_ttl_seconds, max_clients, host_offline_deadline, namespace_id,
+        absolute_deadline, relay_bytes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     meta.sessionId,
     meta.createdAt,
     meta.lastActivityAt,
@@ -176,6 +272,9 @@ export function insertSessionMetadata(sql: SqlStorage, meta: SessionMetadata): v
     meta.sessionTtlSeconds,
     meta.maxClients,
     meta.hostOfflineDeadline,
+    meta.namespaceId,
+    meta.absoluteDeadline,
+    meta.relayBytes,
   );
 }
 
@@ -192,6 +291,30 @@ export function updateLastActivity(sql: SqlStorage, lastActivityAt: number): voi
 export function setHostOfflineDeadline(sql: SqlStorage, deadline: number | null): void {
   try {
     sql.exec("UPDATE session_meta SET host_offline_deadline = ?", deadline);
+  } catch {
+    // Session was deleted concurrently; nothing to update.
+  }
+}
+
+/** Set or clear the absolute session deadline. */
+export function setAbsoluteDeadline(sql: SqlStorage, deadline: number | null): void {
+  try {
+    sql.exec("UPDATE session_meta SET absolute_deadline = ?", deadline);
+  } catch {
+    // Session was deleted concurrently; nothing to update.
+  }
+}
+
+/**
+ * Persist the session's relayed-byte total.
+ *
+ * The DO keeps the authoritative counter in memory and periodically writes the
+ * total here, so this is an absolute set, not an increment. A hibernation
+ * between flushes can lose up to one flush window.
+ */
+export function setRelayBytes(sql: SqlStorage, bytes: number): void {
+  try {
+    sql.exec("UPDATE session_meta SET relay_bytes = ?", Math.max(0, bytes));
   } catch {
     // Session was deleted concurrently; nothing to update.
   }

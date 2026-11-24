@@ -39,7 +39,16 @@ npm install
 npx wrangler login
 
 # Required: host authentication. Use a strong random value.
+# (Single-owner fallback credential; disabled once namespace tokens are active.)
 npx wrangler secret put TOKIMEKI_MASTER_TOKEN
+
+# Optional: static multi-namespace host tokens (OSS multi-user).
+# Paste the JSON object when prompted; never commit it.
+npx wrangler secret put TOKIMEKI_NAMESPACE_TOKENS
+
+# Optional: TokiAPI Host JWT verification (both values are public; vars also work)
+npx wrangler secret put TOKIMEKI_JWT_JWKS_URL   # e.g. https://tokiapi.app/api/tokimeki/jwks.json
+npx wrangler secret put TOKIMEKI_JWT_ISSUER     # e.g. https://tokiapi.app
 
 # Optional TURN secrets (choose what you use)
 npx wrangler secret put TOKIMEKI_COTURN_SECRET       # coturn REST
@@ -72,9 +81,55 @@ set with `wrangler secret put` (or the Deploy Button prompt).
 
 ### Authentication
 
+Host credentials travel in the `X-Tokimeki-Token` header (**breaking change**:
+the old `X-Tokimeki-Master` header is no longer accepted; upgrade the CLI and
+relay together). The relay decides the credential kind by value shape, in this
+order:
+
+1. the single-owner fallback token (`TOKIMEKI_MASTER_TOKEN`) — only while no
+   valid namespace tokens are configured; it can take over any session
+   (root `*`);
+2. a three-segment Host JWT (only while JWT mode is enabled) — verified
+   offline against the JWKS;
+3. a static namespace token — scoped to `<namespace>.<slug>` sessions.
+
 | Name | Kind | Required | Meaning |
 |---|---|---|---|
-| `TOKIMEKI_MASTER_TOKEN` | secret | yes | Host authentication. Unset/blank rejects all hosts (fail-closed). Never give it to viewers. |
+| `TOKIMEKI_MASTER_TOKEN` | secret | no | Single-owner fallback credential (one person exclusively owning a relay). Unset/blank rejects all fallback hosts (fail-closed). **Disabled once `TOKIMEKI_NAMESPACE_TOKENS` has at least one valid entry** — including root `*` takeover; migrate hosts to `TOKIMEKI_TOKEN`. The relay logs a `fallback_token_disabled` warning while both are set. |
+| `TOKIMEKI_NAMESPACE_TOKENS` | secret | no | Static namespace host tokens as a JSON object `{ "<namespace>": "<token>" }`. Each token must be unique, >=32 bytes, and differ from the master token; namespaces match `^[a-z0-9][a-z0-9_-]{0,31}$` (max 64 entries, raw JSON <=16 KiB). A namespace host may only use `<namespace>.<slug>` sessions. Invalid/duplicate entries fail closed (namespace auth disabled; the fallback token stays usable). |
+
+> **Preflight before deploying the header rename / fallback gating**: if you
+> already set `TOKIMEKI_NAMESPACE_TOKENS` but no longer know its values (the
+> secret is write-only), deploying this relay disables the fallback token with
+> no usable namespace token — host authentication is locked out. Rotate and
+> distribute the namespace tokens first, or clear the secret to stay in
+> fallback mode.
+
+| Name | Kind | Required | Meaning |
+|---|---|---|---|
+| `TOKIMEKI_JWT_JWKS_URL` | var/secret | no | Enables Host JWT verification: absolute `https://` JWKS URL on the **TokiAPI dashboard origin** (the `BETTER_AUTH_URL` origin), e.g. `https://tokiapi.app/api/tokimeki/jwks.json`. No userinfo, no fragment. Unset/blank = JWT mode disabled: no JWT parsing, no Authorization handling, no JWKS traffic. |
+| `TOKIMEKI_JWT_ISSUER` | var/secret | with URL | Required when the JWKS URL is set; compared exactly against the `iss` claim (max 512 chars). A malformed URL or missing issuer fails closed for JWT credentials (401) while fallback/namespace tokens keep working. |
+| `TOKIMEKI_JWT_AUDIENCE` | var | no | Expected `aud` claim; default `tokimeki-relay`. |
+| `TOKIMEKI_JWT_JWKS_TTL_SECONDS` | var | no | JWKS cache lifetime; default `3600`, clamped to 60–86400. Per-isolate memory cache with in-flight dedupe; an unknown `kid` triggers one refresh per 30 s. |
+| `TOKIMEKI_JWT_CLOCK_SKEW_SECONDS` | var | no | Allowed clock skew for `iat`/`nbf`/`exp`; default `60`, clamped to 0–300. |
+
+Only `alg=ES256` tokens with `token_use=host`, a `scope` containing `host`, a
+valid `namespace` claim, and a matching `<namespace>.<slug>` session are
+admitted. Invalid JWTs return `401`; an unreachable JWKS with no usable cache
+returns `503 jwks_unavailable`. Verification is offline at the edge — the relay
+never calls TokiAPI per connection. There is no revocation list: a Host JWT is
+valid until `exp` (TokiAPI default 30 days), so rotate the signing key in
+TokiAPI to invalidate outstanding tokens.
+
+`GET /healthz` is public and intentionally minimal. `GET /auth/whoami` is the
+authenticated operations probe: it reads `X-Tokimeki-Token` (plus, only while
+JWT mode is enabled, `Authorization: Bearer`) and returns the detected
+`authMode` — `jwt` (with namespace, sub, tokenUse, scopes, expiresAt),
+`namespace` (with namespace), or `master` — plus the TURN provider/configured
+state. It never returns tokens, TURN credentials, secrets, ICE URLs, or JWKS
+content. A JWT-disabled deployment neither parses nor strips `Authorization`.
+The Worker derives the namespace from the verified credential and strips any
+client-supplied namespace header.
 
 ### Sessions
 
@@ -94,13 +149,23 @@ set with `wrangler secret put` (or the Deploy Button prompt).
 | `TOKIMEKI_ICE_TRANSPORT_POLICY` | var | `all` | Advertised policy: `all` or `relay` |
 | `TOKIMEKI_COTURN_URLS` | var | — | JSON array (or comma-separated) of coturn `turn:`/`turns:` URLs |
 | `TOKIMEKI_COTURN_SECRET` | secret | — | coturn REST shared secret |
-| `TOKIMEKI_COTURN_TTL_SECONDS` | var | `86400` | coturn credential TTL |
+| `TOKIMEKI_COTURN_TTL_SECONDS` | var | `900` | coturn credential TTL (seconds) |
 | `TOKIMEKI_TURN_URLS` | var | — | Static TURN URLs (fallback below coturn REST) |
 | `TOKIMEKI_TURN_USERNAME` | var | — | Static TURN username |
 | `TOKIMEKI_TURN_CREDENTIAL` | secret | — | Static TURN credential |
 | `TOKIMEKI_TURN_KEY_ID` | var | — | Cloudflare Realtime TURN key ID |
 | `TOKIMEKI_TURN_API_TOKEN` | secret | — | Cloudflare Realtime TURN API token |
-| `TOKIMEKI_TURN_TTL_SECONDS` | var | `86400` | Cloudflare credential TTL (Cloudflare caps at 172800) |
+| `TOKIMEKI_TURN_TTL_SECONDS` | var | `900` | Cloudflare credential TTL (Cloudflare caps at 172800) |
+
+TURN credentials default to a 15-minute lifetime; `600`–`3600` seconds is the
+recommended range. The relay cannot meter TURN bytes (media does not traverse
+it), so short-lived credentials limit the blast radius of a leaked session
+token. Deployments that need longer-lived credentials must set the matching
+TTL var explicitly; Cloudflare still clamps to 172800 seconds.
+
+Listeners are read-only snapshot-only clients and never receive TURN
+credentials: their `welcome` is STUN-only (`iceProvider: "stun"`), and an
+`ice-refresh` from a listener returns `invalid_role`.
 
 Provider selection with `auto`:
 
@@ -166,17 +231,46 @@ unless you own the domain.
 
 ```bash
 curl -s https://<your-worker>.workers.dev/healthz
+# {"ok":true,"service":"tokimeki-relay","protocolVersion":1}
+
+# Send the token from your secret store; never commit a real value.
+curl -s -H "X-Tokimeki-Token: $TOKIMEKI_MASTER_TOKEN" \
+  https://<your-worker>.workers.dev/auth/whoami
+# {"ok":true,"service":"tokimeki-relay","protocolVersion":1,"authMode":"master",
+#  "turn":{"provider":"stun","configured":false}}
 ```
 
-Expected for a fresh STUN-only deploy:
+`/healthz` is public and minimal by design (no TURN/JWT/namespace details).
+`/auth/whoami` requires a valid host credential on `X-Tokimeki-Token`, returns
+`401` without one (or with an invalid one), `503 jwks_unavailable` when JWT
+mode is configured but the JWKS is unreachable, `405` for non-GET requests, and
+sets `no-store`. Its response never contains the token, TURN credentials,
+secrets, or ICE URLs. After configuring TURN, `turn.provider` becomes `coturn`,
+`static`, or `cloudflare` and `turn.configured` becomes `true`; if it stays
+`stun`, a required var or secret is missing.
 
-```json
-{"ok":true,"service":"tokimeki-relay","protocolVersion":1,"turnProvider":"stun","turnConfigured":false}
-```
+External monitors should check `/healthz` for HTTP 200 only, or use
+`/auth/whoami` with a host credential for TURN diagnostics.
 
-After configuring TURN, `turnProvider` becomes `coturn`, `static`, or
-`cloudflare` and `turnConfigured` becomes `true`. If `turnProvider` stays
-`stun` after you configure TURN, a required var or secret is missing.
+## Edge rate limiting (recommended)
+
+The Worker implements no per-IP throttling. Put Cloudflare Rate Limiting / WAF
+rules in front of the Worker for the WebSocket upgrade path:
+
+- Limit `GET /ws/*` upgrades per client IP (for example 30 per minute).
+- Cap concurrent pending connections per IP (for example 10). The relay also
+  returns HTTP 429 once a session's OPEN sockets reach
+  `TOKIMEKI_MAX_CLIENTS_PER_SESSION * 2`.
+- Watch failure rates and block or challenge anomalous IPs; alert on spikes in
+  session creation or TURN credential issuance.
+- Rules apply to new upgrades only; established sessions are not interrupted.
+- Do not echo thresholds from the Worker or put them in error bodies. Rate
+  limit responses belong to the edge (typically HTTP 429 with a generic body).
+
+The available Cloudflare products and limits depend on the account plan, so
+this repository does not encode them in `wrangler.jsonc`. Configure them in the
+dashboard or with the Cloudflare API after deployment. Self-hosted
+alternatives should put an equivalent per-IP limiter in front of the relay.
 
 ## Updates and rollback
 
@@ -190,8 +284,8 @@ back by a Worker rollback; the schema is additive and lazy.
 
 ## Security notes
 
-- Keep `TOKIMEKI_MASTER_TOKEN` and TURN secrets out of git, logs, screenshots,
-  and issue reports.
+- Keep host credentials (`TOKIMEKI_TOKEN`, `TOKIMEKI_MASTER_TOKEN`) and TURN
+  secrets out of git, logs, screenshots, and issue reports.
 - `.dev.vars` is ignored by git; `.dev.vars.example` only contains placeholders.
 - The relay carries terminal bytes when P2P/TURN are unavailable. Treat the
   relay operator as trusted infrastructure; this is not end-to-end encryption.

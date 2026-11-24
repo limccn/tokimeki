@@ -9,6 +9,9 @@
 .trellis/
 .vscode/
 .cursor/
+.codebuddy/
+.opencode/
+.pi/
 
 # Dependencies and build output
 node_modules/

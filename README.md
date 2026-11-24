@@ -33,6 +33,13 @@ keyboard control.
 - **Multi-viewer.** Several viewers can attach; input is shared, and the host
   keeps a fixed TUI window so a new viewer never resizes the hosted program.
   Viewers letterbox or cursor-follow the fixed grid in their own terminal.
+- **Read-only listeners.** `tokimeki attach --listen` watches without keyboard
+  control, ACKs, resizing, or P2P; the host sends periodic full snapshots.
+- **Optional P2P tunnel.** `TOKIMEKI_TUNNEL=auto` adds AES-256-GCM and
+  selective-repeat ARQ over an unreliable DataChannel, with optional XOR
+  parity (`TOKIMEKI_TUNNEL_FEC=xor`); failures fall back to the relay.
+- **P2P resilience.** Fragmented P2P snapshots, direct snapshot delivery with
+  relay fallback, automatic ICE refresh, and one TURN-provider retry.
 - **Any TUI command.** Add its executable name to `TOKIMEKI_WINDOW_TUI` and run
   `tokimeki <command>` (for example `TOKIMEKI_WINDOW_TUI=claude,pi,omp` then
   `tokimeki omp`). Unknown commands are rejected unless allow-listed.
@@ -96,7 +103,8 @@ openssl rand -base64 32
 
 The relay URL will be `https://<worker-name>.<your-subdomain>.workers.dev`
 (`wss://...` for the CLI). See [Cloudflare deploy](docs/deploy-cloudflare.md)
-for custom domains, coturn, and Cloudflare TURN.
+for custom domains, namespace tokens, Host JWT verification, coturn, and
+Cloudflare TURN.
 
 ### 2. Host a session
 
@@ -110,7 +118,15 @@ tokimeki claude
 ```
 
 The host prints the **session name** and a **session token**. Share those with
-the viewer — never share the relay master token.
+the viewer — never share the relay master token. For shared relays, hosts use
+`TOKIMEKI_TOKEN` (a namespace token or TokiAPI Host JWT) with the required
+`TOKIMEKI_NAMESPACE`; see [docs/cli.md](docs/cli.md).
+
+Pass the issued credential as `TOKIMEKI_TOKEN` together with
+`TOKIMEKI_NAMESPACE` (the 5-character prefix shown on the TokiAPI page). The
+CLI sends it as `X-Tokimeki-Token` and does not need to know whether it is a
+JWT. `TOKIMEKI_NAMESPACE_TOKEN` is retired (a non-empty value makes the CLI
+exit). `TOKIMEKI_MASTER_TOKEN` remains only as the single-owner fallback.
 
 ### 3. Attach from another machine
 
@@ -132,6 +148,7 @@ tokimeki attach
 | `tokimeki pi [args...]` | Host pi in a PTY |
 | `tokimeki run -- <cmd...>` | Host any TUI/terminal program |
 | `tokimeki attach` | Attach to a hosted session |
+| `tokimeki attach --listen` | Watch read-only (no input, ACKs, or resizing) |
 | `tokimeki doctor` | Check PTY, config, and relay connectivity |
 
 Full command/env reference: [docs/cli.md](docs/cli.md).
@@ -165,12 +182,54 @@ Common host/attach variables: `TOKIMEKI_RELAY_URL`, `TOKIMEKI_MASTER_TOKEN`
 (host only), `TOKIMEKI_SESSION`, `TOKIMEKI_SESSION_TOKEN`,
 `TOKIMEKI_P2P` (`auto|off`), `TOKIMEKI_ICE_TRANSPORT_POLICY` (`all|relay`).
 
+### v1.1 configuration
+
+**Read-only listener** (viewer: `tokimeki attach --listen`):
+
+- The listener receives full ANSI snapshots only. It never sends input,
+  resize, ACK, resync, or P2P signaling, and Ctrl-C stops only the local
+  listener.
+- `TOKIMEKI_LISTENER_SNAPSHOT_MS` (host, default `1000`; 250–60000 ms) sets
+  the full-snapshot interval.
+- `TOKIMEKI_MAX_LISTENERS` (relay, default `8`) caps concurrent listeners;
+  they also count toward `TOKIMEKI_MAX_CLIENTS_PER_SESSION`.
+
+**P2P tunnel** (host + viewer, opt-in, P2P-only):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TOKIMEKI_TUNNEL` | `off` | `auto` negotiates AES-256-GCM + selective-repeat ARQ over an unreliable/unordered DataChannel |
+| `TOKIMEKI_TUNNEL_FEC` | `off` | `xor` adds one parity record per eight data records for exactly-one-loss recovery; other losses stay on ARQ |
+| `TOKIMEKI_TUNNEL_SECRET` | — | Optional >=16-byte shared secret; switches `keyMode` to `shared-secret` |
+
+Both ends need `TOKIMEKI_TUNNEL=auto` and the same key mode. A mismatch or
+tunnel failure falls back to the relay and requests a fresh snapshot without
+ending the session. With the default `session-token` key mode the relay can
+derive the keys, so this is transport hardening only, **not** end-to-end
+encryption. Only `shared-secret` with an out-of-band `TOKIMEKI_TUNNEL_SECRET`
+may be described as relay-blind.
+
+**LAN diagnostics and reserved routing:**
+
+- P2P debug logs include `lan=yes|no` for the selected candidate pair; the
+  hint does not change candidate selection or relay fallback.
+- `TOKIMEKI_ROUTE_POLICY=auto`, `TOKIMEKI_LAN_DISCOVERY=off`, and
+  `TOKIMEKI_LAN_FANOUT=off` are recognized but reserved/default-off. mDNS and
+  peer fan-out are not implemented in this release.
+
+**Automatic P2P behavior** (no configuration): fragmented DataChannel
+snapshots, direct P2P snapshot delivery with relay fallback, ICE credential
+refresh before expiry, and one TURN-provider retry before staying on relay.
+
 ## Security & privacy
 
 - Tokens are sent in headers, never in URLs; the relay master token is only
   for hosts.
 - The relay can see terminal bytes while carrying them. P2P/TURN change the
-  transport path; they are not a claim of end-to-end encryption.
+  transport path; they are not a claim of end-to-end encryption. The optional
+  TUN profile is relay-blind only when both ends use a shared
+  `TOKIMEKI_TUNNEL_SECRET`; the default `session-token` key mode is derivable
+  by the relay.
 - Use a dedicated relay/session and rotate the master token if it leaks.
 - Report vulnerabilities via [SECURITY.md](SECURITY.md), not public issues.
 
@@ -186,10 +245,10 @@ Common host/attach variables: `TOKIMEKI_RELAY_URL`, `TOKIMEKI_MASTER_TOKEN`
 
 ## Status
 
-`0.1.2` — current release. Install from
+`0.1.3` — current release. Install from
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to GitHub
 Packages; see [docs/release.md](docs/release.md)) or read the
-[v0.1.2 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.2).
+[v0.1.3 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.3).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
 limitations and the v1.1 feature history.

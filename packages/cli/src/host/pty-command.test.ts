@@ -58,7 +58,9 @@ describe("buildChildEnvironment", () => {
       ...baseOptions,
       env: {
         PATH: "/usr/bin",
+        TOKIMEKI_TOKEN: "host-token-secret",
         TOKIMEKI_MASTER_TOKEN: "master-secret",
+        TOKIMEKI_NAMESPACE_TOKENS: '{"team-a":"namespace-secret"}',
         TOKIMEKI_SESSION_TOKEN: "session-secret",
         TOKIMEKI_TUNNEL_SECRET: "tunnel-secret",
         TOKIMEKI_COTURN_SECRET: "coturn-secret",
@@ -68,7 +70,9 @@ describe("buildChildEnvironment", () => {
         TOKIMEKI_RELAY_URL: "wss://relay.example",
       },
     });
+    expect(env.TOKIMEKI_TOKEN).toBeUndefined();
     expect(env.TOKIMEKI_MASTER_TOKEN).toBeUndefined();
+    expect(env.TOKIMEKI_NAMESPACE_TOKENS).toBeUndefined();
     expect(env.TOKIMEKI_SESSION_TOKEN).toBeUndefined();
     expect(env.TOKIMEKI_TUNNEL_SECRET).toBeUndefined();
     expect(env.TOKIMEKI_COTURN_SECRET).toBeUndefined();
@@ -84,7 +88,9 @@ describe("buildChildEnvironment", () => {
       platform: "win32",
       env: {
         Path: "C:\\Windows",
+        Tokimeki_Token: "host-token-secret",
         Tokimeki_Master_Token: "master-secret",
+        Tokimeki_Namespace_Tokens: '{"team-a":"namespace-secret"}',
         tokimeki_session_token: "session-secret",
         Tokimeki_Tunnel_Secret: "tunnel-secret",
         Tokimeki_Turn_Api_Token: "turn-api-token",
@@ -92,7 +98,9 @@ describe("buildChildEnvironment", () => {
         ssh_connection: "1 2 3 4",
       },
     });
+    expect(env.Tokimeki_Token).toBeUndefined();
     expect(env.Tokimeki_Master_Token).toBeUndefined();
+    expect(env.Tokimeki_Namespace_Tokens).toBeUndefined();
     expect(env.tokimeki_session_token).toBeUndefined();
     expect(env.Tokimeki_Tunnel_Secret).toBeUndefined();
     expect(env.Tokimeki_Turn_Api_Token).toBeUndefined();

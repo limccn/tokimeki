@@ -26,4 +26,9 @@
       "new_sqlite_classes": ["SessionDurableObject"]
     }
   ]
+  // Optional Host JWT verification (all unset = JWT mode disabled):
+  //   TOKIMEKI_JWT_JWKS_URL lives on the TokiAPI dashboard origin, e.g.
+  //   https://tokiapi.app/api/tokimeki/jwks.json (https only).
+  //   TOKIMEKI_JWT_ISSUER is required with the URL; TOKIMEKI_JWT_AUDIENCE
+  //   defaults to "tokimeki-relay"; see docs/deploy-cloudflare.md.
 }

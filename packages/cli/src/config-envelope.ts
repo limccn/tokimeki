@@ -21,7 +21,12 @@ const FIELDS: Readonly<Record<string, FieldMapping>> = {
   relayUrl: { env: "TOKIMEKI_RELAY_URL", kind: "string" },
   session: { env: "TOKIMEKI_SESSION", kind: "string" },
   sessionToken: { env: "TOKIMEKI_SESSION_TOKEN", kind: "string" },
+  token: { env: "TOKIMEKI_TOKEN", kind: "string" },
   masterToken: { env: "TOKIMEKI_MASTER_TOKEN", kind: "string" },
+  // Retired: kept only so `resolveConfigEnv` / the loaders can reject it with
+  // a rename hint. It is never promoted to a usable credential.
+  namespaceToken: { env: "TOKIMEKI_NAMESPACE_TOKEN", kind: "string" },
+  namespace: { env: "TOKIMEKI_NAMESPACE", kind: "string" },
   window: { env: "TOKIMEKI_WINDOW_SIZE", kind: "size" },
   windowSize: { env: "TOKIMEKI_WINDOW_SIZE", kind: "size" },
   ptySize: { env: "TOKIMEKI_PTY_SIZE", kind: "size" },

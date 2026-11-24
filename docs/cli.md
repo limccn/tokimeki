@@ -32,6 +32,18 @@ local `claude --help` without requiring relay configuration.
 
 ## Host a session
 
+There are two host credentials:
+
+- `TOKIMEKI_TOKEN` — the normal credential: a TokiAPI **Host JWT** or a static
+  **namespace token**. The CLI treats it as an opaque string (no parsing, no
+  expiry checks) and always sends it on `X-Tokimeki-Token`. Requires
+  `TOKIMEKI_NAMESPACE`.
+- `TOKIMEKI_MASTER_TOKEN` — the **single-owner fallback credential**: one
+  person exclusively owning a relay needs only this token. A relay with at
+  least one valid `TOKIMEKI_NAMESPACE_TOKENS` entry rejects it (and root `*`
+  takeover stops working), so prefer `TOKIMEKI_TOKEN` whenever the relay is
+  shared.
+
 ```bash
 export TOKIMEKI_RELAY_URL=wss://relay.example.com
 export TOKIMEKI_MASTER_TOKEN=<relay-master-token>
@@ -40,6 +52,37 @@ tokimeki claude
 # or: tokimeki pi
 # or: tokimeki run -- htop
 ```
+
+Shared relays use `TOKIMEKI_TOKEN` (namespace token or TokiAPI Host JWT) with a
+required namespace. A host may only create sessions named `<namespace>.<slug>`;
+the relay derives the namespace from the verified credential and rejects any
+other prefix:
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.example.com
+export TOKIMEKI_TOKEN=<team-a-host-token>   # namespace token or Host JWT
+export TOKIMEKI_NAMESPACE=team-a
+
+tokimeki claude
+# session defaults to team-a.<hostname>-<cwd>; set TOKIMEKI_SESSION to override
+```
+
+`TOKIMEKI_NAMESPACE` and `TOKIMEKI_TOKEN` are a pair: both must be set
+together, the CLI exits 2 if one is missing, and every generated command or
+example names both. `TOKIMEKI_TOKEN` takes precedence over
+`TOKIMEKI_MASTER_TOKEN` when both are set (with a warning); the token is never
+written to disk, argv, URLs, or logs, and it is removed from the hosted PTY
+environment like the other secrets. `TOKIMEKI_NAMESPACE_TOKEN` is **retired**:
+a non-empty value exits 2 with a hint to rename it to `TOKIMEKI_TOKEN`.
+
+The CLI can also read a **read-only** `~/.tokimeki/config.json`
+(`%USERPROFILE%\.tokimeki\config.json` on Windows): a flat JSON object of
+`TOKIMEKI_*` keys with string/number/boolean values. Precedence is explicit
+environment variables > `TOKIMEKI_CONFIG` > config.json > defaults. Host
+credentials are selected per source layer, so a stale credential in the file
+cannot shadow an explicit environment credential. The file must be `0600` on
+POSIX when it contains credentials (`chmod 600 ~/.tokimeki/config.json`); the
+CLI never creates or writes it.
 
 On startup the host prints a banner:
 
@@ -126,8 +169,10 @@ Useful host variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TOKIMEKI_RELAY_URL` | — (required) | `wss://` relay endpoint |
-| `TOKIMEKI_MASTER_TOKEN` | — (required) | Relay host secret; never share with viewers |
-| `TOKIMEKI_SESSION` | sanitized hostname+cwd | Session name (ASCII/`._-`, <=64 chars) |
+| `TOKIMEKI_TOKEN` | — | Opaque host credential: TokiAPI Host JWT or static namespace token; requires `TOKIMEKI_NAMESPACE`; takes precedence over `TOKIMEKI_MASTER_TOKEN` |
+| `TOKIMEKI_NAMESPACE` | — | Namespace name (`^[a-z0-9][a-z0-9_-]{0,31}$`), required with `TOKIMEKI_TOKEN` |
+| `TOKIMEKI_MASTER_TOKEN` | — | Single-owner fallback credential (one person owning a relay); rejected once the relay has valid namespace tokens |
+| `TOKIMEKI_SESSION` | `<namespace>.<hostname>-<cwd>` or sanitized hostname+cwd | Session name (ASCII/`._-`, <=64 chars); token mode auto-prefixes `<namespace>.` |
 | `TOKIMEKI_SESSION_TOKEN` | generated | Per-session viewer token; generated value is printed once |
 | `TOKIMEKI_P2P` | `auto` | `off` forces the Worker relay |
 | `TOKIMEKI_ICE_TRANSPORT_POLICY` | `all` | `relay` restricts ICE to TURN (test/forced TURN) |
@@ -138,7 +183,7 @@ Useful host variables:
 | `TOKIMEKI_WINDOW_SIZE` | `120x40` | Fixed logical TUI window; cannot be changed by viewers |
 | `TOKIMEKI_LOG_PANEL_ROWS` | `8` | Debug log panel rows (`0` disables); shown only at `TOKIMEKI_LOG_LEVEL=debug` |
 | `TOKIMEKI_INVITE_KEY` | `f12` | Host overlay key: `f12`, `ctrl-]`, or `off` |
-| `TOKIMEKI_CONFIG` | — | Optional JSON config envelope; maps fields to `TOKIMEKI_*` variables; explicit env wins; JSON only, never written to disk |
+| `TOKIMEKI_CONFIG` | — | Optional JSON config envelope; maps fields to `TOKIMEKI_*` variables; explicit env wins, then `~/.tokimeki/config.json` (read-only); JSON only, never written by the CLI |
 | `TOKIMEKI_TERM` | `xterm-256color` | PTY TERM |
 | `TOKIMEKI_COLORTERM` | `truecolor` | PTY COLORTERM |
 | `TOKIMEKI_HEARTBEAT_SECONDS` | `25` | WebSocket heartbeat; `0` disables |
@@ -233,12 +278,24 @@ tokimeki attach --listen
 
 ```bash
 TOKIMEKI_RELAY_URL=wss://relay.example.com \
-TOKIMEKI_MASTER_TOKEN=<relay-master-token> \
+TOKIMEKI_TOKEN=<host-token-or-jwt> \
+TOKIMEKI_NAMESPACE=team-a \
   tokimeki doctor
 ```
 
-`doctor` checks PTY spawn support, relay `/healthz`, and host authentication
-configuration. It prints actionable warnings for missing/conflicting values.
+`doctor` checks PTY spawn support, relay `/healthz`, config-file state, and
+host authentication configuration. It recognizes `TOKIMEKI_TOKEN`
+(preferred) and `TOKIMEKI_MASTER_TOKEN` (single-owner fallback) plus
+`TOKIMEKI_NAMESPACE`, and warns about missing or conflicting values without
+printing tokens. It probes the authenticated `/auth/whoami` endpoint with the
+effective credential on `X-Tokimeki-Token` and echoes only the response's
+`authMode` (`jwt`/`namespace`/`master`) and safe fields (namespace, token_use,
+scopes, expiry, TURN provider); a mismatch between the whoami namespace and
+`TOKIMEKI_NAMESPACE` produces a warning. Older relays without whoami, or a
+relay where the credential is rejected (for example the fallback token after
+namespace tokens were enabled), produce a warning with migration hints — not a
+failure. Structural problems (invalid config JSON, bad permissions, the
+retired `TOKIMEKI_NAMESPACE_TOKEN` key) still exit 2 before doctor runs.
 
 ## Exit codes
 
@@ -305,7 +362,7 @@ existing stderr behavior.
 
 | Symptom | Check |
 |---|---|
-| `401 unauthorized` | `TOKIMEKI_MASTER_TOKEN` matches the relay secret; host/session tokens differ |
+| `401 unauthorized` | Host credential matches the relay (master or namespace token), the session prefix is `<namespace>.<slug>` in namespace mode, and host/session tokens differ |
 | `host_offline` | Host is connected to the same relay/session and still running |
 | `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
 | Viewer shows only part of the TUI | Local terminal is smaller than `TOKIMEKI_WINDOW_SIZE`; enlarge it or set a smaller fixed size at host start. The status bar shows `view:WxH@x,y` and the camera follows the TUI cursor |
@@ -325,8 +382,16 @@ All environment variables: [`.env.example`](../.env.example).
 
 ## Security
 
-- The master token authenticates **hosts**; never give it to viewers.
+- Host credentials (`TOKIMEKI_TOKEN`, `TOKIMEKI_MASTER_TOKEN`) authenticate
+  **hosts**; never give them to viewers. `TOKIMEKI_MASTER_TOKEN` is the
+  single-owner fallback credential and stops working once the relay enables
+  namespace tokens.
 - Session tokens are per session; share them over a trusted channel.
-- Tokens are sent in headers, not URLs.
+- Tokens are sent in headers, not URLs; the CLI never sends `Authorization`
+  (that carrier belongs to web/proxy Host JWT attach).
+- A leaked `TOKIMEKI_TOKEN` is valid until expiry: Host JWTs live up to 30
+  days with no revocation, and a static namespace token is a shared namespace
+  credential — rotate the value in TokiAPI (or in `TOKIMEKI_NAMESPACE_TOKENS`)
+  and restart hosts after a leak.
 - The relay can see terminal bytes while carrying them. P2P/TURN change the
   transport path; this is not end-to-end encryption.

@@ -1,10 +1,37 @@
 # 部署指南
 
-> 状态：v1 已部署到生产 Cloudflare。生产 URL 为 `https://relay.tokiapi.app`
-> （Worker `tokimeki-relay`，当前 100% 流量版本
-> `1104916c-f188-4cc5-8df6-e34ca557ffae`，2026-11-16 发布，含 v1.1 F2
-> 只读 listener 角色；上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
-> 可作为回滚参考，含 host relay 重连修复）。
+> 状态：v1.2 Host 认证切片已部署到生产 Cloudflare。生产 URL 为
+> `https://relay.tokiapi.app`（Worker `tokimeki-relay`，当前 100% 流量版本
+> `5cda681f-7a42-40a8-9ea9-cf708808ba0a`，2026-11-19 发布：
+> `X-Tokimeki-Token` 头更名、回退 token 与 namespace token 互斥、Host JWT
+> 边缘验签；生产未配置 `TOKIMEKI_JWT_*`，当前为 no-JWT。协议与 DO schema
+> 不变）。
+>
+> 2026-11-20 生产 0.1.3：部署 Worker 版本 `b4af8f47`（`relay.tokiapi.app`）。
+> `TOKIMEKI_NAMESPACE_TOKENS` 从本地 `~/namespace_token.json` 轮换为
+> `test1`/`test2`/`test3`（值不入库、不写入文档），`TOKIMEKI_MASTER_TOKEN`
+> 同步轮换；namespace 模式生效（三个 token 的 `/auth/whoami` 均返回
+> `authMode=namespace`，master 回退 401，旧 `X-Tokimeki-Master` 401）。
+> 生产 live e2e（relay-only，`E2E_SECRET_CHECK=1`、`E2E_LISTENER=1`，
+> namespace `test1`）全部 PASS：snapshot/input/broadcast/resize/listener/
+> reconnect/relay-only/Ctrl-C/secret scrub。
+>
+> 2026-11-19 生产认证状态：`TOKIMEKI_NAMESPACE_TOKENS` 已轮换为已知的
+> `e2e` namespace token（值不入库、不写入文档）；`TOKIMEKI_MASTER_TOKEN`
+> 仍保留，但因 namespace 模式生效已不再认证 host（relay 记录一次
+> `fallback_token_disabled` warning，迁移完成后应移除该 secret）。旧
+> `X-Tokimeki-Master` 客户端不再能认证 host，CLI 与 relay 必须成对升级。
+>
+> 同日生产 live e2e（relay-only、no-JWT、namespace `e2e`）通过三组：
+> 基础 host/viewer/重连/Ctrl-C；host secret 不进入 hosted PTY；只读
+> listener。`/healthz` 正常，`/auth/whoami` 返回
+> `authMode=namespace`/`namespace=e2e`，TURN provider 为 coturn。真实
+> TokiAPI Host JWT↔relay live e2e 仍 pending（生产未配置 JWKS/issuer）。
+>
+> 历史（2026-11-16）：v1 生产版本 `1104916c-f188-4cc5-8df6-e34ca557ffae`，
+> 含 v1.1 F2 只读 listener 角色；上一版本
+> `ee53cf15-2acb-45a7-b08f-dd67d70e06d6` 可作为回滚参考，含 host relay
+> 重连修复。
 > `TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_COTURN_SECRET` 与 `TOKIMEKI_TURN_API_TOKEN`
 > 已通过 `wrangler secret put` 上传；`TOKIMEKI_TURN_KEY_ID` 为 vars（Cloudflare TURN
 > 验证用，当前 provider=coturn 时不生效）。当前 `TOKIMEKI_TURN_PROVIDER=coturn`，
@@ -57,15 +84,43 @@ npx wrangler secret put TOKIMEKI_MASTER_TOKEN --config packages/relay/wrangler.j
 npx wrangler secret put TOKIMEKI_COTURN_SECRET --config packages/relay/wrangler.jsonc
 # 可选兜底：Cloudflare Realtime TURN；API token 用 secret，Key ID 可放 vars
 npx wrangler secret put TOKIMEKI_TURN_API_TOKEN --config packages/relay/wrangler.jsonc
+# 可选：TokiAPI Host JWT 验签（JWKS/issuer 也可以放 vars；都是非 secret 公开值）
+npx wrangler secret put TOKIMEKI_JWT_JWKS_URL --config packages/relay/wrangler.jsonc
+npx wrangler secret put TOKIMEKI_JWT_ISSUER --config packages/relay/wrangler.jsonc
 ```
 
 `TOKIMEKI_COTURN_URLS`、`TOKIMEKI_TURN_PROVIDER`、`TOKIMEKI_TURN_KEY_ID` 不是必须加密，
 可放 `wrangler.jsonc` 的 `vars`；所有 `*_SECRET` / `*_TOKEN` 用 secret。
 
 `wrangler.jsonc` 已声明 SessionDO binding 与 SQLite migration。Worker 的认证实现是
-fail-closed：master token 未配置时，所有 host 认证都会被拒绝（不会变成“允许所有 host”）。
-因此生产部署前必须设置该 secret。当前安装的 Wrangler 4.106.0 会忽略 `secrets.required`
-字段（仅警告），所以这一约束靠运行时 fail-closed 与部署检查保证。
+fail-closed：回退 token 未配置且没有 namespace token / JWT 时，所有 host 认证都会被
+拒绝（不会变成“允许所有 host”）。当前安装的 Wrangler 4.106.0 会忽略
+`secrets.required` 字段（仅警告），所以这一约束靠运行时 fail-closed 与部署检查保证。
+
+Host 认证（v1.2）：
+
+- Host 凭证统一在 `X-Tokimeki-Token` 头内判定（**breaking change**：旧
+  `X-Tokimeki-Master` 头不再识别，CLI 与 relay 必须成对升级）。判定顺序：
+  回退 token（仅回退模式）→ 三段式 Host JWT（仅 JWT 模式非 disabled）→
+  静态 namespace token。
+- `TOKIMEKI_MASTER_TOKEN` 是**单人独占 relay 的回退凭证**：一个 token 满足
+  owner 的全部 host 需求，可接管任意 session（root `*`）。一旦
+  `TOKIMEKI_NAMESPACE_TOKENS` 有至少一条有效条目，回退 token 立即失效
+  （即使值匹配也 401），root `*` 接管同时失效；relay 会记录一次
+  `fallback_token_disabled` warning 提示移除该 secret。
+- JWT 模式由 `TOKIMEKI_JWT_JWKS_URL` 开启：JWKS 必须是 TokiAPI 管理台域
+  （`BETTER_AUTH_URL` 的 origin）上的 `https://` URL，例如
+  `https://tokiapi.app/api/tokimeki/jwks.json`；`TOKIMEKI_JWT_ISSUER` 必填
+  （与 `iss` 精确比较），`TOKIMEKI_JWT_AUDIENCE` 默认 `tokimeki-relay`。
+  JWT 模式额外接受 `Authorization: Bearer <Host JWT>`（web/代理 attach），
+  且在转发 DO 前删除该头；未配置 JWT 时 `Authorization` 不解析、不剥离。
+  relay 只做边缘离线验签（JWKS 内存缓存 + 未知 kid 30 秒限流刷新），不逐
+  连接回调 TokiAPI；JWKS 不可达且无缓存返回 503 `jwks_unavailable`。
+- 部署前检查（生产 preflight，**重要**）：2026-11-19 已完成一次轮换——
+  `TOKIMEKI_NAMESPACE_TOKENS` 现为已知的 `e2e` namespace token（值仅保存在
+  部署者的 0600 文件中，不写入仓库）。以后每次轮换仍须先更新/分发
+  namespace token 再部署 relay，或清空该 secret 回到 fallback 模式；否则
+  新代码会禁用回退且无人能认证 host（secret 只写，无法读回旧值）。
 
 认证补充（2026-11-13 安全修复）：
 
@@ -74,6 +129,36 @@ fail-closed：master token 未配置时，所有 host 认证都会被拒绝（�
 - 所有 WebSocket 连接必须携带非空 `X-Tokimeki-Session`；缺失或空值返回 HTTP 401。
 - 每个会话的 OPEN socket 上限为 `TOKIMEKI_MAX_CLIENTS_PER_SESSION * 2`（含 pending），
   超限返回 HTTP 429；relay schema 只在该会话首次 host `hello` 时创建。
+- 只读 listener 永远不获得 TURN 凭据：其 `welcome.iceServers` 只含 STUN、
+  `iceProvider="stun"`；listener 的 `ice-refresh` 返回 `invalid_role`。host/viewer
+  的 TURN 签发行为不变。
+
+会话寿命与硬配额（2026-11-19，可分别用 env 关闭）：
+
+- `TOKIMEKI_SESSION_MAX_TTL_SECONDS`（默认 86400，`0` 关闭，上限 30 天）：从
+  `created_at` 起算的绝对寿命。host 在线也不会延长或续期；到期发送
+  `error{code:"host_exited"}` 并以关闭码 4004 关闭所有连接，然后删除该 DO 的
+  session 数据。旧行（`absolute_deadline` 为 NULL）在下一次 host `hello` 时设置
+  `now + maxTtl`，之后不再延长。长于 24h 的会话会被默认值关闭，需要更长寿命时
+  显式调大或设 `0`。
+- `TOKIMEKI_SESSION_IDLE_TTL_SECONDS`（默认 `0`/关闭）：基于 `last_activity_at`
+  的空闲寿命；任何控制帧/二进制帧/心跳都会刷新。alarm 触发时会重新读取最新
+  `last_activity_at`，未到期则重排。host 在线期间同样生效。
+- `TOKIMEKI_SESSION_MAX_BYTES`（默认 `0`/关闭）：session 生命周期内 relay 接受并
+  转发的终端字节总数，按帧计一次（host `OUTPUT`/`SNAPSHOT_TO`、viewer `INPUT`），
+  不因多个 viewer 重复放大。计数每累计 1 MiB 落盘；DO 休眠/驱逐可能丢失最后一次
+  落盘之后的增量（≤1 MiB），因此是**近似硬上限**。P2P/TUN 数据不经过 relay，
+  不计入。
+- `TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND`（默认 `0`/关闭）：活跃连接入站
+  WebSocket 消息的 1 秒滑动窗口上限；pending/未认证 socket 不参与，避免匿名连接
+  关闭他人会话。窗口随 DO 驱逐重置，用于防突发而非精确计费。
+- 超限行为：复用 `error{code:"session_full"}` + 关闭码 4002 关闭整个 session 并
+  删除数据；TTL 到期复用 `host_exited`/4004。**不新增 wire error code**，不暂停
+  共享 PTY，也不在丢帧后继续服务。
+- 旧行兼容：新列为 additive（`absolute_deadline`、`relay_bytes`），旧表缺列时读取
+  回退为 `NULL`/`0`；关闭对应 env 即回到 v1.1 行为。
+- JWT `features`/`limits` 仍是预留契约：relay 目前不读取，也没有 per-namespace
+  日流量/签发次数的精确聚合。
 
 ## 4. TURN / STUN（coturn 优先）
 
@@ -240,7 +325,9 @@ allocation 8/8：
 
 Worker 会用 `TOKIMEKI_COTURN_SECRET` 生成 TURN REST 临时凭据：
 `username=<expiry>:<clientId>`，`credential=base64(HMAC-SHA1(secret, username))`，
-TTL 由 `TOKIMEKI_COTURN_TTL_SECONDS` 控制（默认 86400）。客户端只收到临时凭据。
+TTL 由 `TOKIMEKI_COTURN_TTL_SECONDS` 控制（默认 900 秒，即 15 分钟；建议范围
+600–3600 秒）。relay 无法计量 TURN 字节，短 TTL 用于限制泄露凭据的影响面；
+仍需要 24 小时的部署必须显式设置该变量。客户端只收到临时凭据。
 
 ### 4.2 Cloudflare Realtime TURN（验证完成，当前未启用）
 
@@ -248,7 +335,7 @@ TTL 由 `TOKIMEKI_COTURN_TTL_SECONDS` 控制（默认 86400）。客户端只收
 `TOKIMEKI_TURN_PROVIDER=coturn`。Cloudflare 配置保留为未启用的验证/回退路径：
 `TOKIMEKI_TURN_KEY_ID`（vars）/ `TOKIMEKI_TURN_API_TOKEN`（secret），Worker 调用
 `POST https://rtc.live.cloudflare.com/v1/turn/keys/{id}/credentials/generate-ice-servers`
-签发短期 `iceServers`，TTL 默认 86400 秒、上限 172800 秒。验证时 provider=cloudflare、
+签发短期 `iceServers`，TTL 默认 900 秒（15 分钟）、上限 172800 秒。验证时 provider=cloudflare、
 100% 版本 `ee0e0f3c`，生产 TURN-only e2e `E2E PASS`；详见
 `.trellis/tasks/11-13-production-rollout-key-rotation/research/cloudflare-turn-verification.md`。
 把 `TOKIMEKI_TURN_PROVIDER` 改为 `cloudflare` 后重新部署即可重新启用。
@@ -326,18 +413,43 @@ export TOKIMEKI_RELAY_URL=wss://relay.tokiapi.app
 
 ```bash
 curl -sS https://relay.tokiapi.app/healthz
+# {"ok":true,"service":"tokimeki-relay","protocolVersion":1}
+
+# 认证的运维探针：按 X-Tokimeki-Token 内的凭证形态返回 authMode
+# （jwt/namespace/master）与安全字段（不含 token/凭据/JWKS）。
+# 从 0600 env 文件读取凭证；curl --config 让 token 不进入 argv。
+set -a; . ~/.tokimeki/e2e-prod.env; set +a
+curl -sS --config <(printf 'header = "X-Tokimeki-Token: %s"\n' "$TOKIMEKI_TOKEN") \
+  https://relay.tokiapi.app/auth/whoami
 # {"ok":true,"service":"tokimeki-relay","protocolVersion":1,
-#  "turnProvider":"coturn","turnConfigured":true}
+#  "authMode":"namespace","namespace":"e2e",
+#  "turn":{"provider":"coturn","configured":true}}
 ```
 
-**当前部署状态（2026-11-16）**：
+`/healthz` 是公开的最小探活，不包含 TURN/JWT/namespace 详情；外部监控只应检查
+HTTP 200。`/auth/whoami` 对缺失/错误的凭证返回 401，JWT 模式下 JWKS 不可达返回
+503 `jwks_unavailable`，非 GET 返回 405，响应为
+`no-store`，且不包含 token、TURN 凭据、secret、ICE URL 或 JWKS 内容。生产已于
+2026-11-19 部署本源码，`/healthz` 返回最小字段。
+
+**当前部署状态（2026-11-19）**：
 
 - Worker `tokimeki-relay` 已部署，URL `https://relay.tokiapi.app`。当前 100% 流量版本
-  `1104916c-f188-4cc5-8df6-e34ca557ffae`（2026-11-16 发布，含 v1.1 F2 只读
-  listener 角色）。上一版本 `ee53cf15-2acb-45a7-b08f-dd67d70e06d6`
-  （2026-11-13，含 host relay 重连修复）可作为回滚参考；更早的
-  `ee0e0f3c-9f99-4647-9604-91e2abddc20e`（Cloudflare 验证配置）与
-  `da0dde29-66e0-425e-85c0-49d053316186` 也保留。secret 不回滚。
+  `5cda681f-7a42-40a8-9ea9-cf708808ba0a`（2026-11-19 发布，含 `X-Tokimeki-Token`
+  头更名、Host JWT 边缘验签、回退/namespace 互斥；未配置任何 `TOKIMEKI_JWT_*`，
+  当前 no-JWT）。历史版本 `575a53f4-…`、`1104916c-…`（v1.1 F2 只读 listener）与
+  `ee53cf15-…`（host relay 重连修复）可作为回滚参考；更早的
+  `ee0e0f3c-…`（Cloudflare 验证配置）与 `da0dde29-…` 也保留。secret 不回滚。
+- 2026-11-19 已按 §3 preflight 通过 `wrangler secret put`（stdin）轮换
+  `TOKIMEKI_NAMESPACE_TOKENS`（namespace `e2e`），随后部署新 relay；新 token
+  仅保存在部署者的 0600 env 文件，未写入仓库、日志或命令 argv。
+  `TOKIMEKI_MASTER_TOKEN` 仍保留但已被 namespace 模式禁用（`fallback_token_disabled`），
+  迁移完成后应移除。
+- 2026-11-19 生产 no-JWT live e2e（`E2E_P2P_MODE=off`，namespace `e2e`）
+  三组通过：基础 host/viewer/重连/Ctrl-C、host secret 不进 PTY、只读
+  listener；`/auth/whoami` 返回 `authMode=namespace`。跨仓库 TokiAPI↔relay 的
+  live e2e（真实 Host JWT + 已配置 JWKS 的 relay）仍为 **pending**，不在本次
+  验收内。
 - 2026-11-16 的发布为纯代码部署（`npm run deploy:prod`），**未轮换**
   `TOKIMEKI_MASTER_TOKEN`；生产 token 继续保存在仓库外受控位置，不写入仓库、日志或
   命令历史。
@@ -373,7 +485,24 @@ npm run dev:relay
 
 所有配置走环境变量，模板见仓库根 `.env.example`。
 
-Host（托管终端）：
+Host（托管终端；共享 relay 用 TOKIMEKI_TOKEN + TOKIMEKI_NAMESPACE）：
+
+```bash
+export TOKIMEKI_RELAY_URL=wss://relay.tokiapi.app
+export TOKIMEKI_TOKEN='<namespace token 或 TokiAPI Host JWT>'
+export TOKIMEKI_NAMESPACE=team-a
+export TOKIMEKI_SESSION=team-a.proj-a   # 显式 session 必须以 "<namespace>." 开头
+export TOKIMEKI_TERM=xterm-256color
+export TOKIMEKI_COLORTERM=truecolor
+export TOKIMEKI_RESIZE_POLICY=latest
+export TOKIMEKI_P2P=auto
+export TOKIMEKI_ICE_TRANSPORT_POLICY=all
+
+npx @limccn/tokimeki claude
+```
+
+Host（单人独占 relay 的回退模式；`TOKIMEKI_MASTER_TOKEN` 在 relay 启用
+namespace token 后立即失效）：
 
 ```bash
 export TOKIMEKI_RELAY_URL=wss://relay.tokiapi.app
@@ -404,15 +533,19 @@ TURN provider 由 Worker 选择，客户端从 `welcome` / `ice` 获取 `iceServ
 不需要配置 coturn 地址或共享密钥。测试 TURN 路径时可设
 `TOKIMEKI_ICE_TRANSPORT_POLICY=relay` 强制走 TURN（仍需 Worker 已配置可用 provider）。
 
-令牌只放在 `X-Tokimeki-Master` / `X-Tokimeki-Session` header，不要放进 URL query。
+令牌只放在 `X-Tokimeki-Token` / `X-Tokimeki-Session` header（CLI 不发送
+`Authorization`），不要放进 URL query。
 日志与错误信息不得回显令牌。Host 启动 PTY 时会从子进程环境中剔除
-`TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_SESSION_TOKEN`、`TOKIMEKI_TUNNEL_SECRET`、
+`TOKIMEKI_TOKEN`、`TOKIMEKI_MASTER_TOKEN`、`TOKIMEKI_SESSION_TOKEN`、`TOKIMEKI_TUNNEL_SECRET`、
 `TOKIMEKI_COTURN_SECRET`、`TOKIMEKI_TURN_API_TOKEN`、`TOKIMEKI_TURN_CREDENTIAL`，
 避免共享终端的 viewer 通过 `env`/`printenv` 读取接入凭据。Windows 上按大小写不敏感
 匹配并删除所有变体（例如 `Tokimeki_Master_Token`）；POSIX 只删除规范大写名，保留
-用户自己的小写变量。`TOKIMEKI_MASTER_TOKEN` 与 `TOKIMEKI_SESSION_TOKEN` 必须不同。
+用户自己的小写变量。Host 凭证与 `TOKIMEKI_SESSION_TOKEN` 必须不同。
 
-`tokimeki doctor` 会检查 PTY、配置与 `/healthz` 连通性；缺失必需环境变量时 CLI 会在启动
+`tokimeki doctor` 会检查 PTY、配置文件与 `/healthz` 连通性；配置了
+`TOKIMEKI_TOKEN` 或 `TOKIMEKI_MASTER_TOKEN` 时还会用生效凭证（`X-Tokimeki-Token`）
+探测 `/auth/whoami` 并按响应报告 `authMode=jwt|namespace|master`（旧 relay 无该端点时
+只警告，不判失败，也不打印 token）。缺失必需环境变量时 CLI 会在启动
 PTY 前给出可操作错误。TLS 代理场景请确认 `TOKIMEKI_RELAY_URL` 使用 `wss://`/`https://`；
 本机回环测试可用 `ws://`/`http://`。
 
@@ -511,6 +644,27 @@ host 退出链路由 relay 接受 host 发来的 `host-exited`，持久化到 `s
 `replays host-exited to a viewer that joins after the host exit` 覆盖该重放；live e2e
 允许半开连接在心跳超时后重连并在 60 秒内收到退出事件。attach 在 P2P 活动时延迟 300 ms
 退出，给 DataChannel 上最后一段 PTY 输出留出排空时间。
+
+2026-11-17 v0.1.2 本地 e2e 扩展（`scripts/e2e/live-e2e.mjs`）：
+
+- `E2E_WINDOW=1`：host 使用 `TOKIMEKI_WINDOW=on` +
+  `TOKIMEKI_WINDOW_SIZE=100x30`，两个不同尺寸 viewer（80x24 / 120x40）。
+  断言 host PTY 始终为 100x30、viewer resize 不触发 host resize、viewer 状态栏
+  `view:80x15@...` / `view:fit`、debug 日志面板、光标跟随裁剪、鼠标坐标映射
+  到逻辑网格、F12 overlay（打开、`c` 走 OSC 52、按键被消费、Esc 关闭）以及
+  断线重连快照。`E2E_INVITE=0` 跳过 overlay。
+- `E2E_CONFIG=1`（可与 `E2E_WINDOW=1` 组合）：host 仅从 `TOKIMEKI_CONFIG`
+  JSON 读取 relay/session/token/window；显式 `TOKIMEKI_SESSION` 覆盖 JSON；
+  断言 hosted PTY 看不到 `TOKIMEKI_CONFIG` 与 secret，viewer 连到显式 session。
+- `E2E_TUNNEL_BURST=1`：TUN 数据面 4 MiB burst，两个 viewer 均收到
+  `BURST_DONE=4194304`。
+- `E2E_TUNNEL_MISMATCH=1` 配合 `E2E_TUNNEL_SECRET_HOST` /
+  `E2E_TUNNEL_SECRET_VIEWER`：host/viewer 密钥不一致，要求 fallback 到 relay
+  且输入仍回显。
+- 回归：legacy relay-only、P2P required、listener、flow-control + secret
+  check、tunnel session-token / XOR / shared-secret 全部 `E2E PASS`。
+- 失败诊断现在会脱敏 session/master token 与 viewer-config base64；F12/config
+  用例不会把 token 写入日志。
 
 ### 7.3 生产 live e2e（`wss://relay.tokiapi.app`）
 

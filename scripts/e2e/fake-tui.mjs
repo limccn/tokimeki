@@ -15,6 +15,7 @@ const stdin = process.stdin;
 let cleanedUp = false;
 let inputCount = 0;
 let lastInput = "-";
+let commandBuffer = "";
 
 // Values are never printed: the e2e test only asserts that these names are
 // absent from the PTY child environment.
@@ -26,6 +27,7 @@ const SECRET_ENV_VARS = [
   "TOKIMEKI_TURN_API_TOKEN",
   "TOKIMEKI_TURN_CREDENTIAL",
 ];
+const CONFIG_ENV_VARS = ["TOKIMEKI_CONFIG"];
 const BURST_TOTAL_BYTES = 4 * 1024 * 1024;
 const BURST_LINE = `${"0123456789abcdef".repeat(5)}\r\n`;
 const BURST_CHUNK = BURST_LINE.repeat(100);
@@ -50,8 +52,13 @@ function envCheck() {
     const value = process.env[name];
     return value !== undefined && value !== "";
   });
+  const configLeaked = CONFIG_ENV_VARS.filter((name) => {
+    const value = process.env[name];
+    return value !== undefined && value !== "";
+  });
   write(`ENV_SECRETS_PRESENT=${leaked.length}\r\n`);
   write(`ENV_SECRET_NAMES=${leaked.length === 0 ? "none" : leaked.join(",")}\r\n`);
+  write(`ENV_CONFIG_PRESENT=${configLeaked.length}\r\n`);
   write(`ENV_RELAY_URL_PRESENT=${process.env.TOKIMEKI_RELAY_URL ? "yes" : "no"}\r\n`);
   write("TOKIMEKI_ENV_CHECK_DONE\r\n");
 }
@@ -136,6 +143,7 @@ if (stdin.isTTY) {
 stdin.resume();
 stdin.on("data", (data) => {
   const text = data.toString("utf8");
+  commandBuffer = `${commandBuffer}${text}`.slice(-256);
   if (text.includes("\u0003")) {
     ctrlC();
   }
@@ -144,9 +152,30 @@ stdin.on("data", (data) => {
     cleanup();
     process.exit(0);
   }
-  if (text.includes("env-check")) envCheck();
-  if (text.includes("burst-e2e")) void burst(BURST_TOTAL_BYTES);
-  if (text.includes("redraw-e2e")) frame("redraw");
+  if (commandBuffer.includes("env-check")) {
+    commandBuffer = "";
+    envCheck();
+  }
+  if (commandBuffer.includes("burst-e2e")) {
+    commandBuffer = "";
+    void burst(BURST_TOTAL_BYTES);
+  }
+  if (commandBuffer.includes("redraw-e2e")) {
+    commandBuffer = "";
+    frame("redraw");
+  }
+  if (commandBuffer.includes("cursor-e2e")) {
+    commandBuffer = "";
+    // Move the cursor into the lower-right area so a cropped viewer viewport
+    // has to follow it; the marker is written before the move so it stays on
+    // screen at the original camera position.
+    write("\r\nCURSOR_MOVED=28,90\r\n");
+    write(`${ESC}[28;90H`);
+  }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI mouse escape sequence from the PTY
+  for (const match of text.matchAll(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g)) {
+    write(`MOUSE=${match[2]},${match[3]},${match[4]}\r\n`);
+  }
   // Echo each printable chunk so attach-side tests can prove bidirectional flow.
   const escaped = text.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
   inputCount += 1;
