@@ -18,10 +18,10 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.5)
+## Release identity (0.1.6)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.5`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.5`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.6`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.6`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@limccn/tokimeki-relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
@@ -43,6 +43,7 @@ packages/protocol/   wire contract: constants, zod control messages, frames, u64
 packages/relay/      Worker + SessionDO: auth, routing, flow control, TURN issuance, storage
 packages/cli/        CLI: cli/config, onboarding wizards, host PTY, attach viewer, transport, terminal mirror
 packages/onboarding-site/  static no-JWT multi-namespace onboarding page (Workers Static Assets)
+skills/tokimeki/     prompt-only universal agent skill + references (v1.5)
 scripts/e2e/         live e2e / cross-machine helpers
 scripts/perf/        local + cross-NAT performance harnesses (results gitignored)
 scripts/release/     version bump/check helper used by the release workflow
@@ -250,7 +251,7 @@ env); self-contained v1.4 onboarding e2e:
 - Production deploy/provider/secret changes need explicit user approval.
 - Scan changes for master/session/TURN secrets before committing.
 
-## Known limitations (0.1.5)
+## Known limitations (0.1.6)
 
 - Strict NAT↔NAT (including P2P attempts and relay fallback) and real Claude/pi
   TUI interaction were manually confirmed at the e2e layer on 2026-11-16; this
@@ -273,6 +274,14 @@ env); self-contained v1.4 onboarding e2e:
   (fragmentation-independent ARQ tuning, Reed-Solomon/multi-loss FEC) is future.
   A v2.0 lossy-network A/B validation (SCTP reliable vs TUN SR-ARQ/FEC) is
   planned; see `docs/roadmap.md` and `docs/tunnel-reliability.md`.
+- v1.5 (0.1.6): the skill lives in `skills/tokimeki/` (prompt-only, no
+  hooks/scripts/MCP/postinstall) and is installed from git with
+  `npx skills add limccn/tokimeki --skill tokimeki` (project scope; `-g`
+  global); there is no registry short name. `docs/agent-install.md` carries
+  the install prompt. The dsh plugin is a separate repository/bundle; dsh has
+  no official marketplace, and `marketplace.json` is not dsh metadata.
+  skills.sh indexing is a best-effort follow-up. The 0.1.6 CLI code is
+  unchanged from 0.1.5.
 - v1.4 (0.1.5) local verification: 601 unit tests (5 skipped), relay suites
   (155+15+23+8+12), `npm run build:site`, both Wrangler dry-runs, basic and
   `E2E_WINDOW=1` live e2e against `wrangler dev`, and the self-contained
@@ -297,11 +306,14 @@ env); self-contained v1.4 onboarding e2e:
 
 ## Documentation
 
-- User docs: `README.md`, `docs/cli.md`, `docs/deploy-cloudflare.md`.
+- User docs: `README.md`, `docs/cli.md`, `docs/deploy-cloudflare.md`,
+  `docs/onboarding-site.md`, `docs/agent-install.md`.
 - Wire protocol: `docs/protocol.md`.
 - TUN reliability trade-off (SR-ARQ vs SCTP; v2.0 A/B plan):
   `docs/tunnel-reliability.md`.
 - Production deployment: `docs/deployment.md`.
+- Agent skill: `skills/tokimeki/SKILL.md`; independent dsh plugin:
+  `https://github.com/limccn/tokimeki-dsh` (`@limccn/tokimeki-dsh`).
 - Release: `docs/release.md`.
 - Performance: `docs/perf/`.
 - Coding conventions: `.trellis/spec/` (local-only).

@@ -249,11 +249,11 @@ relay、ICE 凭据到期前自动刷新、TURN provider 失败后重试一次再
 
 ## 状态
 
-`0.1.5` — 当前发布版本。包含 v1.2 托管认证工作与 v1.4 CLI onboarding、ACP、F12 菜单/日志视图和 no-JWT 站点。
+`0.1.6` — 当前发布版本。包含 v1.2 托管认证、v1.4 CLI onboarding/ACP/F12 菜单/no-JWT 站点，以及 v1.5 agent skill 与独立 `@limccn/tokimeki-dsh` 插件。
 （Host/Session JWT、passcode、分享链接与 Web 终端集成）。从
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装（同时镜像到 GitHub
 Packages，见 [docs/release.md](docs/release.md)），或查看
-[v0.1.5 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.5)。
+[v0.1.6 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.6)。
 P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1
 功能演进见 [CHANGELOG.md](CHANGELOG.md) 与 [`CLAUDE.md`](CLAUDE.md)。
 
