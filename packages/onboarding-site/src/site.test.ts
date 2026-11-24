@@ -9,7 +9,9 @@ import {
   shellEnvLine,
 } from "./lib/commands.js";
 import { buildHostConfigEnvelope, buildViewerConfigJson, parseWindowSize } from "./lib/config.js";
+import { highlightCode } from "./lib/highlight.js";
 import { isSecureEntry, relayUrlForLocation } from "./lib/relay.js";
+import { nextTabIndex } from "./lib/tabs.js";
 import { randomSlug, randomToken } from "./lib/token.js";
 import {
   SiteError,
@@ -17,7 +19,9 @@ import {
   validateNamespace,
   validateRelayUrl,
   validateSession,
+  validateSessionToken,
   validateToken,
+  validateWindow,
 } from "./lib/validate.js";
 
 const hostInput = {
@@ -49,9 +53,27 @@ describe("onboarding-site validation", () => {
   it("accepts wss and loopback ws only", () => {
     expect(() => validateRelayUrl("wss://relay.example")).not.toThrow();
     expect(() => validateRelayUrl("ws://127.0.0.1:8787")).not.toThrow();
+    expect(() => validateRelayUrl("ws://[::1]:8787")).not.toThrow();
+    expect(() => validateRelayUrl("wss://[::1]:8787")).not.toThrow();
     expect(() => validateRelayUrl("ws://relay.example")).toThrow(/wss/);
+    expect(() => validateRelayUrl("ws://[2001:db8::1]:8787")).toThrow(/wss/);
     expect(() => validateRelayUrl("https://relay.example")).toThrow(/wss/);
     expect(() => validateRelayUrl("wss://relay.example/path")).toThrow(/path/);
+  });
+
+  it("allows CLI-compatible short session tokens but keeps the host-token floor", () => {
+    expect(() => validateSessionToken("abc", "Session token")).not.toThrow();
+    expect(() => validateSessionToken("", "Session token")).toThrow(/required/);
+    expect(() => validateSessionToken(`${"a".repeat(8193)}`, "Session token")).toThrow(/at most/);
+    expect(() => validateToken("short", "Host token")).toThrow(/at least 32/);
+    expect(() => validateToken(`${"a".repeat(8193)}`, "Host token")).toThrow(/at most/);
+  });
+
+  it("enforces the protocol window cell limit", () => {
+    expect(() => validateWindow("2000x2000")).not.toThrow();
+    expect(() => validateWindow("2000x2001")).toThrow(/cell limit/);
+    expect(() => validateWindow("9999x9999")).toThrow(/cell limit/);
+    expect(() => validateWindow("120x40")).not.toThrow();
   });
 
   it("rejects custom commands with shell characters", () => {
@@ -138,6 +160,7 @@ describe("onboarding-site command generation", () => {
       session: "abcde.laptop",
       sessionToken: hostInput.sessionToken,
       windowSize: "120x40",
+      windowMode: "on",
     });
     expect(envelope).not.toMatch(/passcode|inviteUrl|expiresAt|jwt/i);
 
@@ -155,6 +178,49 @@ describe("onboarding-site command generation", () => {
       window: { cols: 120, rows: 40 },
     });
     expect(parseWindowSize("bogus")).toBeUndefined();
+  });
+});
+
+describe("onboarding-site code highlighting", () => {
+  it("keeps shell text intact and labels keywords, keys, strings, flags", () => {
+    const command = "export TOKIMEKI_TOKEN='abc'\ntokimeki attach --listen";
+    const tokens = highlightCode(command, "shell");
+    expect(tokens.map((token) => token.text).join("")).toBe(command);
+    expect(tokens).toContainEqual({ text: "export", kind: "keyword" });
+    expect(tokens).toContainEqual({ text: "TOKIMEKI_TOKEN", kind: "key" });
+    expect(tokens).toContainEqual({ text: "'abc'", kind: "string" });
+    expect(tokens).toContainEqual({ text: "--listen", kind: "key" });
+  });
+
+  it("keeps JSON text intact and separates keys, strings, and numbers", () => {
+    const json = '{"version": 1, "session": "abcde.laptop"}';
+    const tokens = highlightCode(json, "json");
+    expect(tokens.map((token) => token.text).join("")).toBe(json);
+    expect(tokens).toContainEqual({ text: '"version"', kind: "key" });
+    expect(tokens).toContainEqual({ text: '"abcde.laptop"', kind: "string" });
+    expect(tokens).toContainEqual({ text: "1", kind: "number" });
+  });
+
+  it("returns no tokens for empty text", () => {
+    expect(highlightCode("", "shell")).toEqual([]);
+    expect(highlightCode("", "json")).toEqual([]);
+  });
+});
+
+describe("onboarding-site tab keyboard", () => {
+  it("wraps horizontal tab navigation", () => {
+    expect(nextTabIndex("ArrowRight", 0, 2)).toBe(1);
+    expect(nextTabIndex("ArrowRight", 1, 2)).toBe(0);
+    expect(nextTabIndex("ArrowLeft", 0, 2)).toBe(1);
+    expect(nextTabIndex("ArrowLeft", 1, 2)).toBe(0);
+    expect(nextTabIndex("Home", 1, 2)).toBe(0);
+    expect(nextTabIndex("End", 0, 2)).toBe(1);
+  });
+
+  it("ignores non-navigation keys and empty tablists", () => {
+    expect(nextTabIndex("Tab", 0, 2)).toBeUndefined();
+    expect(nextTabIndex("Enter", 1, 2)).toBeUndefined();
+    expect(nextTabIndex("ArrowRight", 0, 0)).toBeUndefined();
   });
 });
 

@@ -9,7 +9,9 @@
 import { ACP_CATALOG } from "./lib/acp.js";
 import { generateAttachCommand, generateHostCommand, SHELLS, type Shell } from "./lib/commands.js";
 import { buildHostConfigEnvelope, buildViewerConfigJson } from "./lib/config.js";
+import { type CodeLanguage, highlightCode } from "./lib/highlight.js";
 import { isSecureEntry, relayUrlForLocation } from "./lib/relay.js";
+import { nextTabIndex } from "./lib/tabs.js";
 import { randomSlug, randomToken } from "./lib/token.js";
 import {
   SiteError,
@@ -17,6 +19,7 @@ import {
   validateNamespace,
   validateRelayUrl,
   validateSession,
+  validateSessionToken,
   validateToken,
   validateWindow,
 } from "./lib/validate.js";
@@ -57,18 +60,16 @@ function setError(id: string, message: string | null): void {
   element.hidden = message === null;
 }
 
+function setButtonDisabled(id: string, disabled: boolean): void {
+  byId<HTMLButtonElement>(id).disabled = disabled;
+}
+
 function addOptions(target: HTMLSelectElement, entries: Array<[string, string]>): void {
   for (const [value, label] of entries) {
     const option = document.createElement("option");
     option.value = value;
     option.textContent = label;
     target.append(option);
-  }
-}
-
-function showSecrets(visible: boolean): void {
-  for (const element of document.querySelectorAll<HTMLInputElement>("input[type=password]")) {
-    element.type = visible ? "text" : "password";
   }
 }
 
@@ -92,7 +93,46 @@ function downloadText(filename: string, text: string): void {
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  // Give the browser time to start the blob download before revoking it.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+function setCodeOutput(id: string, text: string, language: CodeLanguage): void {
+  const textarea = byId<HTMLTextAreaElement>(id);
+  const highlight = byId<HTMLElement>(`${id}-highlight`);
+  const scroller = highlight.closest<HTMLElement>("pre");
+
+  textarea.value = text;
+  highlight.replaceChildren();
+  if (text.length > 0) {
+    for (const token of highlightCode(text, language)) {
+      if (token.kind === "plain") {
+        highlight.append(document.createTextNode(token.text));
+      } else {
+        const span = document.createElement("span");
+        span.className = `tok-${token.kind}`;
+        span.textContent = token.text;
+        highlight.append(span);
+      }
+    }
+  }
+  textarea.scrollTop = 0;
+  textarea.scrollLeft = 0;
+  if (scroller !== null) {
+    scroller.scrollTop = 0;
+    scroller.scrollLeft = 0;
+  }
+}
+
+function wireCodeField(id: string): void {
+  const textarea = byId<HTMLTextAreaElement>(id);
+  const highlight = byId<HTMLElement>(`${id}-highlight`);
+  const scroller = highlight.closest<HTMLElement>("pre");
+  if (scroller === null) return;
+  textarea.addEventListener("scroll", () => {
+    scroller.scrollTop = textarea.scrollTop;
+    scroller.scrollLeft = textarea.scrollLeft;
+  });
 }
 
 export function start(): void {
@@ -133,15 +173,88 @@ export function start(): void {
   select("host-shell").value = "bash";
   select("attach-shell").value = "bash";
 
-  const customWrap = byId("host-custom-wrap");
-  customWrap.hidden = true;
+  const customField = input("host-custom-command");
+  const customLabel = byId("host-custom-wrap");
+  function setCustomFieldVisible(visible: boolean): void {
+    customLabel.hidden = !visible;
+    customField.hidden = !visible;
+    if (!visible) customField.value = "";
+  }
+  setCustomFieldVisible(false);
   select("host-acp").addEventListener("change", () => {
-    customWrap.hidden = select("host-acp").value !== "custom";
+    setCustomFieldVisible(select("host-acp").value === "custom");
   });
 
-  byId("show-secrets").addEventListener("change", (event) => {
-    showSecrets((event.target as HTMLInputElement).checked);
+  const windowPresets = [
+    ...document.querySelectorAll<HTMLInputElement>('input[name="host-window-preset"]'),
+  ];
+  const customWindow = input("host-window");
+  function selectedWindowPreset(): string {
+    return windowPresets.find((preset) => preset.checked)?.value ?? "";
+  }
+  function syncWindowField(): void {
+    customWindow.hidden = selectedWindowPreset() !== "custom";
+  }
+  for (const preset of windowPresets) preset.addEventListener("change", syncWindowField);
+  syncWindowField();
+
+  const secretToggles = [...document.querySelectorAll<HTMLInputElement>("[data-secret-toggle]")];
+  function setSecretVisibility(visible: boolean): void {
+    for (const toggle of secretToggles) {
+      toggle.checked = visible;
+      toggle.setAttribute("aria-checked", String(visible));
+    }
+    for (const secret of document.querySelectorAll<HTMLInputElement>("input[data-secret]")) {
+      secret.type = visible ? "text" : "password";
+    }
+  }
+  for (const toggle of secretToggles) {
+    toggle.addEventListener("change", () => setSecretVisibility(toggle.checked));
+  }
+  setSecretVisibility(secretToggles.some((toggle) => toggle.checked));
+
+  for (const toggle of document.querySelectorAll<HTMLInputElement>('input[role="switch"]')) {
+    const sync = (): void => {
+      toggle.setAttribute("aria-checked", String(toggle.checked));
+    };
+    toggle.addEventListener("change", sync);
+    sync();
+  }
+
+  const hints = [...document.querySelectorAll<HTMLDetailsElement>("details.hint")];
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node)) return;
+    for (const hint of hints) {
+      if (hint.open && !hint.contains(event.target)) hint.open = false;
+    }
   });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    for (const hint of hints) hint.open = false;
+  });
+
+  wireCodeField("host-output");
+  wireCodeField("attach-output");
+  wireCodeField("attach-json");
+
+  let lastHost: HostDraft | null = null;
+
+  function invalidateHostOutput(): void {
+    lastHost = null;
+    setCodeOutput("host-output", "", "shell");
+    setText("host-copy-status", "");
+    setText("host-download-status", "");
+    setButtonDisabled("host-copy", true);
+    setButtonDisabled("host-download", true);
+  }
+
+  function invalidateAttachOutput(): void {
+    setCodeOutput("attach-output", "", "shell");
+    setCodeOutput("attach-json", "", "json");
+    setText("attach-copy-status", "");
+    setButtonDisabled("attach-copy", true);
+    setButtonDisabled("attach-copy-json", true);
+  }
 
   byId("host-generate-session").addEventListener("click", () => {
     const namespace = input("host-namespace").value.trim();
@@ -152,6 +265,7 @@ export function start(): void {
     try {
       validateNamespace(namespace);
       input("host-session").value = `${namespace}.${randomSlug()}`;
+      invalidateHostOutput();
       setError("host-error", null);
     } catch (error) {
       setError("host-error", error instanceof Error ? error.message : "invalid namespace");
@@ -160,10 +274,9 @@ export function start(): void {
 
   byId("host-generate-token").addEventListener("click", () => {
     input("host-session-token").value = randomToken();
+    invalidateHostOutput();
     setError("host-error", null);
   });
-
-  let lastHost: HostDraft | null = null;
 
   byId("host-generate").addEventListener("click", () => {
     try {
@@ -173,13 +286,17 @@ export function start(): void {
       const token = input("host-token").value;
       const session = input("host-session").value.trim();
       const sessionToken = input("host-session-token").value;
-      const windowSize = input("host-window").value.trim();
+      const preset = selectedWindowPreset();
+      const windowSize = preset === "custom" ? customWindow.value.trim() : preset;
       const acpId = select("host-acp").value;
       const customCommand = input("host-custom-command").value.trim();
       validateNamespace(namespace);
       validateToken(token, "Host token");
       validateSession(session, namespace);
-      validateToken(sessionToken, "Session token");
+      validateSessionToken(sessionToken, "Session token");
+      if (token === sessionToken) {
+        throw new SiteError("Host token and session token must be different");
+      }
       validateWindow(windowSize);
       if (acpId === "custom") validateCustomCommand(customCommand);
       const shell = select("host-shell").value as Shell;
@@ -205,19 +322,20 @@ export function start(): void {
         shell,
         ...(windowSize.length === 0 ? {} : { windowSize }),
       };
-      setText("host-output", command);
-      setText("host-copy-status", "");
-      byId("host-download").removeAttribute("disabled");
+      setCodeOutput("host-output", command, "shell");
+      setText("host-copy-status", "command generated");
+      setText("host-download-status", "");
+      setButtonDisabled("host-copy", false);
+      setButtonDisabled("host-download", false);
       setError("host-error", null);
     } catch (error) {
-      lastHost = null;
-      byId("host-download").setAttribute("disabled", "");
+      invalidateHostOutput();
       setError("host-error", error instanceof Error ? error.message : "could not generate");
     }
   });
 
   byId("host-copy").addEventListener("click", () => {
-    void copyText(byId("host-output").textContent ?? "", "host-copy-status");
+    void copyText(byId<HTMLTextAreaElement>("host-output").value, "host-copy-status");
   });
 
   byId("host-download").addEventListener("click", () => {
@@ -233,10 +351,7 @@ export function start(): void {
         ...(lastHost.windowSize === undefined ? {} : { windowSize: lastHost.windowSize }),
       }),
     );
-    setText(
-      "host-download-status",
-      "downloaded: chmod 600 the file, use it with `tokimeki --config`, and delete it when done",
-    );
+    setText("host-download-status", "downloaded — treat it as a secret and delete it when done");
   });
 
   byId("attach-generate").addEventListener("click", () => {
@@ -248,7 +363,7 @@ export function start(): void {
       const namespace = session.includes(".") ? (session.split(".")[0] ?? "") : "";
       validateNamespace(namespace);
       validateSession(session, namespace);
-      validateToken(sessionToken, "Session token");
+      validateSessionToken(sessionToken, "Session token");
       const shell = select("attach-shell").value as Shell;
       const listener = input("attach-listener").checked;
       const command = generateAttachCommand({
@@ -258,34 +373,88 @@ export function start(): void {
         shell,
         listener,
       });
-      setText("attach-output", command);
-      setText("attach-json", buildViewerConfigJson({ relayUrl, session, sessionToken }));
-      byId("attach-copy-json").removeAttribute("disabled");
+      setCodeOutput("attach-output", command, "shell");
+      setCodeOutput(
+        "attach-json",
+        buildViewerConfigJson({ relayUrl, session, sessionToken }),
+        "json",
+      );
+      setText("attach-copy-status", "command generated");
+      setButtonDisabled("attach-copy", false);
+      setButtonDisabled("attach-copy-json", false);
       setError("attach-error", null);
     } catch (error) {
-      byId("attach-copy-json").setAttribute("disabled", "");
+      invalidateAttachOutput();
       setError("attach-error", error instanceof Error ? error.message : "could not generate");
     }
   });
 
   byId("attach-copy").addEventListener("click", () => {
-    void copyText(byId("attach-output").textContent ?? "", "attach-copy-status");
+    void copyText(byId<HTMLTextAreaElement>("attach-output").value, "attach-copy-status");
   });
   byId("attach-copy-json").addEventListener("click", () => {
-    void copyText(byId("attach-json").textContent ?? "", "attach-copy-status");
+    void copyText(byId<HTMLTextAreaElement>("attach-json").value, "attach-copy-status");
   });
 
-  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
-    button.addEventListener("click", () => {
-      const tab = button.dataset.tab;
-      for (const panel of document.querySelectorAll<HTMLElement>("[data-panel]")) {
-        panel.hidden = panel.dataset.panel !== tab;
-      }
-      for (const other of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
-        other.setAttribute("aria-selected", other === button ? "true" : "false");
-      }
-    });
+  // Any edit invalidates generated output so Copy/Download cannot silently
+  // return a stale command or config after the form changes.
+  for (const id of [
+    "host-namespace",
+    "host-token",
+    "host-session",
+    "host-session-token",
+    "host-custom-command",
+    "host-window",
+  ]) {
+    input(id).addEventListener("input", invalidateHostOutput);
   }
+  select("host-acp").addEventListener("change", invalidateHostOutput);
+  select("host-shell").addEventListener("change", invalidateHostOutput);
+  for (const preset of windowPresets) preset.addEventListener("change", invalidateHostOutput);
+
+  for (const id of ["attach-session", "attach-token"]) {
+    input(id).addEventListener("input", invalidateAttachOutput);
+  }
+  select("attach-shell").addEventListener("change", invalidateAttachOutput);
+  input("attach-listener").addEventListener("change", invalidateAttachOutput);
+
+  const tabs = [...document.querySelectorAll<HTMLButtonElement>("[data-tab]")];
+
+  function activateTab(tab: HTMLButtonElement): void {
+    const target = tab.dataset.tab;
+    for (const panel of document.querySelectorAll<HTMLElement>("[data-panel]")) {
+      panel.hidden = panel.dataset.panel !== target;
+    }
+    for (const other of tabs) {
+      const selected = other === tab;
+      other.setAttribute("aria-selected", String(selected));
+      other.tabIndex = selected ? 0 : -1;
+    }
+  }
+
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => activateTab(tab));
+  }
+
+  const tablist = document.querySelector<HTMLElement>('[role="tablist"]');
+  tablist?.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const current = target.closest<HTMLButtonElement>("[data-tab]");
+    if (current === null) return;
+    const index = tabs.indexOf(current);
+    if (index < 0) return;
+    const next = nextTabIndex(event.key, index, tabs.length);
+    if (next === undefined) return;
+    const nextTab = tabs[next];
+    if (nextTab === undefined) return;
+    event.preventDefault();
+    activateTab(nextTab);
+    nextTab.focus();
+  });
+
+  const initialTab = tabs.find((tab) => tab.getAttribute("aria-selected") === "true") ?? tabs[0];
+  if (initialTab !== undefined) activateTab(initialTab);
 
   setError("host-error", null);
   setError("attach-error", null);

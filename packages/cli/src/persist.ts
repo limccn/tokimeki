@@ -337,6 +337,40 @@ export function writeUserConfig(
   return withFileLock(path, () => {
     const existing = readJsonObject(path, CONFIG_FILE_MAX_BYTES, platform) ?? {};
     const merged: Record<string, unknown> = { ...existing };
+    const warnings: string[] = [];
+    const relayChanged =
+      input.relayUrl !== undefined && existing.TOKIMEKI_RELAY_URL !== input.relayUrl;
+    if (relayChanged) {
+      // Never carry a credential, passcode, or namespace from a previous relay
+      // into a config that now targets a different relay. Keep only values
+      // explicitly supplied in this save.
+      const staleKeys = [
+        "TOKIMEKI_NAMESPACE",
+        "TOKIMEKI_TOKEN",
+        "TOKIMEKI_MASTER_TOKEN",
+        "TOKIMEKI_NAMESPACE_TOKEN",
+        "TOKIMEKI_NAMESPACE_TOKENS",
+        "TOKIMEKI_SESSION",
+        "TOKIMEKI_SESSION_TOKEN",
+        "TOKIMEKI_PASSCODE",
+        "TOKIMEKI_TUNNEL_SECRET",
+        "TOKIMEKI_COTURN_SECRET",
+        "TOKIMEKI_TURN_API_TOKEN",
+        "TOKIMEKI_TURN_CREDENTIAL",
+        "TOKIMEKI_CONFIG",
+        "TOKIMEKI_ATTACH_URL",
+      ] as const;
+      for (const key of staleKeys) {
+        if (key === "TOKIMEKI_NAMESPACE" && input.namespace !== undefined) continue;
+        if (key === "TOKIMEKI_TOKEN" && input.token !== undefined) continue;
+        if (key === "TOKIMEKI_SESSION" && input.session !== undefined) continue;
+        if (key === "TOKIMEKI_SESSION_TOKEN" && input.sessionToken !== undefined) continue;
+        delete merged[key];
+      }
+      warnings.push(
+        "relay URL changed; previous host credentials were cleared unless supplied in this save",
+      );
+    }
     for (const key of CONFIG_WRITE_KEYS) {
       const value = values[key];
       if (value === undefined) continue;
@@ -346,7 +380,7 @@ export function writeUserConfig(
         merged[key] = value;
       }
     }
-    const warnings = atomicWriteJson(path, merged, platform);
+    warnings.push(...atomicWriteJson(path, merged, platform));
     return { path, warnings };
   });
 }
@@ -370,7 +404,10 @@ function normalizeHistoryEntry(value: unknown, path: string): HistoryEntry | nul
   if (typeof session !== "string" || session.length === 0) return null;
   if (typeof lastUsedAt !== "number" || !Number.isFinite(lastUsedAt)) return null;
   const namespace = typeof record.namespace === "string" ? record.namespace : undefined;
-  const sessionToken = typeof record.sessionToken === "string" ? record.sessionToken : undefined;
+  const sessionToken =
+    typeof record.sessionToken === "string" && record.sessionToken.length > 0
+      ? record.sessionToken
+      : undefined;
   const label = typeof record.label === "string" ? record.label : undefined;
   void path;
   return {
@@ -451,14 +488,21 @@ function sortAndLimit(entries: readonly HistoryEntry[]): HistoryEntry[] {
     .slice(0, HISTORY_MAX_ENTRIES);
 }
 
-function writeHistory(entries: readonly HistoryEntry[], options: PersistOptions): WriteResult {
+/** Caller must hold the history lock. */
+function writeHistoryEntriesLocked(
+  entries: readonly HistoryEntry[],
+  options: PersistOptions,
+): WriteResult {
   const platform = options.platform ?? process.platform;
   const path = historyPath(options);
+  const warnings = atomicWriteJson(path, sortAndLimit(entries), platform);
+  return { path, warnings };
+}
+
+function writeHistory(entries: readonly HistoryEntry[], options: PersistOptions): WriteResult {
+  const path = historyPath(options);
   ensureParentDirectory(path);
-  return withFileLock(path, () => {
-    const warnings = atomicWriteJson(path, sortAndLimit(entries), platform);
-    return { path, warnings };
-  });
+  return withFileLock(path, () => writeHistoryEntriesLocked(entries, options));
 }
 
 /**
@@ -478,35 +522,43 @@ export function addHistoryEntry(
       "the session token looks like a hosted Session JWT; it must not be written to history",
     );
   }
-  const existing = readHistory(options).entries;
-  const lastUsedAt = entry.lastUsedAt ?? (options.now ?? Date.now)();
-  const filtered = existing.filter(
-    (item) => !(item.relayUrl === entry.relayUrl && item.session === entry.session),
-  );
-  const next: HistoryEntry = {
-    relayUrl: entry.relayUrl,
-    session: entry.session,
-    lastUsedAt,
-    ...(entry.namespace === undefined ? {} : { namespace: entry.namespace }),
-    ...(entry.sessionToken === undefined ? {} : { sessionToken: entry.sessionToken }),
-    ...(entry.label === undefined ? {} : { label: entry.label }),
-  };
-  return writeHistory([next, ...filtered], options);
+  const path = historyPath(options);
+  ensureParentDirectory(path);
+  return withFileLock(path, () => {
+    const existing = readHistory(options).entries;
+    const lastUsedAt = entry.lastUsedAt ?? (options.now ?? Date.now)();
+    const filtered = existing.filter(
+      (item) => !(item.relayUrl === entry.relayUrl && item.session === entry.session),
+    );
+    const next: HistoryEntry = {
+      relayUrl: entry.relayUrl,
+      session: entry.session,
+      lastUsedAt,
+      ...(entry.namespace === undefined ? {} : { namespace: entry.namespace }),
+      ...(entry.sessionToken === undefined ? {} : { sessionToken: entry.sessionToken }),
+      ...(entry.label === undefined ? {} : { label: entry.label }),
+    };
+    return writeHistoryEntriesLocked([next, ...filtered], options);
+  });
 }
 
 export function removeHistoryEntry(
   session: string,
   options: PersistOptions & { readonly relayUrl?: string } = {},
 ): WriteResult {
-  const existing = readHistory(options).entries;
-  const filtered = existing.filter(
-    (item) =>
-      !(
-        item.session === session &&
-        (options.relayUrl === undefined || item.relayUrl === options.relayUrl)
-      ),
-  );
-  return writeHistory(filtered, options);
+  const path = historyPath(options);
+  ensureParentDirectory(path);
+  return withFileLock(path, () => {
+    const existing = readHistory(options).entries;
+    const filtered = existing.filter(
+      (item) =>
+        !(
+          item.session === session &&
+          (options.relayUrl === undefined || item.relayUrl === options.relayUrl)
+        ),
+    );
+    return writeHistoryEntriesLocked(filtered, options);
+  });
 }
 
 export function clearHistory(options: PersistOptions = {}): WriteResult {

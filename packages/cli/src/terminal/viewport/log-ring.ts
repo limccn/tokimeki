@@ -6,20 +6,12 @@
  * so log content can never forge terminal output or grow without limit.
  */
 
+import { sanitizeLogText } from "../../logger.js";
+
 export const LOG_LINE_MAX_CHARS = 4096;
 
 export function sanitizeLogLine(line: string): string {
-  let result = "";
-  for (const char of line) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) {
-      if (code === 0x09) result += " ";
-    } else {
-      result += char;
-    }
-    if (result.length >= LOG_LINE_MAX_CHARS) break;
-  }
-  return result;
+  return sanitizeLogText(line).slice(0, LOG_LINE_MAX_CHARS);
 }
 
 export class LogRing {

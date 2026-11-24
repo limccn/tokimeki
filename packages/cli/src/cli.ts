@@ -490,6 +490,7 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
   const resolveAttachUrl = async (
     urlOrEnv: string,
     listenerFlag: boolean,
+    baseEnv: NodeJS.ProcessEnv,
   ): Promise<PreparedAttach> => {
     let raw = urlOrEnv;
     if (raw === "-") {
@@ -535,7 +536,7 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
       }
       listener = false;
     }
-    let passcode = env.TOKIMEKI_PASSCODE;
+    let passcode = baseEnv.TOKIMEKI_PASSCODE;
     if (grant.passcodeRequired && (passcode === undefined || passcode.length === 0)) {
       if (mode === "daemon") {
         throw new ConfigError("TOKIMEKI_PASSCODE is required for this session");
@@ -557,14 +558,11 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
       ...(passcode === undefined || passcode.length === 0 ? {} : { TOKIMEKI_PASSCODE: passcode }),
     };
     return {
-      env: applyWizardEnv({ ...env, ...resolvedBaseEnv }, overlay),
+      env: applyWizardEnv({ ...env, ...baseEnv }, overlay),
       listener,
       wizard: null,
     };
   };
-
-  // Resolved lazily by attachAction; kept here for URL attach overlays.
-  let resolvedBaseEnv: NodeJS.ProcessEnv = env;
 
   const attachAction = async (listenerFlag: boolean, urlArg?: string): Promise<number> => {
     let resolved: ReturnType<typeof resolveConfigEnv>;
@@ -573,15 +571,14 @@ export async function main(argv: string[] = process.argv, deps: CliDeps = {}): P
     } catch (error) {
       return fail(error, 2, "config_invalid");
     }
-    resolvedBaseEnv = resolved.env;
     let effectiveEnv = resolved.env;
     let listener = listenerFlag;
     let wizard: AttachWizardResult | null = null;
 
-    const attachUrl = urlArg ?? env.TOKIMEKI_ATTACH_URL;
+    const attachUrl = urlArg ?? resolved.env.TOKIMEKI_ATTACH_URL;
     if (attachUrl !== undefined && attachUrl.length > 0) {
       try {
-        const prepared = await resolveAttachUrl(attachUrl, listenerFlag);
+        const prepared = await resolveAttachUrl(attachUrl, listenerFlag, resolved.env);
         effectiveEnv = prepared.env;
         listener = prepared.listener;
       } catch (error) {

@@ -45,10 +45,17 @@ export function createPrompt(options: NodePromptOptions = {}): PromptIO {
     new Promise<string>((resolve, reject) => {
       const rl = createInterface({ input: stdin, output: stderr, terminal: stdin.isTTY === true });
       let settled = false;
+      const onClose = (): void => {
+        if (settled) return;
+        finish();
+        reject(new UserAbortError("input closed"));
+      };
       const finish = (): void => {
         if (settled) return;
         settled = true;
         process.removeListener("SIGINT", onSigint);
+        stdin.removeListener("end", onClose);
+        rl.removeListener("close", onClose);
         try {
           rl.close();
         } catch {
@@ -62,6 +69,8 @@ export function createPrompt(options: NodePromptOptions = {}): PromptIO {
       };
       process.once("SIGINT", onSigint);
       rl.once("SIGINT", onSigint);
+      rl.once("close", onClose);
+      stdin.once("end", onClose);
       rl.question(message, (answer) => {
         finish();
         resolve(answer);
@@ -97,6 +106,8 @@ export function createPrompt(options: NodePromptOptions = {}): PromptIO {
           if (settled) return;
           settled = true;
           stdin.removeListener("data", onData);
+          stdin.removeListener("end", onEnd);
+          stdin.removeListener("close", onEnd);
           process.removeListener("SIGINT", onSigint);
           try {
             stdin.setRawMode(wasRaw);
@@ -104,6 +115,10 @@ export function createPrompt(options: NodePromptOptions = {}): PromptIO {
             // best effort
           }
           write("\n");
+        };
+        const onEnd = (): void => {
+          cleanup();
+          reject(new UserAbortError("input closed"));
         };
         const onSigint = (): void => {
           cleanup();
@@ -132,6 +147,8 @@ export function createPrompt(options: NodePromptOptions = {}): PromptIO {
           }
         };
         process.once("SIGINT", onSigint);
+        stdin.once("end", onEnd);
+        stdin.once("close", onEnd);
         stdin.on("data", onData);
       });
     },

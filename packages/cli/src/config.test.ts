@@ -39,10 +39,13 @@ describe("normalizeRelayBaseUrl", () => {
     expect(normalizeRelayBaseUrl("https://relay.example/base///")).toBe("wss://relay.example/base");
   });
 
-  it("converts http to ws", () => {
+  it("converts http to ws only on loopback", () => {
     expect(normalizeRelayBaseUrl("http://localhost:8787")).toBe("ws://localhost:8787");
     expect(normalizeRelayBaseUrl("ws://localhost:8787/")).toBe("ws://localhost:8787");
+    expect(normalizeRelayBaseUrl("ws://[::1]:8787")).toBe("ws://[::1]:8787");
     expect(normalizeRelayBaseUrl("wss://relay.example")).toBe("wss://relay.example");
+    expect(() => normalizeRelayBaseUrl("ws://relay.example")).toThrow(/loopback/);
+    expect(() => normalizeRelayBaseUrl("http://relay.example")).toThrow(/loopback/);
   });
 
   it("rejects credentials, query strings, and fragments without echoing them", () => {
@@ -188,6 +191,14 @@ describe("loadHostConfig", () => {
     expect(() => loadHostConfig({ env: { TOKIMEKI_RELAY_URL: "https://relay.example" } })).toThrow(
       /TOKIMEKI_TOKEN or TOKIMEKI_MASTER_TOKEN is required/,
     );
+    expect(() =>
+      loadHostConfig({
+        env: {
+          TOKIMEKI_RELAY_URL: "https://relay.example",
+          TOKIMEKI_MASTER_TOKEN: "bad token value",
+        },
+      }),
+    ).toThrow(/TOKIMEKI_MASTER_TOKEN must not contain whitespace/);
   });
 
   it("clamps scrollback to the v1 range", () => {

@@ -32,7 +32,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const cli = join(root, "packages/cli/dist/index.js");
+const cli = process.env.E2E_CLI_ENTRY
+  ? resolve(process.env.E2E_CLI_ENTRY)
+  : join(root, "packages/cli/dist/index.js");
 const fakeTui = join(root, "scripts/e2e/fake-tui.mjs");
 const siteIndex = join(root, "packages/onboarding-site/dist/index.html");
 const wranglerBin = join(root, "node_modules/wrangler/bin/wrangler.js");
@@ -220,6 +222,20 @@ async function main() {
     assert(page.status === 200, `site status ${page.status}`);
     assert(pageText.includes("no-JWT onboarding"), "site marker missing");
     assert(pageText.includes("connect-src 'none'"), "CSP missing");
+    const pageCsp = page.headers.get("content-security-policy") ?? "";
+    assert(pageCsp.includes("frame-ancestors 'none'"), "response CSP frame-ancestors missing");
+    assert(
+      (page.headers.get("x-content-type-options") ?? "").toLowerCase() === "nosniff",
+      "nosniff header missing",
+    );
+    assert(
+      (page.headers.get("referrer-policy") ?? "").toLowerCase() === "no-referrer",
+      "referrer-policy missing",
+    );
+    assert(
+      (page.headers.get("cache-control") ?? "").toLowerCase().includes("no-store"),
+      "cache-control no-store missing",
+    );
     const health = await httpJson(`http://127.0.0.1:${relayPort}/healthz`);
     assert(health.status === 200 && health.body?.ok === true, "healthz regression");
     const whoami = await fetch(`http://127.0.0.1:${relayPort}/auth/whoami`);

@@ -18,10 +18,10 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.6)
+## Release identity (0.1.7)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.6`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.6`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.7`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.7`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@limccn/tokimeki-relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
@@ -251,7 +251,7 @@ env); self-contained v1.4 onboarding e2e:
 - Production deploy/provider/secret changes need explicit user approval.
 - Scan changes for master/session/TURN secrets before committing.
 
-## Known limitations (0.1.6)
+## Known limitations (0.1.7)
 
 - Strict NAT↔NAT (including P2P attempts and relay fallback) and real Claude/pi
   TUI interaction were manually confirmed at the e2e layer on 2026-11-16; this

@@ -21,6 +21,7 @@ import {
   relayWhoamiUrl,
 } from "../config.js";
 import { checkSecretFilePermissions } from "../config-file.js";
+import { readJsonObjectCapped } from "../http-body.js";
 import { looksLikeJwt, writeUserConfig } from "../persist.js";
 import type { PromptIO } from "./prompt.js";
 import { UserAbortError } from "./prompt.js";
@@ -128,6 +129,8 @@ export async function validateHostCredentials(options: {
   try {
     response = await fetchImpl(relayWhoamiUrl(options.relayUrl), {
       headers: { "X-Tokimeki-Token": options.credential },
+      redirect: "error",
+      credentials: "omit",
       signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
     });
   } catch {
@@ -148,10 +151,7 @@ export async function validateHostCredentials(options: {
   }
   let body: Record<string, unknown> | null = null;
   try {
-    const parsed: unknown = await response.json();
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      body = parsed as Record<string, unknown>;
-    }
+    body = await readJsonObjectCapped(response);
   } catch {
     body = null;
   }
@@ -378,13 +378,21 @@ export async function runHostWizard(deps: HostWizardDeps): Promise<HostWizardRes
       ? await askNamespace(deps, env.TOKIMEKI_NAMESPACE ?? null, env.TOKIMEKI_SESSION ?? null)
       : (env.TOKIMEKI_NAMESPACE ?? null);
 
+  // The master token is a single-owner/root credential: the loader ignores
+  // TOKIMEKI_NAMESPACE with it, and the doctor gate rejects a lingering
+  // namespace. Keep the entered namespace for session naming only, and clear
+  // it from the effective environment/config.
+  const namespaceForEnv = credentialKey === "TOKIMEKI_TOKEN" ? namespace : null;
   if (credentialKey === "TOKIMEKI_MASTER_TOKEN") {
     warnings.push(
       "TOKIMEKI_MASTER_TOKEN is a deprecated compatibility alias; the token is not written to config.json",
     );
+    if (namespace !== null) {
+      warnings.push("TOKIMEKI_NAMESPACE is ignored with TOKIMEKI_MASTER_TOKEN");
+    }
   }
 
-  await maybeValidate(deps, relayUrl, credential, namespace);
+  await maybeValidate(deps, relayUrl, credential, namespaceForEnv);
 
   const session = await askSession(deps, env.TOKIMEKI_SESSION ?? null, namespace);
   const envSessionToken =
@@ -402,14 +410,20 @@ export async function runHostWizard(deps: HostWizardDeps): Promise<HostWizardRes
     TOKIMEKI_RELAY_URL: relayUrl,
     [credentialKey]: credential,
     TOKIMEKI_SESSION_TOKEN: envSessionToken,
-    ...(namespace === null ? {} : { TOKIMEKI_NAMESPACE: namespace }),
+    ...(namespaceForEnv === null
+      ? { TOKIMEKI_NAMESPACE: "" }
+      : { TOKIMEKI_NAMESPACE: namespaceForEnv }),
     ...(session === undefined ? {} : { TOKIMEKI_SESSION: session }),
   };
 
   const saved = await saveConfigIfRequested(deps, {
     relayUrl,
-    ...(namespace === null ? {} : { namespace }),
-    ...(credentialKey === "TOKIMEKI_TOKEN" ? { token: credential } : {}),
+    ...(credentialKey === "TOKIMEKI_TOKEN"
+      ? {
+          ...(namespace === null ? {} : { namespace }),
+          token: credential,
+        }
+      : { namespace: "", token: "" }),
     ...(session === undefined ? {} : { session }),
     sessionToken: envSessionToken,
   });

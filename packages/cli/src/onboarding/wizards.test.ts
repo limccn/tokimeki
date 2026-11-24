@@ -1,3 +1,7 @@
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 import { runAttachWizard } from "./attach-wizard.js";
 import { runHostWizard } from "./host-wizard.js";
@@ -89,6 +93,28 @@ describe("host wizard", () => {
     expect(result.env.TOKIMEKI_SESSION).toBeUndefined();
     expect(prompt.printed.join("\n")).toContain("[ok] relay whoami authenticated");
     expect(prompt.printed.join("\n")).not.toContain("host-token-1234");
+  });
+
+  it("clears an inherited namespace when using the master token", async () => {
+    const prompt = new FakePrompt({
+      text: [""],
+      secret: ["master-token-1234"],
+      confirm: [true, false, false],
+      select: ["master"],
+    });
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(200, { authMode: "master", namespace: "*" }),
+    ) as unknown as typeof fetch;
+    const result = await runHostWizard({
+      prompt,
+      env: { TOKIMEKI_NAMESPACE: "abcde" },
+      fetchImpl,
+      platform: process.platform,
+    });
+    expect(result.env.TOKIMEKI_MASTER_TOKEN).toBe("master-token-1234");
+    expect(result.env.TOKIMEKI_NAMESPACE).toBe("");
+    expect(result.env.TOKIMEKI_TOKEN).toBeUndefined();
+    expect(result.warnings.join("\n")).toContain("ignored with TOKIMEKI_MASTER_TOKEN");
   });
 
   it("guides self-hosted users to the deploy button and stops", async () => {
@@ -223,6 +249,42 @@ describe("attach wizard", () => {
       TOKIMEKI_SESSION_TOKEN: "session-jwt",
     });
     expect(result.warnings.join("\n")).toContain("short-lived");
+  });
+
+  it("prompts instead of accepting an empty history session token", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tokimeki-wizard-"));
+    try {
+      mkdirSync(join(home, ".tokimeki"), { recursive: true });
+      const historyPath = join(home, ".tokimeki", "history.json");
+      writeFileSync(
+        historyPath,
+        JSON.stringify([
+          {
+            relayUrl: "wss://relay.example",
+            session: "abcde.laptop",
+            sessionToken: "",
+            lastUsedAt: 1,
+          },
+        ]),
+        { mode: 0o600 },
+      );
+      if (process.platform !== "win32") chmodSync(historyPath, 0o600);
+      const prompt = new FakePrompt({
+        secret: ["session-token-1234"],
+        confirm: [false],
+        select: ["0"],
+      });
+      const result = await runAttachWizard({
+        prompt,
+        env: {},
+        platform: process.platform,
+        homeDir: home,
+      });
+      expect(result.env.TOKIMEKI_SESSION_TOKEN).toBe("session-token-1234");
+      expect(prompt.printed.join("\n")).toContain("from history/environment");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("prefills a pasted viewer config JSON", async () => {

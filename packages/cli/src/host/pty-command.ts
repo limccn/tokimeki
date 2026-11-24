@@ -50,6 +50,9 @@ const HOST_SECRET_ENV_VARS = [
   "TOKIMEKI_TURN_CREDENTIAL",
   // The envelope may contain the tokens above; never expose it to the PTY.
   "TOKIMEKI_CONFIG",
+  // Share URLs and config paths are capability/secret material as well.
+  "TOKIMEKI_ATTACH_URL",
+  "TOKIMEKI_CONFIG_FILE",
 ] as const;
 
 /**

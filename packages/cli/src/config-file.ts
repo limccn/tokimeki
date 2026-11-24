@@ -12,7 +12,7 @@
  * Error messages name keys and paths, never values.
  */
 
-import { lstatSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -35,6 +35,8 @@ export const CONFIG_FILE_SECRET_KEYS = [
   "TOKIMEKI_TURN_API_TOKEN",
   "TOKIMEKI_TURN_CREDENTIAL",
   "TOKIMEKI_CONFIG",
+  // Share URLs are capability secrets too.
+  "TOKIMEKI_ATTACH_URL",
 ] as const;
 
 export interface ConfigFileInfo {
@@ -87,13 +89,16 @@ export function readConfigFile(
   let raw: string;
   let stats: import("node:fs").Stats;
   try {
-    stats = statSync(path);
+    stats = lstatSync(path);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
       return { env: {}, info: { path, exists: false, warnings: [] } };
     }
     throw new ConfigError(`unable to read ${path}: ${code ?? "stat failed"}`);
+  }
+  if (stats.isSymbolicLink()) {
+    throw new ConfigError(`${path} must not be a symbolic link`);
   }
   if (!stats.isFile()) {
     throw new ConfigError(`${path} is not a regular file`);

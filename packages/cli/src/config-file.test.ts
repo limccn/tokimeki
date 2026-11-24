@@ -1,4 +1,12 @@
-﻿import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+﻿import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -97,6 +105,22 @@ describe("readConfigFile", () => {
     expect(() => readConfigFile({ homeDir: home2 })).toThrow(/larger than/);
   });
 
+  it("rejects a symlinked config.json", () => {
+    const home = makeHome();
+    const target = join(home, "real-config.json");
+    writeFileSync(target, JSON.stringify({ TOKIMEKI_SESSION_TOKEN: "symlink-token" }));
+    const link = join(home, ".tokimeki", "config.json");
+    mkdirSync(join(home, ".tokimeki"), { recursive: true });
+    try {
+      symlinkSync(target, link, "file");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EACCES") return; // Windows without symlink privilege
+      throw error;
+    }
+    expect(() => readConfigFile({ homeDir: home })).toThrow(/symbolic link/);
+  });
+
   it("never creates, writes, or chmods anything", () => {
     const home = makeHome();
     readConfigFile({ homeDir: home });
@@ -115,6 +139,21 @@ describe("readConfigFile", () => {
       expect(() => readConfigFile({ homeDir: home })).toThrow(/must be 0600/);
       chmodSync(path, 0o600);
       expect(readConfigFile({ homeDir: home }).info.exists).toBe(true);
+    }
+  });
+
+  it("treats a share URL as secret-bearing for the 0600 gate", () => {
+    const home = makeHome();
+    const path = writeConfig(home, {
+      TOKIMEKI_ATTACH_URL: "https://tokiapi.app/#t-code123",
+    });
+    chmodSync(path, 0o644);
+    if (process.platform === "win32") {
+      expect(readConfigFile({ homeDir: home }).info.warnings.join(" ")).toContain(
+        "not enforced on Windows",
+      );
+    } else {
+      expect(() => readConfigFile({ homeDir: home })).toThrow(/must be 0600/);
     }
   });
 

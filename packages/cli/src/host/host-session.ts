@@ -34,7 +34,7 @@ import {
   mapRelayErrorCode,
 } from "../events.js";
 import { inviteKeyLabel } from "../invite.js";
-import { formatError, type Logger } from "../logger.js";
+import { formatError, type Logger, sanitizeLogText } from "../logger.js";
 import { createPasscodeVerifier, type PasscodeVerifier } from "../passcode.js";
 import { TerminalMirror } from "../terminal/mirror.js";
 import { ModeTracker } from "../terminal/mode-tracker.js";
@@ -955,7 +955,7 @@ class HostSession {
         if (message.mode === "relay" && message.state === "failed") {
           this.#handleP2PUnavailable(
             message.clientId,
-            message.reason ?? "viewer reported a relay transport",
+            sanitizeLogText(message.reason ?? "viewer reported a relay transport"),
           );
         }
         return;

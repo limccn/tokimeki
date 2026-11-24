@@ -1,6 +1,8 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { type CliDeps, main } from "./cli.js";
 import type { AttachConfig, DoctorConfig, HostConfig } from "./config.js";
@@ -59,6 +61,12 @@ function harness(
   };
   return { deps, stdout: out.text, stderr: err.text };
 }
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 const hostEnv: NodeJS.ProcessEnv = {
   TOKIMEKI_RELAY_URL: "https://relay.example",
@@ -279,6 +287,105 @@ describe("tokimeki CLI wiring", () => {
       role: "viewer",
       session: "sess-1",
       websocketUrl: "wss://relay.example/base/ws/sess-1",
+    });
+  });
+
+  it("uses a config-file passcode for a share-URL attach", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tokimeki-cli-"));
+    tempDirs.push(home);
+    mkdirSync(join(home, ".tokimeki"), { recursive: true });
+    const configPath = join(home, ".tokimeki", "config.json");
+    writeFileSync(configPath, JSON.stringify({ TOKIMEKI_PASSCODE: "passcode1234" }), {
+      mode: 0o600,
+    });
+    if (process.platform !== "win32") chmodSync(configPath, 0o600);
+
+    const runAttach = vi.fn(async (_config: AttachConfig, _logger: Logger): Promise<number> => 0);
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/api/config")) {
+        return new Response(
+          JSON.stringify({ tokimekiEnabled: true, tokimekiRelayUrl: "wss://relay.tokiapi.app" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          token: "session-token-1234",
+          session: "abcde.laptop",
+          mode: "viewer",
+          passcodeRequired: true,
+          expiresAt: 1_800_000_000,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const { deps, stderr } = harness(
+      {},
+      {
+        runAttach,
+        homeDir: home,
+        platform: process.platform,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      },
+    );
+
+    const code = await main(["node", "tokimeki", "attach", "https://tokiapi.app/#t-code123"], deps);
+    expect(code, stderr()).toBe(0);
+    const [config] = runAttach.mock.calls[0] ?? [];
+    expect(config).toMatchObject({
+      session: "abcde.laptop",
+      passcode: "passcode1234",
+    });
+  });
+
+  it("uses a config-file TOKIMEKI_ATTACH_URL for attach", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tokimeki-cli-"));
+    tempDirs.push(home);
+    mkdirSync(join(home, ".tokimeki"), { recursive: true });
+    const configPath = join(home, ".tokimeki", "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({ TOKIMEKI_ATTACH_URL: "https://tokiapi.app/#t-code123" }),
+      { mode: 0o600 },
+    );
+    if (process.platform !== "win32") chmodSync(configPath, 0o600);
+
+    const runAttach = vi.fn(async (_config: AttachConfig, _logger: Logger): Promise<number> => 0);
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/api/config")) {
+        return new Response(
+          JSON.stringify({ tokimekiEnabled: true, tokimekiRelayUrl: "wss://relay.tokiapi.app" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          token: "session-token-1234",
+          session: "abcde.laptop",
+          mode: "viewer",
+          expiresAt: 1_800_000_000,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const { deps, stderr } = harness(
+      {},
+      {
+        runAttach,
+        homeDir: home,
+        platform: process.platform,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      },
+    );
+
+    const code = await main(["node", "tokimeki", "attach"], deps);
+    expect(code, stderr()).toBe(0);
+    const [config] = runAttach.mock.calls[0] ?? [];
+    expect(config).toMatchObject({
+      session: "abcde.laptop",
+      sessionToken: "session-token-1234",
     });
   });
 

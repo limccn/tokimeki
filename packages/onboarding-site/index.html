@@ -2,166 +2,355 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#111318" />
+    <meta
+      name="description"
+      content="Generate tokimeki host or attach commands for a multi-namespace static-token relay."
+    />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
     />
     <title>tokimeki relay · no-JWT onboarding</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111318'/%3E%3Cpath d='M8 10l6 6-6 6' fill='none' stroke='%237cc7ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 22h7' stroke='%23e7ebf2' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header>
       <h1>tokimeki relay · no-JWT onboarding</h1>
-      <p>
-        Generate a host or attach command for this relay. This page is for
-        <strong>multi-namespace static tokens</strong> only: the relay operator issues
-        namespace tokens with <code>TOKIMEKI_NAMESPACE_TOKENS</code>. This page cannot create,
-        recover, or validate tokens, and it never contacts a server.
+      <p class="lede">
+        Generate a host or attach command for this relay. Multi-namespace static tokens only;
+        everything runs in this tab.
       </p>
-      <p class="relay">relay: <strong id="relay-url">(unavailable)</strong></p>
-      <p class="install">
-        Install the CLI: <code>npm install -g @limccn/tokimeki@latest</code>
-      </p>
+      <div class="meta">
+        <p class="relay">relay: <strong id="relay-url">(unavailable)</strong></p>
+        <p class="install">install: <code>npm install -g @limccn/tokimeki@latest</code></p>
+      </div>
     </header>
 
     <div id="secure-warning" class="warning" role="alert" hidden></div>
 
     <div class="tabs" role="tablist" aria-label="Onboarding mode">
-      <button type="button" data-tab="host" role="tab" aria-selected="true">Host</button>
-      <button type="button" data-tab="attach" role="tab" aria-selected="false">Attach</button>
+      <button
+        id="tab-host"
+        type="button"
+        data-tab="host"
+        role="tab"
+        aria-selected="true"
+        aria-controls="panel-host"
+        tabindex="0"
+      >
+        Host
+      </button>
+      <button
+        id="tab-attach"
+        type="button"
+        data-tab="attach"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-attach"
+        tabindex="-1"
+      >
+        Attach
+      </button>
+    </div>
+
+    <div class="mode-tools">
+      <label class="switch" for="show-secrets">
+        <input
+          id="show-secrets"
+          type="checkbox"
+          role="switch"
+          aria-checked="false"
+          data-secret-toggle
+        />
+        <span class="switch-track" aria-hidden="true"></span>
+        <span>Show token fields</span>
+      </label>
     </div>
 
     <main>
-      <section data-panel="host" role="tabpanel" aria-label="Host onboarding">
+      <section id="panel-host" data-panel="host" role="tabpanel" aria-labelledby="tab-host">
         <h2>Host a session</h2>
         <div class="grid">
-          <label for="host-namespace">Namespace</label>
-          <input id="host-namespace" autocomplete="off" spellcheck="false" placeholder="abcde" />
+          <div class="label-row">
+            <label for="host-namespace">Namespace</label>
+            <details class="hint">
+              <summary aria-label="About the namespace">
+                <span class="hint-dot" aria-hidden="true">?</span>
+              </summary>
+              <p>
+                Sessions must start with this namespace:
+                <code>&lt;namespace&gt;.&lt;slug&gt;</code>.
+              </p>
+            </details>
+          </div>
+          <input
+            id="host-namespace"
+            autocomplete="off"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            placeholder="abcde"
+          />
 
-          <label for="host-token">Host token (static namespace token)</label>
-          <input id="host-token" type="password" autocomplete="off" spellcheck="false" />
+          <div class="label-row">
+            <label for="host-token">Host token</label>
+            <details class="hint">
+              <summary aria-label="About the host token">
+                <span class="hint-dot" aria-hidden="true">?</span>
+              </summary>
+              <p>Static namespace token issued by the relay operator; treat it as a secret.</p>
+            </details>
+          </div>
+          <input
+            id="host-token"
+            type="password"
+            autocomplete="off"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            data-secret
+          />
 
           <label for="host-session">Session name</label>
           <div class="row">
-            <input id="host-session" autocomplete="off" spellcheck="false" placeholder="abcde.laptop" />
+            <input
+              id="host-session"
+              autocomplete="off"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="abcde.laptop"
+            />
             <button type="button" id="host-generate-session">Generate</button>
           </div>
 
-          <label for="host-session-token">Viewer session token</label>
+          <label for="host-session-token">Session token</label>
           <div class="row">
-            <input id="host-session-token" type="password" autocomplete="off" spellcheck="false" />
+            <input
+              id="host-session-token"
+              type="password"
+              autocomplete="off"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              data-secret
+            />
             <button type="button" id="host-generate-token">Generate</button>
           </div>
 
-          <label for="host-acp">ACP application</label>
+          <label for="host-acp">ACP app</label>
           <select id="host-acp"></select>
 
-          <label for="host-custom-command" id="host-custom-wrap">Custom command</label>
+          <label for="host-custom-command" id="host-custom-wrap" hidden>Custom command</label>
           <input
             id="host-custom-command"
             autocomplete="off"
+            autocapitalize="none"
+            autocorrect="off"
             spellcheck="false"
             placeholder="my-tui"
+            hidden
           />
 
           <label for="host-shell">Shell</label>
           <select id="host-shell"></select>
 
-          <label for="host-window">Window size (optional)</label>
-          <input id="host-window" autocomplete="off" spellcheck="false" placeholder="120x40" />
-
-          <label class="check" for="show-secrets">
-            <input id="show-secrets" type="checkbox" /> Show secrets on screen
-          </label>
+          <div class="label-row">
+            <span class="field-label" id="host-window-label">Window size</span>
+            <details class="hint">
+              <summary aria-label="About window size">
+                <span class="hint-dot" aria-hidden="true">?</span>
+              </summary>
+              <p>
+                Auto uses the CLI default. Custom accepts
+                <code>&lt;cols&gt;x&lt;rows&gt;</code>, e.g. <code>120x40</code>.
+              </p>
+            </details>
+          </div>
+          <div class="window-field">
+            <div class="segments" role="radiogroup" aria-labelledby="host-window-label">
+              <label class="segment">
+                <input type="radio" name="host-window-preset" value="" checked />
+                <span>Auto</span>
+              </label>
+              <label class="segment">
+                <input type="radio" name="host-window-preset" value="80x24" />
+                <span>80×24</span>
+              </label>
+              <label class="segment">
+                <input type="radio" name="host-window-preset" value="120x40" />
+                <span>120×40</span>
+              </label>
+              <label class="segment">
+                <input type="radio" name="host-window-preset" value="160x48" />
+                <span>160×48</span>
+              </label>
+              <label class="segment">
+                <input type="radio" name="host-window-preset" value="custom" />
+                <span>Custom</span>
+              </label>
+            </div>
+            <input
+              id="host-window"
+              autocomplete="off"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="120x40"
+              aria-label="Custom window size"
+              hidden
+            />
+          </div>
         </div>
 
         <div class="actions">
-          <button type="button" id="host-generate" class="primary">Generate host command</button>
-          <button type="button" id="host-copy">Copy command</button>
-          <button type="button" id="host-download" disabled>Download tokimeki-config.json</button>
+          <button type="button" id="host-generate" class="primary">Generate command</button>
+          <button type="button" id="host-copy" disabled>Copy command</button>
+          <button type="button" id="host-download" disabled>Download config</button>
         </div>
         <p id="host-error" class="error" role="alert" hidden></p>
         <p id="host-copy-status" class="status" aria-live="polite"></p>
-        <h3 id="host-output-label">Generated host command</h3>
-        <pre id="host-output" class="output"></pre>
+        <h3 id="host-output-label">Host command</h3>
+        <div class="code-field">
+          <pre class="code-highlight" aria-hidden="true"><code id="host-output-highlight"></code></pre>
+          <textarea
+            id="host-output"
+            class="code-input"
+            readonly
+            rows="1"
+            wrap="off"
+            spellcheck="false"
+            autocapitalize="none"
+            autocorrect="off"
+            aria-labelledby="host-output-label"
+            placeholder="Host command will appear here."
+          ></textarea>
+        </div>
         <p id="host-download-status" class="status" aria-live="polite"></p>
-
-        <h3>Multi-namespace notes</h3>
-        <ul>
-          <li>
-            The relay operator configures <code>TOKIMEKI_NAMESPACE_TOKENS</code> and distributes
-            one token per namespace. Hosts use <code>TOKIMEKI_TOKEN</code> +
-            <code>TOKIMEKI_NAMESPACE</code>; sessions must be
-            <code>&lt;namespace&gt;.&lt;slug&gt;</code>.
-          </li>
-          <li>
-            The master-token single-owner fallback and JWT/TokiAPI modes are not covered by this
-            page. Ask the relay operator or read <code>docs/deploy-cloudflare.md</code>.
-          </li>
-          <li>
-            The generated config file contains the host token. Treat it as a secret:
-            <code>chmod 600 tokimeki-config.json</code>, use
-            <code>tokimeki --config tokimeki-config.json claude</code>, and delete it when done.
-            A browser download is <em>not</em> memory-only.
-          </li>
-        </ul>
       </section>
 
-      <section data-panel="attach" role="tabpanel" aria-label="Attach onboarding" hidden>
+      <section
+        id="panel-attach"
+        data-panel="attach"
+        role="tabpanel"
+        aria-labelledby="tab-attach"
+        hidden
+      >
         <h2>Attach to a session</h2>
         <div class="grid">
           <label for="attach-session">Session name</label>
-          <input id="attach-session" autocomplete="off" spellcheck="false" placeholder="abcde.laptop" />
+          <input
+            id="attach-session"
+            autocomplete="off"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            placeholder="abcde.laptop"
+          />
 
           <label for="attach-token">Session token</label>
-          <input id="attach-token" type="password" autocomplete="off" spellcheck="false" />
+          <input
+            id="attach-token"
+            type="password"
+            autocomplete="off"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            data-secret
+          />
 
           <label for="attach-shell">Shell</label>
           <select id="attach-shell"></select>
 
-          <label class="check" for="attach-listener">
-            <input id="attach-listener" type="checkbox" /> Read-only listener
-            (<code>--listen</code>)
+          <label class="switch" for="attach-listener">
+            <input
+              id="attach-listener"
+              type="checkbox"
+              role="switch"
+              aria-checked="false"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+            <span>Read-only listener</span>
           </label>
         </div>
 
         <div class="actions">
-          <button type="button" id="attach-generate" class="primary">Generate attach command</button>
-          <button type="button" id="attach-copy">Copy command</button>
-          <button type="button" id="attach-copy-json" disabled>Copy viewer config JSON</button>
+          <button type="button" id="attach-generate" class="primary">Generate command</button>
+          <button type="button" id="attach-copy" disabled>Copy command</button>
+          <button type="button" id="attach-copy-json" disabled>Copy JSON</button>
         </div>
         <p id="attach-error" class="error" role="alert" hidden></p>
         <p id="attach-copy-status" class="status" aria-live="polite"></p>
-        <h3 id="attach-output-label">Generated attach command</h3>
-        <pre id="attach-output" class="output"></pre>
-        <h3 id="attach-json-label">Viewer config JSON</h3>
-        <pre id="attach-json" class="output"></pre>
-      </section>
-
-      <section class="security">
-        <h2>Security</h2>
-        <ul>
-          <li>
-            Everything is generated in this browser tab. The page makes no network requests
-            (<code>connect-src 'none'</code>), uses no cookies/storage/analytics, and has no
-            server-side component.
-          </li>
-          <li>
-            Tokens exist only in form fields and generated output. They are never placed in the
-            URL, and page JavaScript never logs them. Closing the tab discards them.
-          </li>
-          <li>
-            Commands and downloaded files contain secrets. Avoid shell history exposure, do not
-            paste them into public channels, and delete the downloaded config after use.
-          </li>
-          <li>
-            Commands must be run on an HTTPS-protected page (or localhost) because credentials are
-            entered here.
-          </li>
-        </ul>
+        <h3 id="attach-output-label">Attach command</h3>
+        <div class="code-field">
+          <pre class="code-highlight" aria-hidden="true"><code id="attach-output-highlight"></code></pre>
+          <textarea
+            id="attach-output"
+            class="code-input"
+            readonly
+            rows="1"
+            wrap="off"
+            spellcheck="false"
+            autocapitalize="none"
+            autocorrect="off"
+            aria-labelledby="attach-output-label"
+            placeholder="Attach command will appear here."
+          ></textarea>
+        </div>
+        <h3 id="attach-json-label">Viewer config</h3>
+        <div class="code-field">
+          <pre class="code-highlight" aria-hidden="true"><code id="attach-json-highlight"></code></pre>
+          <textarea
+            id="attach-json"
+            class="code-input"
+            readonly
+            rows="1"
+            wrap="off"
+            spellcheck="false"
+            autocapitalize="none"
+            autocorrect="off"
+            aria-labelledby="attach-json-label"
+            placeholder="Viewer config will appear here."
+          ></textarea>
+        </div>
       </section>
     </main>
+
+    <footer class="page-foot">
+      <details class="disclosure">
+        <summary>Notes &amp; security</summary>
+        <ul>
+          <li>
+            Sessions must be <code>&lt;namespace&gt;.&lt;slug&gt;</code>. The relay operator
+            issues namespace tokens with <code>TOKIMEKI_NAMESPACE_TOKENS</code>; JWT and
+            master-token modes are not covered by this page.
+          </li>
+          <li>
+            Everything runs in this tab: no network requests, cookies, storage, or analytics.
+            Tokens are never logged, and closing the tab discards them.
+          </li>
+          <li>
+            Downloaded configs contain the host token. Treat them as secrets:
+            <code>chmod 600</code>, use <code>tokimeki --config</code>, and delete them when
+            done. Avoid shell history exposure.
+          </li>
+          <li>
+            Commands must be run on an HTTPS-protected page (or localhost) because credentials
+            are entered here.
+          </li>
+        </ul>
+      </details>
+      <p class="page-foot-line">
+        No network, cookies, storage, or analytics. Downloaded files contain secrets.
+      </p>
+    </footer>
 
     <noscript>
       <p class="warning">This page needs JavaScript to generate commands locally.</p>
