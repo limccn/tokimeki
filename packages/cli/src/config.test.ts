@@ -120,6 +120,8 @@ describe("loadHostConfig", () => {
     expect(config.scrollbackLines).toBe(DEFAULT_SCROLLBACK_LINES);
     expect(config.snapshotMaxBytes).toBe(DEFAULT_SNAPSHOT_MAX_BYTES);
     expect(config.listenerSnapshotMs).toBe(DEFAULT_LISTENER_SNAPSHOT_MS);
+    expect(config.p2pDrainBytesPerSec).toBe(0);
+    expect(config.sendPaceBytesPerSec).toBe(0);
     expect(config.term).toBe("xterm-256color");
     expect(config.colorterm).toBe("truecolor");
     expect(config.resizePolicy).toBe("latest");
@@ -328,6 +330,54 @@ describe("loadHostConfig", () => {
     expect(
       invalid.warnings.some((warning) => warning.includes("TOKIMEKI_LISTENER_SNAPSHOT_MS")),
     ).toBe(true);
+  });
+
+  it("parses the v1.7 path-policy byte rates and treats 0 as off", () => {
+    const read = (overrides: NodeJS.ProcessEnv) => loadHostConfig({ env: baseHostEnv(overrides) });
+
+    expect(read({ TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC: "65536" }).p2pDrainBytesPerSec).toBe(65_536);
+    expect(read({ TOKIMEKI_SEND_PACE_BYTES_PER_SEC: "1048576" }).sendPaceBytesPerSec).toBe(
+      1_048_576,
+    );
+
+    const off = read({
+      TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC: "0",
+      TOKIMEKI_SEND_PACE_BYTES_PER_SEC: "0",
+    });
+    expect(off.p2pDrainBytesPerSec).toBe(0);
+    expect(off.sendPaceBytesPerSec).toBe(0);
+    expect(off.warnings).toHaveLength(0);
+  });
+
+  it("warns and disables invalid v1.7 byte rates instead of exiting", () => {
+    for (const value of ["fast", "-1", "1.5", "12x"]) {
+      const config = loadHostConfig({
+        env: baseHostEnv({
+          TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC: value,
+          TOKIMEKI_SEND_PACE_BYTES_PER_SEC: value,
+        }),
+      });
+      expect(config.p2pDrainBytesPerSec).toBe(0);
+      expect(config.sendPaceBytesPerSec).toBe(0);
+      expect(
+        config.warnings.filter((warning) => warning.includes("TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC")),
+      ).toHaveLength(1);
+      expect(
+        config.warnings.filter((warning) => warning.includes("TOKIMEKI_SEND_PACE_BYTES_PER_SEC")),
+      ).toHaveLength(1);
+    }
+  });
+
+  it("keeps the v1.7 host-only pacing knobs off attach config", () => {
+    const config = loadAttachConfig({
+      TOKIMEKI_RELAY_URL: "https://relay.example",
+      TOKIMEKI_SESSION: "sess-1",
+      TOKIMEKI_SESSION_TOKEN: "session-token-9876",
+      TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC: "65536",
+      TOKIMEKI_SEND_PACE_BYTES_PER_SEC: "65536",
+    });
+    expect("p2pDrainBytesPerSec" in config).toBe(false);
+    expect("sendPaceBytesPerSec" in config).toBe(false);
   });
 });
 

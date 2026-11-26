@@ -346,6 +346,26 @@ token 猜测，主要依赖 TokiAPI 的 token 熵；per-session passcode 高阈�
 仍可能被大量分布式来源触发；per-session open-socket 429 仍会暴露“session
 存在且繁忙”；计时侧信道不做强保证。
 
+### 慢路径退回与发送节奏（2026-11-26 并入 v1.7）
+
+与上面的凭证 per-IP 限速不是同一件事。任务
+`.trellis/tasks/11-26-v1-7-path-pacing`，父调研
+`11-26-protocol-china-isp-resilience`。已实现，两个开关默认关闭，尚未发布。
+
+只做调查目录的第 1、2 项，都在现有 Node host 和现有帧上，默认关闭：
+
+- **慢 P2P 退回**：ready 之后若发送缓冲达到 64 KiB，且连续 3 秒排空速率低于
+  `TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC`，该 viewer 用现有 `transport failed`
+  回到 relay 并重新快照。变量未设置或为 0 时不判断。空闲、没有积压的 P2P
+  不退回。
+- **发送节奏**：`TOKIMEKI_SEND_PACE_BYTES_PER_SEC` 限制快照和大于 1024 字节的
+  OUTPUT；更小的 OUTPUT 优先。单张快照最慢 8 秒，以免超过 10 秒分片重组时限。
+  变量未设置或为 0 时保持立即写入。
+
+不做 ACK 合并、FEC 默认开启、TUN 拥塞控制、QUIC、随机封装、更换 UDP 端口、
+为限速做 relay E2E、IPv6 优先。不测量境内网络，也不把社区帖里的速率写成默认值。
+退回 relay 后，relay 仍能看到终端字节。
+
 ## v1.8（规划中，2026-11-23 立项）
 
 状态：任务 `.trellis/tasks/11-23-v1-8-credential-lifecycle-hardening`

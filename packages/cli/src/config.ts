@@ -110,6 +110,16 @@ export interface HostConfig extends CommonConfig {
   readonly scrollbackLines: number;
   readonly snapshotMaxBytes: number;
   readonly listenerSnapshotMs: number;
+  /**
+   * Minimum drain rate (bytes/s) on a ready P2P/TUN link; 0 disables the v1.7
+   * slow-path fallback.
+   */
+  readonly p2pDrainBytesPerSec: number;
+  /**
+   * Process-wide send pace (bytes/s) for snapshots and OUTPUT frames above the
+   * small-output budget; 0 disables the v1.7 pacer.
+   */
+  readonly sendPaceBytesPerSec: number;
   readonly piTuiMode: PiTuiMode;
   readonly claudeBg: boolean;
 }
@@ -447,6 +457,29 @@ function parseListenerSnapshotMs(env: NodeJS.ProcessEnv, warnings: string[]): nu
   return value;
 }
 
+/**
+ * Optional byte-rate option (`TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC`,
+ * `TOKIMEKI_SEND_PACE_BYTES_PER_SEC`).
+ *
+ * Unset/0 disables the feature. Invalid values warn and disable instead of
+ * aborting the host: both mechanisms are opt-in traffic policy and must never
+ * prevent a session from starting.
+ */
+function parseOptionalByteRate(name: string, env: NodeJS.ProcessEnv, warnings: string[]): number {
+  const raw = optionalEnv(env, name);
+  if (raw === undefined) return 0;
+  if (!/^\d+$/.test(raw.trim())) {
+    warnings.push(`${name} must be a non-negative integer; the option is disabled`);
+    return 0;
+  }
+  const value = Number.parseInt(raw.trim(), 10);
+  if (!Number.isSafeInteger(value)) {
+    warnings.push(`${name} is out of range; the option is disabled`);
+    return 0;
+  }
+  return value;
+}
+
 function parseTerminalSize(name: string, raw: string): TerminalSize {
   const match = /^(\d+)\s*[xX]\s*(\d+)$/.exec(raw.trim());
   if (match === null) {
@@ -774,6 +807,16 @@ export function loadHostConfig(inputs: HostConfigInputs = {}): HostConfig {
     scrollbackLines: parseScrollback(env),
     snapshotMaxBytes: parseSnapshotMax(env),
     listenerSnapshotMs: parseListenerSnapshotMs(env, common.warnings),
+    p2pDrainBytesPerSec: parseOptionalByteRate(
+      "TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC",
+      env,
+      common.warnings,
+    ),
+    sendPaceBytesPerSec: parseOptionalByteRate(
+      "TOKIMEKI_SEND_PACE_BYTES_PER_SEC",
+      env,
+      common.warnings,
+    ),
     piTuiMode: parseEnum(
       "TOKIMEKI_PI_TUI_MODE",
       optionalEnv(env, "TOKIMEKI_PI_TUI_MODE"),
