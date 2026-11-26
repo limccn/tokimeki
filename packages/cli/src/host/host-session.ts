@@ -79,6 +79,13 @@ import {
   sizesEqual,
   type TerminalSize,
 } from "./resize-policy.js";
+import {
+  DRAIN_SAMPLE_MS,
+  DRAIN_WINDOW_MS,
+  DrainWindow,
+  SendPacer,
+  SMALL_OUTPUT_MAX_BYTES,
+} from "./send-pacing.js";
 
 export type HostCommandKind = "claude" | "pi" | "run" | "custom";
 
@@ -115,6 +122,8 @@ const RELAY_LOW_WATER = 262_144;
 const LISTENER_RELAY_BUFFER_BUDGET = 524_288;
 const P2P_HIGH_WATER = 4_194_304;
 const SNAPSHOT_PAUSE = "snapshot";
+/** Distinct pause reason for the v1.7 send-pacer queue bound. */
+const SEND_PACED_PAUSE = "send-paced";
 const RESYNC_THROTTLE_MS = 500;
 
 /**
@@ -141,10 +150,13 @@ interface HostP2PLink {
   sentFrames: number;
   inputSeen: boolean;
   supportsFragmentation: boolean;
+  /** v1.7 slow-drain window; null unless TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC is set. */
+  drain: DrainWindow | null;
 }
 
 interface HeldOutput {
   readonly seq: number;
+  readonly payloadBytes: number;
   readonly frame: Uint8Array;
 }
 
@@ -293,6 +305,9 @@ class HostSession {
   #iceTransportPolicy: IceTransportPolicy;
   readonly #p2pLinks = new Map<string, HostP2PLink>();
   readonly #pendingP2PSwitches = new Set<string>();
+  /** Process-wide v1.7 send pacer; null keeps today's synchronous writes. */
+  readonly #pacer: SendPacer | null;
+  #drainTimer: NodeJS.Timeout | null = null;
   readonly #fragmentationViewers = new Set<string>();
   /**
    * Viewers whose `hello`/`peer-joined` capabilities match this build's TUN
@@ -365,6 +380,16 @@ class HostSession {
         });
       },
     });
+    this.#pacer =
+      config.sendPaceBytesPerSec > 0
+        ? new SendPacer({
+            bytesPerSecond: config.sendPaceBytesPerSec,
+            // The queue itself is an unbounded buffer otherwise: bound it on
+            // top of the existing relay/P2P/TUN watermarks.
+            onQueueHighWater: () => this.#pty?.pause(SEND_PACED_PAUSE),
+            onQueueLowWater: () => this.#pty?.resume(SEND_PACED_PAUSE),
+          })
+        : null;
   }
 
   async run(): Promise<number> {
@@ -1074,6 +1099,7 @@ class HostSession {
       sentFrames: 0,
       inputSeen: false,
       supportsFragmentation: this.#fragmentationViewers.has(clientId),
+      drain: this.#config.p2pDrainBytesPerSec > 0 ? new DrainWindow() : null,
     });
     peer.onDrain(() => this.#pty?.resume(`p2p:${clientId}`));
     peer.startOffer();
@@ -1103,6 +1129,7 @@ class HostSession {
     }
     link.ready = true;
     this.#updateViewportStatus();
+    this.#ensureDrainTimer();
     this.#client?.sendControl({
       v: PROTOCOL_VERSION,
       type: "transport",
@@ -1132,6 +1159,7 @@ class HostSession {
     this.#pty?.resume(`p2p:${clientId}`);
     this.#pty?.resume(`tunnel:${clientId}`);
     this.#updateViewportStatus();
+    this.#maybeStopDrainTimer();
     if (this.#closing) return;
     this.#logger.warn(`p2p unavailable for ${clientId} (${reason}); using relay`);
     this.#client?.sendControl({
@@ -1233,6 +1261,7 @@ class HostSession {
     this.#pty?.resume(`p2p:${clientId}`);
     this.#pty?.resume(`tunnel:${clientId}`);
     this.#updateViewportStatus();
+    this.#maybeStopDrainTimer();
   }
 
   #isP2PReady(clientId: string): boolean {
@@ -1348,11 +1377,32 @@ class HostSession {
       return;
     }
     if (this.#holdDepth > 0) {
-      this.#holdQueue.push({ seq, frame });
+      this.#holdQueue.push({ seq, payloadBytes: payload.byteLength, frame });
     } else {
-      this.#routeOutput(seq, frame);
+      this.#routeOutput(seq, payload.byteLength, frame);
     }
     this.#checkRelayBackpressure();
+  }
+
+  /**
+   * Hand one encoded OUTPUT frame to the v1.7 pacer when enabled.
+   *
+   * Pacing is off by default: the frame is routed synchronously exactly as
+   * before. Small OUTPUT payloads use the priority queue; everything else
+   * waits for the shared byte budget.
+   */
+  #routeOutput(seq: number, payloadBytes: number, frame: Uint8Array): void {
+    const pacer = this.#pacer;
+    if (pacer === null) {
+      this.#routeOutputNow(seq, frame);
+      return;
+    }
+    pacer.enqueue({
+      kind: "output",
+      priority: payloadBytes <= SMALL_OUTPUT_MAX_BYTES,
+      bytes: frame.byteLength,
+      send: () => this.#routeOutputNow(seq, frame),
+    });
   }
 
   /**
@@ -1362,7 +1412,7 @@ class HostSession {
    * path; viewers with an active P2P link receive the frame over their own
    * DataChannel.
    */
-  #routeOutput(seq: number, frame: Uint8Array): void {
+  #routeOutputNow(seq: number, frame: Uint8Array): void {
     let relayNeeded = false;
     for (const viewer of this.#viewers) {
       if (!this.#isP2PReady(viewer)) {
@@ -1388,6 +1438,9 @@ class HostSession {
         );
       }
       link.sentFrames += 1;
+      // Only OUTPUT bytes actually handed to this link count toward its drain
+      // window; relay snapshots and other viewers' frames do not.
+      link.drain?.noteWritten(frame.byteLength);
       if (link.tunnel !== null) {
         if (link.tunnel.pendingBytes > TUNNEL_HIGH_WATER) {
           this.#pty?.pause(`tunnel:${clientId}`);
@@ -1396,6 +1449,9 @@ class HostSession {
         this.#pty?.pause(`p2p:${clientId}`);
       }
     }
+    // Paced frames reach the relay from the pacer timer, not from
+    // `#sendOutput`; re-check the shared socket watermark after every write.
+    this.#checkRelayBackpressure();
   }
 
   #writeLocal(chunk: Buffer): void {
@@ -1424,6 +1480,57 @@ class HostSession {
       }
       this.#pty?.resume(RELAY_BUFFER_PAUSE);
     }, 50);
+  }
+
+  #ensureDrainTimer(): void {
+    if (this.#config.p2pDrainBytesPerSec <= 0 || this.#drainTimer !== null || this.#closing) {
+      return;
+    }
+    const timer = setInterval(() => this.#sampleP2PDrain(), DRAIN_SAMPLE_MS);
+    timer.unref?.();
+    this.#drainTimer = timer;
+  }
+
+  #stopDrainTimer(): void {
+    if (this.#drainTimer === null) return;
+    clearInterval(this.#drainTimer);
+    this.#drainTimer = null;
+  }
+
+  /** Stop the sampler once no ready link remains; an idle interval is waste. */
+  #maybeStopDrainTimer(): void {
+    for (const link of this.#p2pLinks.values()) {
+      if (link.ready) return;
+    }
+    this.#stopDrainTimer();
+  }
+
+  /**
+   * One drain sample per ready P2P/TUN link (v1.7, default off).
+   *
+   * The window only opens once the link has at least 64 KiB buffered, so an
+   * idle link stays on P2P even if its configured threshold is high. A slow
+   * verdict returns only that viewer to the relay through the existing
+   * `transport failed` path; `#fallbackToRelay` releases its P2P/TUN pause
+   * reason and schedules a fresh relay snapshot.
+   */
+  #sampleP2PDrain(): void {
+    const threshold = this.#config.p2pDrainBytesPerSec;
+    if (threshold <= 0 || this.#closing) return;
+    const now = Date.now();
+    let observed = 0;
+    for (const [clientId, link] of [...this.#p2pLinks]) {
+      if (!link.ready || !link.peer.isOpen || link.drain === null) continue;
+      observed += 1;
+      const buffered = link.tunnel === null ? link.peer.bufferedAmount : link.tunnel.pendingBytes;
+      if (link.drain.observe(now, buffered, threshold) !== "slow") continue;
+      this.#logger.warn(
+        `p2p drain for ${clientId} stayed below ${threshold} B/s over ${DRAIN_WINDOW_MS} ms; ` +
+          "returning this viewer to the relay",
+      );
+      this.#fallbackToRelay(clientId, "slow p2p drain");
+    }
+    if (observed === 0) this.#stopDrainTimer();
   }
 
   #handleLocalResize(): void {
@@ -1551,17 +1658,36 @@ class HostSession {
         const canSendDirect =
           link?.peer.isOpen === true && link.supportsFragmentation && link.tunnel === null;
         if (canSendDirect) {
+          let directFailed = false;
           try {
             directFrame ??= encodeFrame({
               type: "snapshot",
               seq: snapshotSeq,
               payload,
             });
-            if (link.peer.sendFragmentableFrame(directFrame)) {
+          } catch (error) {
+            directFailed = true;
+            this.#logger.warn(`failed to encode p2p snapshot for ${target}: ${formatError(error)}`);
+          }
+          if (!directFailed && directFrame !== null) {
+            const frame = directFrame;
+            if (this.#pacer !== null) {
+              // Keep the snapshot as one normal-queue job; the relay fallback
+              // (when the DataChannel is no longer usable) is enqueued from the
+              // job itself so both frames stay in order.
+              this.#pacer.enqueue({
+                kind: "snapshot",
+                priority: false,
+                bytes: frame.byteLength,
+                send: () => this.#transmitDirectSnapshot(target, frame, snapshotSeq, payload),
+              });
+              continue;
+            }
+            if (link.peer.sendFragmentableFrame(frame)) {
               const fragments =
-                directFrame.byteLength <= MAX_DATACHANNEL_MESSAGE_BYTES
+                frame.byteLength <= MAX_DATACHANNEL_MESSAGE_BYTES
                   ? 1
-                  : Math.ceil(directFrame.byteLength / MAX_FRAGMENT_CHUNK_BYTES);
+                  : Math.ceil(frame.byteLength / MAX_FRAGMENT_CHUNK_BYTES);
               this.#logger.debug(
                 `p2p snapshot sent (target=${target}, seq=${snapshotSeq}, ` +
                   `bytes=${payload.byteLength}, fragments=${fragments})`,
@@ -1571,32 +1697,16 @@ class HostSession {
               }
               continue;
             }
-          } catch (error) {
-            this.#logger.warn(`failed to encode p2p snapshot for ${target}: ${formatError(error)}`);
+            directFailed = true;
           }
           // The DataChannel is not usable for this snapshot; fall back without
           // scheduling a second snapshot (the relay frame below is sent now).
-          this.#fallbackToRelay(target, "p2p snapshot send failed", false);
+          if (directFailed) {
+            this.#fallbackToRelay(target, "p2p snapshot send failed", false);
+          }
         }
 
-        try {
-          const frame = encodeFrame({
-            type: "snapshot_to",
-            targetId: target,
-            seq: snapshotSeq,
-            payload,
-          });
-          this.#transport?.send(frame);
-          this.#logger.debug(
-            `relay snapshot sent (target=${target}, seq=${snapshotSeq}, ` +
-              `bytes=${payload.byteLength})`,
-          );
-          if (this.#pendingP2PSwitches.delete(target)) {
-            this.#activateP2P(target, snapshotSeq);
-          }
-        } catch (error) {
-          this.#logger.warn(`failed to send snapshot to ${target}: ${formatError(error)}`);
-        }
+        this.#enqueueRelaySnapshot(target, snapshotSeq, payload);
       }
       this.#logger.debug(
         `snapshot pass complete (seq=${snapshotSeq}, bytes=${payload.byteLength}, ` +
@@ -1607,12 +1717,103 @@ class HostSession {
       if (this.#holdDepth === 0) {
         const queued = this.#holdQueue;
         this.#holdQueue = [];
-        for (const { seq, frame } of queued) {
-          this.#routeOutput(seq, frame);
+        for (const { seq, payloadBytes, frame } of queued) {
+          this.#routeOutput(seq, payloadBytes, frame);
         }
       }
       this.#pty?.resume(SNAPSHOT_PAUSE);
     }
+  }
+
+  /**
+   * Send one relay `SNAPSHOT_TO` frame, now or through the v1.7 pacer.
+   *
+   * `#activateP2P` runs only after the frame was handed to the transport, so a
+   * paced switch snapshot still precedes the DataChannel switch announcement.
+   */
+  #enqueueRelaySnapshot(target: string, snapshotSeq: number, payload: Uint8Array): void {
+    let frame: Uint8Array;
+    try {
+      frame = encodeFrame({
+        type: "snapshot_to",
+        targetId: target,
+        seq: snapshotSeq,
+        payload,
+      });
+    } catch (error) {
+      this.#logger.warn(`failed to send snapshot to ${target}: ${formatError(error)}`);
+      return;
+    }
+    const pacer = this.#pacer;
+    if (pacer === null) {
+      this.#transmitRelaySnapshot(target, snapshotSeq, payload, frame);
+      return;
+    }
+    pacer.enqueue({
+      kind: "snapshot",
+      priority: false,
+      bytes: frame.byteLength,
+      send: () => this.#transmitRelaySnapshot(target, snapshotSeq, payload, frame),
+    });
+  }
+
+  #transmitRelaySnapshot(
+    target: string,
+    snapshotSeq: number,
+    payload: Uint8Array,
+    frame: Uint8Array,
+  ): void {
+    try {
+      this.#transport?.send(frame);
+      this.#logger.debug(
+        `relay snapshot sent (target=${target}, seq=${snapshotSeq}, ` +
+          `bytes=${payload.byteLength})`,
+      );
+      if (this.#pendingP2PSwitches.delete(target)) {
+        this.#activateP2P(target, snapshotSeq);
+      }
+      // A paced snapshot can be the frame that fills the relay socket buffer.
+      this.#checkRelayBackpressure();
+    } catch (error) {
+      this.#logger.warn(`failed to send snapshot to ${target}: ${formatError(error)}`);
+    }
+  }
+
+  /**
+   * Paced direct-DataChannel snapshot: re-check the link when the job runs and
+   * fall back to the relay boundary when the DataChannel is gone or rejects
+   * the frame.
+   */
+  #transmitDirectSnapshot(
+    target: string,
+    frame: Uint8Array,
+    snapshotSeq: number,
+    payload: Uint8Array,
+  ): void {
+    const link = this.#p2pLinks.get(target);
+    const usable = link?.peer.isOpen === true && link.supportsFragmentation && link.tunnel === null;
+    if (usable) {
+      try {
+        if (link.peer.sendFragmentableFrame(frame)) {
+          const fragments =
+            frame.byteLength <= MAX_DATACHANNEL_MESSAGE_BYTES
+              ? 1
+              : Math.ceil(frame.byteLength / MAX_FRAGMENT_CHUNK_BYTES);
+          this.#logger.debug(
+            `p2p snapshot sent (target=${target}, seq=${snapshotSeq}, ` +
+              `bytes=${payload.byteLength}, fragments=${fragments})`,
+          );
+          if (this.#pendingP2PSwitches.delete(target)) {
+            this.#activateP2P(target, snapshotSeq);
+          }
+          return;
+        }
+      } catch (error) {
+        this.#logger.warn(`failed to send p2p snapshot for ${target}: ${formatError(error)}`);
+      }
+      this.#fallbackToRelay(target, "p2p snapshot send failed", false);
+    }
+    this.#enqueueRelaySnapshot(target, snapshotSeq, payload);
   }
 
   #startListenerTimer(): void {
@@ -1643,12 +1844,15 @@ class HostSession {
     const transport = this.#transport;
     if (transport === null) return;
     this.#listenerSnapshotInFlight = true;
+    const pacer = this.#pacer;
+    const relayBudgetUsed = (): number =>
+      pacer === null ? (this.#client?.bufferedAmount ?? 0) : pacer.queuedBytes;
     try {
       // Do not pause the PTY; output written while this resolves is simply
       // covered by the next periodic snapshot.
       await this.#mirror?.flush();
       if (this.#closing || this.#listeners.size === 0) return;
-      if ((this.#client?.bufferedAmount ?? 0) > LISTENER_RELAY_BUFFER_BUDGET) {
+      if (relayBudgetUsed() > LISTENER_RELAY_BUFFER_BUDGET) {
         this.#logger.debug("listener snapshots skipped: relay buffer is high");
         return;
       }
@@ -1656,21 +1860,49 @@ class HostSession {
       const seq = Math.max(0, this.#lastAssignedSeq);
       let sent = 0;
       for (const target of this.#listeners) {
-        // Re-check per listener: all frames share the host's socket, and the
-        // next periodic tick will catch any listener skipped here.
-        if ((this.#client?.bufferedAmount ?? 0) > LISTENER_RELAY_BUFFER_BUDGET) {
+        // Re-check per listener: all frames share the host's socket (or the
+        // pacer queue), and the next periodic tick catches any skipped here.
+        if (relayBudgetUsed() > LISTENER_RELAY_BUFFER_BUDGET) {
           break;
         }
+        let frame: Uint8Array;
         try {
-          transport.send(encodeFrame({ type: "snapshot_to", targetId: target, seq, payload }));
-          sent += 1;
+          frame = encodeFrame({ type: "snapshot_to", targetId: target, seq, payload });
         } catch (error) {
           // A single bad listener must not end the session or stop the timer.
           this.#logger.warn(`failed to send listener snapshot to ${target}: ${formatError(error)}`);
+          continue;
         }
+        if (pacer === null) {
+          try {
+            transport.send(frame);
+            sent += 1;
+          } catch (error) {
+            this.#logger.warn(
+              `failed to send listener snapshot to ${target}: ${formatError(error)}`,
+            );
+          }
+          continue;
+        }
+        pacer.enqueue({
+          kind: "snapshot",
+          priority: false,
+          bytes: frame.byteLength,
+          send: () => {
+            try {
+              transport.send(frame);
+            } catch (error) {
+              this.#logger.warn(
+                `failed to send listener snapshot to ${target}: ${formatError(error)}`,
+              );
+            }
+          },
+        });
+        sent += 1;
       }
       this.#logger.debug(
-        `listener snapshots sent (listeners=${sent}, bytes=${payload.byteLength}, seq=${seq})`,
+        `listener snapshots ${pacer === null ? "sent" : "queued"} ` +
+          `(listeners=${sent}, bytes=${payload.byteLength}, seq=${seq})`,
       );
     } finally {
       this.#listenerSnapshotInFlight = false;
@@ -1724,6 +1956,9 @@ class HostSession {
       exitCode: info.exitCode,
       ...(info.signal === undefined ? {} : { signal: String(info.signal) }),
     };
+    // Pacing may still hold the last screenful. Flush it before host-exited so
+    // viewers still apply the command's final output, not just the exit event.
+    this.#pacer?.flush();
     this.#client?.sendControl(hostExited);
     this.#logger.info(
       "hint: this conversation can be resumed with --resume/--continue where supported",
@@ -1755,6 +1990,8 @@ class HostSession {
     this.#p2pRetryTimers.clear();
     this.#p2pRetryUsed.clear();
     this.#p2pRetriesInFlight = 0;
+    this.#stopDrainTimer();
+    this.#pacer?.dispose();
     if (this.#snapshotTimer !== null) {
       clearTimeout(this.#snapshotTimer);
       this.#snapshotTimer = null;
