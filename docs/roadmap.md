@@ -256,11 +256,11 @@ DEBUG 日志、宽终端侧栏）。进程接管仅规划。
 状态：父任务 `.trellis/tasks/11-20-v1-5-agent-onboarding` 与 3 个子任务
 （A skill / B dsh 插件 / C 发布）已实现并随 **0.1.6**（tag `v0.1.6`）交付
 （2026-11-23）。skill 位于 `skills/tokimeki/`，本地
-`npx skills add . --list` 已验证可发现；GitHub 默认分支 `main` 仍为
-0.1.2，需维护者合并 `release/0.1.6` 后默认分支安装才可用。dsh 插件源码
-与 13 个测试已完成（`D:/Workspace/tokimeki-dsh`，commit `9464dad`），但
-新建公开仓库 `limccn/tokimeki-dsh` 需要用户显式授权（或由用户在 GitHub
-UI 创建）并配置 `NPM_TOKEN` 后才能发布 npm/GitHub Release。
+`npx skills add . --list` 已验证可发现；GitHub 默认分支 `main` 现为
+**0.1.9**（2026-11-26），`npx skills add limccn/tokimeki --skill tokimeki`
+在默认分支可用。dsh 插件源码与 13 个测试已完成
+（`D:/Workspace/tokimeki-dsh`），并已公开发布 0.1.0/0.1.1（见 v1.8
+follow-ups）。
 
 启动前置（2026-11-23）：先对齐 v1.4 路线图（A/B/C/E/H/J）与 0.1.4
 凭证模型（推荐 `TOKIMEKI_TOKEN`，`TOKIMEKI_MASTER_TOKEN` 为 deprecated
@@ -302,15 +302,17 @@ v1.8 撤销/轮换）纳入 skill/plugin 警告。
   任意 shell；发布前安全审查。
 - 不阻塞 v2；与 v1.4 并行。
 
-## v1.7（实现完成，待发布）
+## v1.7（已随 0.1.8 发布并合入 main，2026-11-26）
 
 状态：任务 `.trellis/tasks/11-22-v1-7-relay-rate-limit-hardening`
 （`prd.md` / `design.md` / `implement.md`）。2026-11-26 在分支
 `feat/v1-7-relay-rate-limit` 完成 relay/CLI 部分（R1/R2/R3/R5/R6/R8 文档与
-测试），TokiAPI `/api/tokimeki/ws`（R4）在同日独立分支
-`D:/Workspace/cf-ai-gateway` 完成；尚未合并、发布或部署生产。安排在 v2
-之前；当前用户量不大，但应在大规模匿名 onboarding 前上线。基线为
-`develop`（0.1.4 已于 2026-11-23 并入；生产 0.1.4 已部署）。
+测试）并合入 `develop`，随 **0.1.8**（tag `v0.1.8`）发布并合入 `main`。
+TokiAPI `/api/tokimeki/ws`（R4）已合并为 `limccn/TokiAPI` `32e1b8cb` 并部署
+stg `8e3ece5a` / prd `f10fbb06`（`TOKIMEKI_WS_LIMIT` 30/60s）；生产 relay
+已部署 `c33d88b9`（`TOKIMEKI_WS_IP_LIMIT` 30/60s）。R8 的 zone
+HTTPS/HSTS 已由 owner 启用；`lmlh.net` legacy HSTS 与 `/ws/*` WAF 兜底仍是
+可选项。基线为 `develop`。
 
 目标：在 relay/TokiAPI 侧补齐匿名/会话凭证的 **按 IP 限速** 与 **失败重试
 上限**，压低会话 token 枚举、passcode 分布式猜测和 429 无限重连风险。
@@ -362,7 +364,8 @@ release 发布仍需单独批准。
 
 与上面的凭证 per-IP 限速不是同一件事。任务
 `.trellis/tasks/11-26-v1-7-path-pacing`，父调研
-`11-26-protocol-china-isp-resilience`。已实现，两个开关默认关闭，尚未发布。
+`11-26-protocol-china-isp-resilience`。随 0.1.8 发布并合入 main；两个开关
+默认关闭。
 
 只做调查目录的第 1、2 项，都在现有 Node host 和现有帧上，默认关闭：
 
@@ -378,12 +381,13 @@ release 发布仍需单独批准。
 为限速做 relay E2E、IPv6 优先。不测量境内网络，也不把社区帖里的速率写成默认值。
 退回 relay 后，relay 仍能看到终端字节。
 
-## v1.8（规划中，2026-11-23 立项）
+## v1.8（fixed resize 随 0.1.9 发布并合入 main；credential lifecycle 延后）
 
-状态：任务 `.trellis/tasks/11-23-v1-8-credential-lifecycle-hardening`
-（`prd.md` / `design.md` / `implement.md`）已创建，当前为 planning，未启动
-实现。安排在 v1.7 之后、v2 之前。来源：v1.4 设计安全审计的 deferred
-lifecycle 项。
+状态：v1.8 的 fixed-resize follow-up 已随 **0.1.9**（tag `v0.1.9`）发布并
+合入 `main`；`main`、`release/0.1.9`、tag `v0.1.9` 均为 `92744588`。
+credential-lifecycle 任务 `.trellis/tasks/11-23-v1-8-credential-lifecycle-hardening`
+（`prd.md` / `design.md` / `implement.md`）仍为 planning，用户 2026-11-26
+决定延后，未启动实现。来源：v1.4 设计安全审计的 deferred lifecycle 项。
 
 目标：补齐凭证与会话的 **生命周期** 安全边界：撤销、过期、轮换、陈旧
 config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
@@ -404,7 +408,7 @@ config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
 
 ### v1.4/v1.5 delivery follow-ups（任务 `11-23-v1-8-v1-4-v1-5-followups`）
 
-- 固定窗口实时 resize（已实现，0.1.9 任务
+- 固定窗口实时 resize（已随 0.1.9 发布并合入 main，任务
   `11-26-v1-8-fixed-grid-live-resize`）：新增 additive `display-size` 控制消息与
   `display.resize` capability；relay 只接受 host 发送、更新 host attachment 的
   `display.fixed` 并只向声明支持的 viewer/listener 广播；CLI host 在 relay 与
@@ -413,17 +417,22 @@ config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
   TokiAPI web viewer 未声明支持，连接期间阻止 live resize，晚加入时从 welcome
   读取新尺寸；web 端实时支持是后续跨仓任务。协议文档/goldens、`docs/cli.md`、
   `docs/web-viewer.md` 与多 viewer e2e 已同步。
-- 公开发布 `tokimeki-dsh`（用户 2026-11-24 决定暂缓到 v1.8）：用户创建/授权
-  `limccn/tokimeki-dsh` 公开仓库、配置 `NPM_TOKEN`，推送 `main`/`v0.1.0`，
-  由 CI 发布 npm + GitHub Release；本地源码/测试保留在
-  `D:/Workspace/tokimeki-dsh`（commit `9464dad`）。
-- skill 分发：合并 `release/0.1.6` → `main` 后验证默认分支
-  `npx skills add limccn/tokimeki --skill tokimeki`、卸载与 skills.sh
-  indexing request（best-effort）。
-- TokiAPI `api/config`/`anon-host`/`attach/cli` 生产 live 复测（200/429/503、
-  TTL、relay wss 绑定）。
-- 清理项：`TOKIMEKI_TOKIAPI_URL` 定位、ACP 检测跨平台 CI、skill 结构/secret
-  扫描脚本。
+- 公开发布 `tokimeki-dsh`：已完成 0.1.0/0.1.1 发布（GitHub Releases +
+  npmjs；0.1.1 放宽 `@deepseek-ai/dsh-tools` peer 以支持 dsh 0.2.2-rc.5），
+  真实 `dsh plugin add` 安装 smoke 通过。
+- skill 分发：默认分支 `npx skills add limccn/tokimeki --skill tokimeki`
+  已验证；skills.sh 收录请求已提交为 `vercel-labs/skills#2849`
+  （best-effort，不承诺时间）。
+- TokiAPI 生产 live 复测（2026-11-26 完成）：`/api/config` 200
+  （`tokimekiEnabled=true`）、`/api/tokimeki/anon-host` 200（4 字符
+  namespace、24h Host JWT、invite URL）、`/api/tokimeki/attach/cli` 200
+  （Session JWT `token_use=session`、`scope=attach`）；并用 anon Host JWT +
+  attach-cli Session JWT 在 `relay.tokiapi.app` 完成 host + 2 viewers +
+  reconnect + Ctrl-C 的 relay-only live e2e（PASS）。
+- 收尾项（2026-11-26）：`main` 已按版本 fast-forward 到 0.1.9
+  （8636ca2 → 974d5b4 → 92744588），main CI `45767785129` 通过。剩余可选：
+  `lmlh.net` legacy HSTS、`/ws/*` WAF/rate-limit 兜底、
+  `TOKIMEKI_TOKIAPI_URL` 定位、ACP 检测跨平台 CI、skill 结构/secret 扫描。
 
 ## v2（独立任务）
 
