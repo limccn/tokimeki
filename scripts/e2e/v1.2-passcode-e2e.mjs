@@ -39,6 +39,12 @@ const timeoutMs = Number(process.env.E2E_TIMEOUT_MS ?? 60_000);
 const passcode = process.env.E2E_PASSCODE ?? "e2e-pass-123456";
 const codeCharset = "2356789abcdefghjkmnpqrstuvwxyz";
 
+function assertIsoTimestamp(value, label) {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new Error(`${label} expiresAt must be an ISO-8601 timestamp`);
+  }
+}
+
 if (!existsSync(cli)) {
   console.error(`CLI entry not found: ${cli} (run npm run build)`);
   process.exit(2);
@@ -302,6 +308,7 @@ async function main() {
   if (cliAttach.response.status !== 200) {
     throw new Error(`attach/cli failed: HTTP ${cliAttach.response.status}\n${cliAttach.text}`);
   }
+  assertIsoTimestamp(cliAttach.body?.expiresAt, "attach/cli");
   secrets.add(cliAttach.body.token);
 
   const goodViewer = start("viewer-with-passcode", [cli, "attach"], {

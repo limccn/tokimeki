@@ -61,6 +61,30 @@ describe("provider origin and relay binding", () => {
 });
 
 describe("TokiAPI public config", () => {
+  it("parses the production body and ignores unrelated public fields", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse(200, {
+        apiBaseUrl: "https://tokiapi.app",
+        platformBaseUrl: "https://tokiapi.app",
+        smsAuthEnabled: false,
+        tokimekiEnabled: true,
+        tokimekiRelayUrl: "wss://relay.tokiapi.app",
+      }),
+    );
+    await expect(getPublicConfig("https://tokiapi.app", { fetchImpl })).resolves.toEqual({
+      tokimekiEnabled: true,
+      tokimekiRelayUrl: "wss://relay.tokiapi.app",
+    });
+  });
+
+  it("treats an empty relay URL as absent", async () => {
+    const fetchImpl = mockFetch(jsonResponse(200, { tokimekiEnabled: true, tokimekiRelayUrl: "" }));
+    await expect(getPublicConfig("https://tokiapi.app", { fetchImpl })).resolves.toEqual({
+      tokimekiEnabled: true,
+      tokimekiRelayUrl: null,
+    });
+  });
+
   it("parses the documented shape", async () => {
     const fetchImpl = mockFetch(
       jsonResponse(200, { tokimekiEnabled: true, tokimekiRelayUrl: "wss://relay.tokiapi.app" }),
@@ -142,6 +166,66 @@ describe("TokiAPI anonymous host request", () => {
     }
   });
 
+  it("parses the anon-host body TokiAPI returns", async () => {
+    const expiresAt = "2026-11-27T06:53:00.000Z";
+    const fetchImpl = mockFetch(
+      jsonResponse(200, {
+        success: true,
+        token: "eyJhbGciOiJFUzI1NiJ9.eyJ0b2tlbl91c2UiOiJob3N0In0.sig",
+        namespace: "k3m7",
+        session: "k3m7.calm-otter",
+        inviteUrl: "https://tokiapi.app/#t-5rph2dgcuz7pa6qh",
+        expiresAt,
+      }),
+    );
+    await expect(requestAnonymousHost("https://tokiapi.app", { fetchImpl })).resolves.toEqual({
+      token: "eyJhbGciOiJFUzI1NiJ9.eyJ0b2tlbl91c2UiOiJob3N0In0.sig",
+      namespace: "k3m7",
+      session: "k3m7.calm-otter",
+      inviteUrl: "https://tokiapi.app/#t-5rph2dgcuz7pa6qh",
+      expiresAt: Math.floor(Date.parse(expiresAt) / 1000),
+    });
+  });
+
+  it("accepts the ISO-8601 expiresAt that TokiAPI returns", async () => {
+    const expiresAt = "2026-11-27T06:53:00.000Z";
+    const fetchImpl = mockFetch(jsonResponse(200, { ...grant, expiresAt }));
+    await expect(requestAnonymousHost("https://tokiapi.app", { fetchImpl })).resolves.toMatchObject(
+      { expiresAt: Math.floor(Date.parse(expiresAt) / 1000) },
+    );
+  });
+
+  it("accepts offset timestamps and Z timestamps without milliseconds", async () => {
+    for (const expiresAt of ["2026-11-27T14:53:00.000+08:00", "2026-11-27T06:53:00Z"]) {
+      const fetchImpl = mockFetch(jsonResponse(200, { ...grant, expiresAt }));
+      await expect(
+        requestAnonymousHost("https://tokiapi.app", { fetchImpl }),
+      ).resolves.toMatchObject({
+        expiresAt: Math.floor(Date.parse("2026-11-27T06:53:00.000Z") / 1000),
+      });
+    }
+  });
+
+  it("treats a missing expiresAt as unknown", async () => {
+    const { expiresAt: _expiresAt, ...withoutExpiry } = grant;
+    const fetchImpl = mockFetch(jsonResponse(200, withoutExpiry));
+    await expect(requestAnonymousHost("https://tokiapi.app", { fetchImpl })).resolves.toMatchObject(
+      { expiresAt: null },
+    );
+  });
+
+  it("rejects an invalid expiresAt", async () => {
+    for (const expiresAt of ["2026-11-27", "not-a-date", -1]) {
+      const fetchImpl = mockFetch(jsonResponse(200, { ...grant, expiresAt }));
+      await expect(
+        requestAnonymousHost("https://tokiapi.app", { fetchImpl }),
+      ).rejects.toMatchObject({
+        kind: "schema",
+        message: "TokiAPI response field expiresAt is invalid",
+      });
+    }
+  });
+
   it("rejects non-https invite URLs", async () => {
     const fetchImpl = mockFetch(jsonResponse(200, { ...grant, inviteUrl: "http://x" }));
     await expect(requestAnonymousHost("https://tokiapi.app", { fetchImpl })).rejects.toMatchObject({
@@ -160,6 +244,31 @@ describe("TokiAPI anonymous host request", () => {
 });
 
 describe("TokiAPI attach exchange", () => {
+  it("parses the attach/cli body TokiAPI returns", async () => {
+    const expiresAt = "2026-11-27T06:53:00.000Z";
+    const fetchImpl = mockFetch(
+      jsonResponse(200, {
+        success: true,
+        token: "eyJhbGciOiJFUzI1NiJ9.eyJ0b2tlbl91c2UiOiJzZXNzaW9uIn0.sig",
+        session: "k3m7.calm-otter",
+        mode: "viewer",
+        allowWeb: true,
+        passcodeRequired: false,
+        expiresAt,
+      }),
+    );
+    await expect(
+      exchangeAttachCode("https://tokiapi.app", "5rph2dgcuz7pa6qh", { fetchImpl }),
+    ).resolves.toEqual({
+      token: "eyJhbGciOiJFUzI1NiJ9.eyJ0b2tlbl91c2UiOiJzZXNzaW9uIn0.sig",
+      session: "k3m7.calm-otter",
+      mode: "viewer",
+      allowWeb: true,
+      passcodeRequired: false,
+      expiresAt: Math.floor(Date.parse(expiresAt) / 1000),
+    });
+  });
+
   it("parses viewer/listener grants and passcode requirements", async () => {
     const fetchImpl = mockFetch(
       jsonResponse(200, {
@@ -208,6 +317,44 @@ describe("TokiAPI attach exchange", () => {
       expect(message).not.toContain("\u001b");
       expect(message).not.toContain("\n");
     }
+  });
+
+  it("accepts the ISO-8601 expiresAt that TokiAPI returns", async () => {
+    const expiresAt = "2026-11-27T06:53:00.000Z";
+    const fetchImpl = mockFetch(
+      jsonResponse(200, {
+        success: true,
+        token: "session-jwt",
+        session: "ab12.calm-otter",
+        mode: "viewer",
+        allowWeb: true,
+        passcodeRequired: false,
+        expiresAt,
+      }),
+    );
+    await expect(
+      exchangeAttachCode("https://tokiapi.app", "code123", { fetchImpl }),
+    ).resolves.toMatchObject({
+      expiresAt: Math.floor(Date.parse(expiresAt) / 1000),
+    });
+  });
+
+  it("rejects a non-timestamp expiresAt", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse(200, {
+        success: true,
+        token: "session-jwt",
+        session: "ab12.calm-otter",
+        mode: "viewer",
+        expiresAt: "1800000000",
+      }),
+    );
+    await expect(
+      exchangeAttachCode("https://tokiapi.app", "code123", { fetchImpl }),
+    ).rejects.toMatchObject({
+      kind: "schema",
+      message: "TokiAPI response field expiresAt is invalid",
+    });
   });
 
   it("rejects an invalid code locally", async () => {

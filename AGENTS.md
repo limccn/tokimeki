@@ -19,3 +19,7 @@ If you're using Codex or another agent-capable tool, additional project-scoped h
 Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
 
 <!-- TRELLIS:END -->
+
+## Git
+
+Do not commit or push to `main` unless the user explicitly allows it in the current request. Land changes on `develop` or a topic branch.

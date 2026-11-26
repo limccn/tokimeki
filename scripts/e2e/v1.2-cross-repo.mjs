@@ -96,6 +96,12 @@ async function jsonFetch(path, init = {}) {
   return { response, body, text };
 }
 
+function assertIsoTimestamp(value, label) {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new Error(`${label} expiresAt must be an ISO-8601 timestamp`);
+  }
+}
+
 function codeFromUrl(url) {
   const marker = "#t-";
   const index = url.indexOf(marker);
@@ -113,7 +119,8 @@ async function main() {
   if (anon.response.status !== 200 || anon.body?.success !== true) {
     throw new Error(`anon-host failed: HTTP ${anon.response.status}\n${anon.text}`);
   }
-  const { token, namespace, session, inviteUrl } = anon.body;
+  const { token, namespace, session, inviteUrl, expiresAt } = anon.body;
+  assertIsoTimestamp(expiresAt, "anon-host");
   const code = codeFromUrl(inviteUrl);
   secrets.add(token);
   secrets.add(code);
@@ -146,6 +153,7 @@ async function main() {
   if (cliAttach.response.status !== 200 || typeof cliAttach.body?.token !== "string") {
     throw new Error(`attach/cli failed: HTTP ${cliAttach.response.status}\n${cliAttach.text}`);
   }
+  assertIsoTimestamp(cliAttach.body.expiresAt, "attach/cli");
   secrets.add(cliAttach.body.token);
   const viewer = start("viewer", [cli, "attach"], {
     TOKIMEKI_RELAY_URL: relayUrl,

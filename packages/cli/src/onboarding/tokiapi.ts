@@ -295,13 +295,33 @@ function optionalString(record: Record<string, unknown>, name: string, max = 819
   return value;
 }
 
+/** `Date.toISOString()` and the same instant with a numeric offset. */
+const ISO_8601_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Optional expiry from a TokiAPI grant.
+ *
+ * Numbers pass through (unix seconds or milliseconds; callers normalize).
+ * TokiAPI (`anon-host`, `attach/cli`) sends an ISO-8601 timestamp; that form
+ * is converted to unix seconds.
+ */
 function optionalEpoch(record: Record<string, unknown>, name: string): number | null {
   const value = record[name];
   if (value === undefined || value === null) return null;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new TokiApiError("schema", `TokiAPI response field ${name} is invalid`);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new TokiApiError("schema", `TokiAPI response field ${name} is invalid`);
+    }
+    return value;
   }
-  return value;
+  if (typeof value === "string" && ISO_8601_TIMESTAMP.test(value)) {
+    const milliseconds = Date.parse(value);
+    if (Number.isFinite(milliseconds) && milliseconds >= 0) {
+      return Math.floor(milliseconds / 1000);
+    }
+  }
+  throw new TokiApiError("schema", `TokiAPI response field ${name} is invalid`);
 }
 
 function optionalBoolean(record: Record<string, unknown>, name: string): boolean | null {

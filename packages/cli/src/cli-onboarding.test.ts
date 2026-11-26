@@ -170,7 +170,9 @@ describe("v1.4 CLI onboarding wiring", () => {
           token: "session-jwt-value",
           session: "ab12.calm-otter",
           mode: "viewer",
+          allowWeb: true,
           passcodeRequired: false,
+          expiresAt: "2026-11-27T06:53:00.000Z",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -203,7 +205,9 @@ describe("v1.4 CLI onboarding wiring", () => {
           token: "session-jwt-value",
           session: "ab12.calm-otter",
           mode: "viewer",
+          allowWeb: true,
           passcodeRequired: false,
+          expiresAt: "2026-11-27T06:53:00.000Z",
         }),
         { status: 200 },
       );

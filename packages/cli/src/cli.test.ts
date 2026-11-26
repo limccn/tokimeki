@@ -315,7 +315,8 @@ describe("tokimeki CLI wiring", () => {
           session: "abcde.laptop",
           mode: "viewer",
           passcodeRequired: true,
-          expiresAt: 1_800_000_000,
+          allowWeb: true,
+          expiresAt: "2026-11-27T06:53:00.000Z",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -365,7 +366,9 @@ describe("tokimeki CLI wiring", () => {
           token: "session-token-1234",
           session: "abcde.laptop",
           mode: "viewer",
-          expiresAt: 1_800_000_000,
+          allowWeb: true,
+          passcodeRequired: false,
+          expiresAt: "2026-11-27T06:53:00.000Z",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -386,6 +389,59 @@ describe("tokimeki CLI wiring", () => {
     expect(config).toMatchObject({
       session: "abcde.laptop",
       sessionToken: "session-token-1234",
+    });
+  });
+
+  it("uses the hosted relay when TokiAPI returns an empty relay URL", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tokimeki-cli-"));
+    tempDirs.push(home);
+    const runAttach = vi.fn(async (_config: AttachConfig, _logger: Logger): Promise<number> => 0);
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/api/config")) {
+        return new Response(
+          JSON.stringify({
+            apiBaseUrl: "https://tokiapi.app",
+            platformBaseUrl: "https://tokiapi.app",
+            smsAuthEnabled: false,
+            tokimekiEnabled: true,
+            tokimekiRelayUrl: "",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          token: "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJhbm9uIn0.sig",
+          session: "k3m7.calm-otter",
+          mode: "viewer",
+          allowWeb: true,
+          passcodeRequired: false,
+          expiresAt: "2026-11-27T06:53:00.000Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const { deps, stderr } = harness(
+      {},
+      {
+        runAttach,
+        homeDir: home,
+        platform: process.platform,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      },
+    );
+
+    const code = await main(
+      ["node", "tokimeki", "attach", "https://tokiapi.app/#t-5rph2dgcuz7pa6qh"],
+      deps,
+    );
+    expect(code, stderr()).toBe(0);
+    const [config] = runAttach.mock.calls[0] ?? [];
+    expect(config).toMatchObject({
+      relayUrl: "wss://relay.tokiapi.app",
+      session: "k3m7.calm-otter",
+      sessionToken: "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJhbm9uIn0.sig",
     });
   });
 

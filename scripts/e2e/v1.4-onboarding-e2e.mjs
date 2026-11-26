@@ -197,7 +197,8 @@ async function main() {
           mode: "viewer",
           allowWeb: true,
           passcodeRequired: true,
-          expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          // TokiAPI returns Date.toISOString(), not a unix number.
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
         });
       });
       return;

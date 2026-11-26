@@ -149,7 +149,7 @@ describe("host wizard", () => {
         namespace: "ab12",
         session: "ab12.calm-otter",
         inviteUrl: "https://tokiapi.app/#t-code123",
-        expiresAt: 1_800_000_000,
+        expiresAt: "2026-11-27T06:53:00.000Z",
       });
     }) as unknown as typeof fetch;
     const result = await runHostWizard({
@@ -167,6 +167,7 @@ describe("host wizard", () => {
       TOKIMEKI_SESSION_TOKEN: expect.stringMatching(/^[A-Za-z0-9_-]{40,}$/),
     });
     expect(result.inviteUrl).toBe("https://tokiapi.app/#t-code123");
+    expect(prompt.printed.join("\n")).toContain("2026-11-27T06:53:00.000Z");
     expect(prompt.printed.join("\n")).toContain("Invite URL (capability secret");
     expect(prompt.printed.join("\n")).not.toContain("anon-host-jwt");
   });
@@ -231,7 +232,7 @@ describe("attach wizard", () => {
         mode: "listener",
         allowWeb: false,
         passcodeRequired: false,
-        expiresAt: 1_800_000_000,
+        expiresAt: "2026-11-27T06:53:00.000Z",
       });
     }) as unknown as typeof fetch;
     const result = await runAttachWizard({
@@ -249,6 +250,7 @@ describe("attach wizard", () => {
       TOKIMEKI_SESSION_TOKEN: "session-jwt",
     });
     expect(result.warnings.join("\n")).toContain("short-lived");
+    expect(result.warnings.join("\n")).toContain("2026-11-27T06:53:00.000Z");
   });
 
   it("prompts instead of accepting an empty history session token", async () => {

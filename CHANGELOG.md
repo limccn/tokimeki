@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- CLI onboarding accepts TokiAPI `expiresAt` as an ISO-8601 timestamp.
+  `anon-host` and `attach/cli` return that form; a numeric-only check rejected
+  every share-URL attach with `TokiAPI response field expiresAt is invalid`.
+
 ## [0.1.7] - 2026-11-24
 
 Security hardening for v1.4/v1.5 code across the CLI, relay, onboarding site,
