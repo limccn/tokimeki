@@ -302,49 +302,61 @@ v1.8 撤销/轮换）纳入 skill/plugin 警告。
   任意 shell；发布前安全审查。
 - 不阻塞 v2；与 v1.4 并行。
 
-## v1.7（规划中，2026-11-22 立项）
+## v1.7（实现完成，待发布）
 
 状态：任务 `.trellis/tasks/11-22-v1-7-relay-rate-limit-hardening`
-（`prd.md` / `design.md` / `implement.md`）已创建，当前为 planning，未启动
-实现。安排在 v1.4/v1.5 之后、v2 之前；当前用户量不大，但应在大规模匿名
-onboarding 前完成。基线为 `develop`（0.1.4 已于 2026-11-23 并入；生产
-0.1.4 已部署）；CLI/npm 版本启动时确定（候选 0.1.5）。
+（`prd.md` / `design.md` / `implement.md`）。2026-11-26 在分支
+`feat/v1-7-relay-rate-limit` 完成 relay/CLI 部分（R1/R2/R3/R5/R6/R8 文档与
+测试），TokiAPI `/api/tokimeki/ws`（R4）在同日独立分支
+`D:/Workspace/cf-ai-gateway` 完成；尚未合并、发布或部署生产。安排在 v2
+之前；当前用户量不大，但应在大规模匿名 onboarding 前上线。基线为
+`develop`（0.1.4 已于 2026-11-23 并入；生产 0.1.4 已部署）。
 
 目标：在 relay/TokiAPI 侧补齐匿名/会话凭证的 **按 IP 限速** 与 **失败重试
 上限**，压低会话 token 枚举、passcode 分布式猜测和 429 无限重连风险。
 不改变现有 wire 协议、不新增错误码、不改变 relay 信任模型。
 
-- **relay `/ws` per-IP 限速**：Worker 边缘 `[[ratelimits]]` binding，覆盖会
-  进入 DO 的 upgrade 尝试；超限 429 + `Retry-After`；binding/IP 缺失时
-  fail-open 并记录日志。建议 30/60s/IP。
+已实现（用户确认阈值）：
+
+- **relay `/ws` per-IP 限速**：Worker 边缘 `TOKIMEKI_WS_IP_LIMIT`
+  `[[ratelimits]]` binding，覆盖会进入 DO 的 upgrade 尝试；30/60s/IP，
+  超限 429 + `Retry-After: 60`；binding/IP 缺失或 binding 异常时 fail-open
+  并记录独立日志；客户端伪造 `x-tokimeki-client-ip`/`x-real-ip` 不被信任。
+  生产配置使用 namespace 3001；根 OSS 配置只保留注释示例。
 - **失败 opaque session-token 锁限 + 统一 unauthorized**：session 不存在、
-  token 不匹配、锁限期间返回同一 `unauthorized`，移除存在性 oracle；对已
-  存在 session 按 IP+session 计数（建议 10/60s → 锁 60s），不做整 session
-  锁；不存在的 session 由边缘限速兜底，且不创建 schema。
-- **匿名 token 熵由 TokiAPI 决定**：relay 不假设 token 长度/字符集，只提供
-  配套限速；6–8 位数字或未来更长/字母数字 token 走同一路径。
-- **TokiAPI `/api/tokimeki/ws` per-IP 限速**：独立桶/绑定（建议
-  `TOKIMEKI_WS_LIMIT` 30/60s），429 + `Retry-After`，fail-open；同 zone
-  代理把可信客户端 IP 写入上游 `x-real-ip`，供 relay 按真实 IP 计数；
+  token 不匹配、锁限期间返回同一 `unauthorized`（4001），移除存在性
+  oracle；对已存在 session 按 IP+session 计数，10/60s → 锁 60s；成功清除；
+  不做整 session 锁；不存在的 session 不创建 schema，由边缘限速兜底；
+  Session JWT/host 的具体错误保留。
+- **匿名 token 熵由 TokiAPI 决定**：relay 不假设 token 长度/字符集；测试
+  覆盖 6/8/16/32 位与字母数字 opaque token。
+- **TokiAPI `/api/tokimeki/ws` per-IP 限速**：独立 `TOKIMEKI_WS_LIMIT`
+  （30/60s），429 + `Retry-After`，fail-open；`connectUpstream()` 透传
+  可信 `x-real-ip`（同 zone 时 relay 可继续按真实 web viewer IP 计数）；
   一次性 ticket/Origin/invite/passcode gate 顺序不变。
-- **CLI relay 429 重试上限**：连续 429 建议最多 6 次，保留 1s..30s 指数退避；
-  第 6 次连续 429 触发 `session_full` fatal（exit 1）；503/JWKS 恢复仍按现有
-  策略重试。
-- **passcode per-IP 失败限制**：per-IP 主锁（建议 IP+session 5/60s →
-  60s）；per-session 5/30s 改为高阈值兜底（建议 50/60s），避免单一来源
-  锁死所有 viewer/listener。
-- **Cloudflare 边缘/部署加固（R8，v1.4 审计 follow-up）**：credential-entry
-  页面 HTTPS-only/HSTS/secure-context；`/ws` 的 edge Rate Limiting/WAF 兜底；
-  Static Assets 路由不吞 relay 路径；no-JWT token 熵分工；owner 观察清单。
-- **测试/文档/观测/发布**：brute-force/统一错误、429、passcode、token 形态
-  回归；protocol/deployment/cli/roadmap/release notes；生产部署、密钥、
-  publish 均需单独批准。
+- **CLI relay 429 重试上限**：连续 429 最多 6 次，保留 1s..30s 指数退避；
+  第 6 次连续 429 触发 `session_full` fatal（exit 1）；`welcome`/成功
+  upgrade/非 429 响应重置计数，503 仍按现有策略重试。
+- **passcode per-IP 失败限制**：per-IP 主锁 5/60s → 60s；per-session
+  高阈值兜底 50/60s → 60s（不再 5/30s 全局锁）；IP 缺失时退回高阈值；
+  正确 passcode 清除两类计数；与 passcode 验证共用串行队列。
+- **Cloudflare 边缘/部署加固（R8，v1.4 审计 follow-up）**：部署文档记录
+  credential-entry HTTPS-only/HSTS/secure-context、`/ws` 的 edge Rate
+  Limiting/WAF 兜底、Static Assets 路由、no-JWT token 熵分工与 owner
+  观察清单。本项只做文档/检查清单，不修改生产 zone。
+- **测试/文档/观测**：新增 `session_auth_failures`（additive、行数上限 64、
+  清理、purge 随 `deleteAll()`）；日志 `ws_ip_rate_limited` /
+  `ws_rate_limit_binding_missing` / `ws_rate_limit_no_ip` /
+  `session_token_locked` / `passcode_ip_locked` /
+  `auth_failure_store_unavailable` 不含凭证或原始 IP；
+  protocol/deployment/cli/roadmap 已更新。
 
 已知取舍：Cloudflare 限速是 per-location、eventually consistent 的尽力而为
 压制，不得表述为“已防住爆破”；NAT 共享出口可能误伤；分布式 IP 仍可尝试
 token 猜测，主要依赖 TokiAPI 的 token 熵；per-session passcode 高阈值全局锁
 仍可能被大量分布式来源触发；per-session open-socket 429 仍会暴露“session
-存在且繁忙”；计时侧信道不做强保证。
+存在且繁忙”；计时侧信道不做强保证。生产部署、binding 启用、TokiAPI 上线与
+release 发布仍需单独批准。
 
 ### 慢路径退回与发送节奏（2026-11-26 并入 v1.7）
 

@@ -8,6 +8,7 @@ import {
   sessionMaxBytes,
   sessionMaxMessagesPerSecond,
   sessionMaxTtlSeconds,
+  wsIpRateLimit,
 } from "../src/env.js";
 
 describe("parseNonNegativeInt", () => {
@@ -67,5 +68,22 @@ describe("session limit configuration", () => {
     expect(sessionIdleTtlSeconds({ TOKIMEKI_SESSION_IDLE_TTL_SECONDS: "-1" })).toBe(0);
     expect(sessionMaxBytes({ TOKIMEKI_SESSION_MAX_BYTES: "lots" })).toBe(0);
     expect(sessionMaxMessagesPerSecond({ TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND: "" })).toBe(0);
+  });
+});
+
+describe("wsIpRateLimit", () => {
+  it("returns the binding when it is shaped like a RateLimit", () => {
+    const binding = { limit: async () => ({ success: true }) } as unknown as RateLimit;
+    expect(wsIpRateLimit({ TOKIMEKI_WS_IP_LIMIT: binding })).toBe(binding);
+  });
+
+  it("treats a missing or malformed binding as disabled (fail-open)", () => {
+    expect(wsIpRateLimit({})).toBeUndefined();
+    // A Wrangler `vars` string accidentally named like the binding must not
+    // crash every upgrade.
+    expect(
+      wsIpRateLimit({ TOKIMEKI_WS_IP_LIMIT: "30/60s" as unknown as RateLimit }),
+    ).toBeUndefined();
+    expect(wsIpRateLimit({ TOKIMEKI_WS_IP_LIMIT: {} as unknown as RateLimit })).toBeUndefined();
   });
 });

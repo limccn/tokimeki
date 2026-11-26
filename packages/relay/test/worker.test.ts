@@ -170,8 +170,9 @@ describe("relay worker", () => {
   it("does not let a viewer create a session", async () => {
     const socket = await connectWorker("viewer-create", { token: SESSION_TOKEN });
     socket.send(helloFor("viewer-create", "viewer", "viewer-1"));
+    // v1.7 R2: a nonexistent session is indistinguishable from a wrong token.
     const error = await socket.waitForType("error");
-    expect(error.code).toBe("invalid_session");
+    expect(error.code).toBe("unauthorized");
     const closed = await socket.waitForClose();
     expect(closed.code).toBe(4001);
   });

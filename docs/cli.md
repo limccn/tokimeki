@@ -324,14 +324,20 @@ as a listener automatically; a viewer invite combined with `--listen` exits 2.
 TokiAPI **Session JWT** issued by an invite (`POST /api/tokimeki/attach/cli`).
 The CLI treats both as opaque values; the relay verifies the JWT and skips the
 opaque hash comparison. If the host set `TOKIMEKI_PASSCODE`, viewers must also
-set it (sent as `X-Tokimeki-Passcode`); wrong passcodes lock verification for
-30 seconds after five failures.
+set it (sent as `X-Tokimeki-Passcode`); wrong passcodes lock the failing IP for
+60 seconds after five failures, with a per-session 50-failures/60-seconds
+backstop for distributed sources.
 
 - **Config envelope:** the host's `viewer config` JSON can be passed as
   `TOKIMEKI_CONFIG` instead of setting `TOKIMEKI_RELAY_URL`,
   `TOKIMEKI_SESSION`, and `TOKIMEKI_SESSION_TOKEN` separately.
 - **Disconnect/reconnect:** the host PTY stays alive; a reconnecting viewer
-  requests a fresh snapshot.
+  requests a fresh snapshot. The reconnect backoff is 1 s..30 s with jitter.
+  A relay that rejects the WebSocket upgrade with HTTP 429 is retried at most
+  six times consecutively; the sixth consecutive 429 is fatal (`session_full`,
+  exit 1) with a “session may be full or rate-limited, retry later” message.
+  A successful upgrade or any non-429 response resets the count, so `503`
+  (for example `jwks_unavailable`) keeps the previous unlimited retry policy.
 - **Multiple viewers:** all viewers share control. With a fixed TUI window,
   attaching or resizing a viewer never changes the host PTY; each viewer only
   changes its own local viewport.
@@ -514,9 +520,9 @@ stderr behavior.
 
 | Symptom | Check |
 |---|---|
-| `401 unauthorized` | Host credential matches the relay (master or namespace token), the session prefix is `<namespace>.<slug>` in namespace mode, and host/session tokens differ |
+| `401 unauthorized` | Host credential matches the relay (master or namespace token), the session prefix is `<namespace>.<slug>` in namespace mode, and host/session tokens differ. For viewers this can also mean the session does not exist, the token is wrong, or this IP is temporarily locked after repeated failures |
 | `host_offline` | Host is connected to the same relay/session and still running |
-| `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
+| `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION`, or wait: six consecutive HTTP 429 upgrade rejections are retried and then reported as fatal |
 | Viewer shows only part of the TUI | Local terminal is smaller than `TOKIMEKI_WINDOW_SIZE`; enlarge it or set a smaller fixed size at host start. The status bar shows `view:WxH@x,y` and the camera follows the TUI cursor |
 | F12 does not open the connection menu | The menu needs the full-screen host viewport (`TOKIMEKI_WINDOW=off` and headless hosts do not have it). Try `TOKIMEKI_INVITE_KEY=ctrl-]` if the terminal intercepts F12 |
 | F11 does not open the log view | The terminal may intercept F11; the debug F12 menu's “Open log view” item is the fallback. Set `TOKIMEKI_LOG_VIEW_ROWS>0` and `TOKIMEKI_LOG_LEVEL=debug` |

@@ -49,14 +49,21 @@ import {
 import { createLogger, type Logger } from "./logging.js";
 import { deriveNamespaceFromSessionId, isNamespaceSessionId } from "./namespace-tokens.js";
 import {
+  type AuthFailureKind,
+  type AuthFailureRecord,
+  cleanupAuthFailures,
+  clearAuthFailure,
   clearHostExit,
   clearPasscodeFailures,
+  ensureAuthFailureSchema,
   ensureRelaySchema,
   insertSessionMetadata,
+  loadAuthFailure,
   loadHostExit,
   loadSessionMetadata,
   loadSessionPasscode,
   nextAgentLeaseExpiry,
+  recordAuthFailure,
   recordPasscodeFailure,
   saveHostExit,
   saveSessionPasscode,
@@ -101,9 +108,35 @@ const RELAY_CAPABILITIES = {
   sessionSecurity: { passcode: 1 },
 } as const;
 
-/** Viewer/listener passcode policy (v1.2-D). */
-const MAX_PASSCODE_FAILURES = 5;
-const PASSCODE_LOCKOUT_MS = 30_000;
+/**
+ * Uniform rejection for opaque viewer/listener session tokens (v1.7 R2).
+ *
+ * A nonexistent session, a wrong token, and an IP lock all use this exact
+ * message so an attacker cannot tell whether a session id exists.
+ */
+const SESSION_UNAVAILABLE_MESSAGE =
+  "session unavailable; check the session id/token or host status";
+
+/**
+ * Opaque session-token failure policy (v1.7 R2): per IP + session.
+ * 10 failures inside a 60 s fixed window lock that IP for 60 s.
+ */
+const MAX_TOKEN_FAILURES = 10;
+const TOKEN_FAILURE_WINDOW_MS = 60_000;
+const TOKEN_LOCKOUT_MS = 60_000;
+
+/**
+ * Viewer/listener passcode policy (v1.7 R6).
+ *
+ * The per-IP counter is the primary lock (5 failures / 60 s -> 60 s) so one
+ * source cannot lock every viewer. The per-session counter remains as a high
+ * threshold (50 failures / 60 s -> 60 s) for distributed guessing.
+ */
+const MAX_PASSCODE_FAILURES = 50;
+const PASSCODE_LOCKOUT_MS = 60_000;
+const PASSCODE_WINDOW_MS = 60_000;
+const MAX_PASSCODE_IP_FAILURES = 5;
+const PASSCODE_IP_LOCKOUT_MS = 60_000;
 const MIN_PASSCODE_INPUT_LENGTH = 6;
 const MAX_PASSCODE_INPUT_LENGTH = 128;
 const PASSCODE_DERIVED_BYTES = 32;
@@ -173,6 +206,12 @@ interface PendingAttachment {
   readonly sessionScope: "attach" | "listen" | null;
   /** Viewer/listener passcode from the Worker-trusted header (until hello). */
   readonly passcode: string | null;
+  /**
+   * `sha256(clientIp)` of the Worker-trusted edge address, used only for
+   * per-IP failure/lock counters. `null` when the edge did not supply an IP
+   * (local dev): per-IP limits are then skipped, never shared under one key.
+   */
+  readonly clientIpHash: string | null;
 }
 
 interface PendingAck {
@@ -297,6 +336,8 @@ function readAttachment(ws: WebSocket): SocketAttachment | null {
         sessionScope:
           raw.sessionScope === "attach" || raw.sessionScope === "listen" ? raw.sessionScope : null,
         passcode: typeof raw.passcode === "string" ? raw.passcode : null,
+        // Missing on attachments persisted before v1.7 per-IP locking.
+        clientIpHash: typeof raw.clientIpHash === "string" ? raw.clientIpHash : null,
       };
     }
     return null;
@@ -407,11 +448,11 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
   /** Last activity-driven idle alarm reschedule; throttled to avoid write amplification. */
   private lastIdleScheduleAt = 0;
   /**
-   * Serializes passcode verification/updates. PBKDF2 awaits would otherwise
-   * let concurrent hellos read the same failure counter and overwrite each
-   * other, defeating the lockout.
+   * Serializes credential verification/updates. PBKDF2/token hashing awaits
+   * would otherwise let concurrent hellos read the same failure counter and
+   * overwrite each other, defeating the per-IP lockouts (v1.7 R2/R6).
    */
-  #passcodeQueue: Promise<void> = Promise.resolve();
+  #authQueue: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
@@ -523,6 +564,12 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       roleHeader !== "host" && passcodeHeader !== null && passcodeHeader.length > 0
         ? passcodeHeader
         : null;
+    // The Worker injects the edge-verified client IP. Hash it immediately: the
+    // raw address never enters an attachment, table, or log. A direct DO
+    // connection (tests/internal callers) has no trusted IP and skips per-IP.
+    const clientIpHeader = request.headers.get("x-tokimeki-client-ip");
+    const clientIpHash =
+      clientIpHeader !== null && clientIpHeader.length > 0 ? await sha256Hex(clientIpHeader) : null;
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -539,6 +586,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       sessionClaim,
       sessionScope,
       passcode,
+      clientIpHash,
     });
     await this.rescheduleAlarm();
     this.logger.info("connection_opened", {
@@ -795,12 +843,20 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       }
     } else {
       if (meta === null) {
-        this.closeWithError(
-          ws,
-          "invalid_session",
-          "session does not exist; the host must connect first",
-          CLOSE_CODES.unauthorized,
-        );
+        if (pending.sessionClaim !== null) {
+          // A verified Session JWT is not enumerable; keep the specific error.
+          this.closeWithError(
+            ws,
+            "invalid_session",
+            "session does not exist; the host must connect first",
+            CLOSE_CODES.unauthorized,
+          );
+        } else {
+          // v1.7 R2: never reveal whether the session exists to an opaque
+          // viewer/listener token guess. The edge per-IP limit (R1) is the
+          // only backstop for nonexistent sessions; no schema is created here.
+          this.rejectSessionUnavailable(ws);
+        }
         return;
       }
       if (pending.sessionClaim !== null) {
@@ -817,14 +873,14 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
           return;
         }
       } else {
-        const tokenMatches = await constantTimeEqualHex(meta.hostTokenHash, pending.tokenHash);
-        if (!tokenMatches) {
-          this.closeWithError(
-            ws,
-            "unauthorized",
-            "session token does not match",
-            CLOSE_CODES.unauthorized,
-          );
+        // v1.7 R2: per-IP + session failure counting and lockout. The queue
+        // serializes read/compare/write so parallel guesses cannot all read
+        // the same counter. A storage failure only disables locking; a wrong
+        // token is still rejected.
+        const accepted = await this.serializeAuth(() =>
+          this.verifyOpaqueViewerToken(ws, pending, meta.hostTokenHash, now),
+        );
+        if (!accepted) {
           return;
         }
       }
@@ -881,7 +937,7 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       await this.purgeSession("absolute_ttl");
       return;
     }
-    if (!(await this.serializePasscode(() => this.handlePasscode(ws, role, hello, pending, now)))) {
+    if (!(await this.serializeAuth(() => this.handlePasscode(ws, role, hello, pending, now)))) {
       return;
     }
 
@@ -962,12 +1018,18 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       }
       replacedSocket = latestExisting;
     } else if (latestMeta === null) {
-      this.closeWithError(
-        ws,
-        "invalid_session",
-        "session does not exist; the host must connect first",
-        CLOSE_CODES.unauthorized,
-      );
+      if (pending.sessionClaim !== null) {
+        this.closeWithError(
+          ws,
+          "invalid_session",
+          "session does not exist; the host must connect first",
+          CLOSE_CODES.unauthorized,
+        );
+      } else {
+        // The session was purged during the passcode await; keep the uniform
+        // opaque-token rejection so the race cannot become an oracle.
+        this.rejectSessionUnavailable(ws);
+      }
       return;
     } else if (latestExisting !== null) {
       this.closeWithError(
@@ -2331,18 +2393,16 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
   }
 
   /**
-   * Optional per-session passcode (v1.2-D).
+   * Serialize credential verification and counter updates.
    *
-   * The host stores a PBKDF2 verifier in `hello.passcode` on the first hello;
-   * viewers/listeners submit the plaintext through the Worker-trusted
-   * `X-Tokimeki-Passcode` header (kept only in the pending attachment until
-   * hello). Five failures lock all viewer/listener verification for 30 s.
-   * No passcode, verifier, or hash is ever logged.
+   * PBKDF2/token-hash awaits would otherwise let concurrent hellos read the
+   * same failure counter and overwrite each other, defeating the per-IP
+   * lockouts (v1.7 R2/R6).
    */
-  private async serializePasscode<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = this.#passcodeQueue;
+  private async serializeAuth<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.#authQueue;
     let release!: () => void;
-    this.#passcodeQueue = new Promise<void>((resolve) => {
+    this.#authQueue = new Promise<void>((resolve) => {
       release = resolve;
     });
     await previous;
@@ -2351,6 +2411,130 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     } finally {
       release();
     }
+  }
+
+  /** Truncated hash prefix for diagnostics; never the raw client IP. */
+  private static ipHashPrefix(ipHash: string): string {
+    return ipHash.slice(0, 12);
+  }
+
+  /**
+   * Load one per-IP failure row, creating the narrow table lazily.
+   *
+   * Only called once `session_meta` already exists, so a guess for a
+   * nonexistent session never creates schema (SEC-01). A storage failure only
+   * disables the lock (logged); token/passcode comparison still runs.
+   */
+  private loadFailureRow(kind: AuthFailureKind, ipHash: string | null): AuthFailureRecord | null {
+    if (ipHash === null) {
+      return null;
+    }
+    try {
+      ensureAuthFailureSchema(this.ctx.storage.sql);
+      return loadAuthFailure(this.ctx.storage.sql, this.sessionId, kind, ipHash);
+    } catch {
+      this.logger.error("auth_failure_store_unavailable", { sessionId: this.sessionId, kind });
+      return null;
+    }
+  }
+
+  /** Clear one per-IP failure row after a successful verification. */
+  private clearFailureRow(kind: AuthFailureKind, ipHash: string | null): void {
+    if (ipHash === null) {
+      return;
+    }
+    try {
+      clearAuthFailure(this.ctx.storage.sql, this.sessionId, kind, ipHash);
+    } catch {
+      this.logger.error("auth_failure_store_unavailable", { sessionId: this.sessionId, kind });
+    }
+  }
+
+  /**
+   * Record one failure for `(session, kind, ip)` and lock when the threshold
+   * is reached. Returns true when this failure triggered the lock.
+   *
+   * The fixed window resets after `windowMs`; after a lock expires the next
+   * failure starts a fresh count instead of re-locking immediately.
+   */
+  private registerFailure(
+    kind: AuthFailureKind,
+    ipHash: string | null,
+    current: AuthFailureRecord | null,
+    now: number,
+    policy: { readonly windowMs: number; readonly maxFailures: number; readonly lockoutMs: number },
+  ): boolean {
+    if (ipHash === null) {
+      return false;
+    }
+    try {
+      ensureAuthFailureSchema(this.ctx.storage.sql);
+      const windowExpired = current === null || now - current.windowStartedAt >= policy.windowMs;
+      const failedAttempts = windowExpired ? 1 : current.failedAttempts + 1;
+      const windowStartedAt = windowExpired ? now : current.windowStartedAt;
+      const locked = failedAttempts >= policy.maxFailures;
+      recordAuthFailure(this.ctx.storage.sql, {
+        sessionId: this.sessionId,
+        kind,
+        ipHash,
+        failedAttempts,
+        windowStartedAt,
+        lockedUntil: locked ? now + policy.lockoutMs : null,
+        updatedAt: now,
+      });
+      cleanupAuthFailures(this.ctx.storage.sql, this.sessionId, kind, now, policy.windowMs);
+      return locked;
+    } catch {
+      this.logger.error("auth_failure_store_unavailable", { sessionId: this.sessionId, kind });
+      return false;
+    }
+  }
+
+  /**
+   * Verify an opaque viewer/listener session token with per-IP lockout
+   * (v1.7 R2).
+   *
+   * A locked IP, a wrong token, and a nonexistent session all produce the same
+   * `unauthorized` message and close code, so the response cannot be used to
+   * test whether a session exists. Only an existing session is counted; a
+   * nonexistent session is covered by the Worker's per-IP edge limit.
+   */
+  private async verifyOpaqueViewerToken(
+    ws: WebSocket,
+    pending: PendingAttachment,
+    storedTokenHash: string,
+    now: number,
+  ): Promise<boolean> {
+    const ipHash = pending.clientIpHash;
+    const failure = this.loadFailureRow("opaque_token", ipHash);
+    if (failure !== null && failure.lockedUntil !== null && failure.lockedUntil > now) {
+      this.rejectSessionUnavailable(ws);
+      return false;
+    }
+    const tokenMatches = await constantTimeEqualHex(storedTokenHash, pending.tokenHash);
+    if (!tokenMatches) {
+      const locked = this.registerFailure("opaque_token", ipHash, failure, now, {
+        windowMs: TOKEN_FAILURE_WINDOW_MS,
+        maxFailures: MAX_TOKEN_FAILURES,
+        lockoutMs: TOKEN_LOCKOUT_MS,
+      });
+      if (locked && ipHash !== null) {
+        this.logger.warn("session_token_locked", {
+          sessionId: this.sessionId,
+          ipHashPrefix: SessionDurableObject.ipHashPrefix(ipHash),
+          failedAttempts: MAX_TOKEN_FAILURES,
+        });
+      }
+      this.rejectSessionUnavailable(ws);
+      return false;
+    }
+    this.clearFailureRow("opaque_token", ipHash);
+    return true;
+  }
+
+  /** Uniform rejection for an opaque viewer/listener session token. */
+  private rejectSessionUnavailable(ws: WebSocket): void {
+    this.closeWithError(ws, "unauthorized", SESSION_UNAVAILABLE_MESSAGE, CLOSE_CODES.unauthorized);
   }
 
   private async handlePasscode(
@@ -2410,7 +2594,20 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     if (stored === null) {
       return true;
     }
+    const ipHash = pending.clientIpHash;
+    const ipFailure = this.loadFailureRow("passcode", ipHash);
     if (stored.lockedUntil !== null && stored.lockedUntil > now) {
+      this.closeWithError(
+        ws,
+        "passcode_locked",
+        "session passcode is locked; retry later",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
+    if (ipFailure !== null && ipFailure.lockedUntil !== null && ipFailure.lockedUntil > now) {
+      // Same code as the per-session high-threshold lock: a caller cannot tell
+      // whether it locked itself or the whole session is locked.
       this.closeWithError(
         ws,
         "passcode_locked",
@@ -2444,10 +2641,15 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
     const derived = await derivePasscodeHash(presented, stored.salt, stored.iterations);
     if (derived !== null && (await constantTimeEqual(derived, stored.hash))) {
       clearPasscodeFailures(this.ctx.storage.sql, this.sessionId, now);
+      this.clearFailureRow("passcode", ipHash);
       return true;
     }
-    const failures = stored.failedAttempts + 1;
-    if (failures >= MAX_PASSCODE_FAILURES) {
+    // Per-session high threshold (v1.7 R6): the inactivity window resets after
+    // 60 s without a failure so a long-lived session does not accumulate a
+    // permanent lock over unrelated attempts.
+    const globalFailures =
+      now - stored.updatedAt > PASSCODE_WINDOW_MS ? 1 : stored.failedAttempts + 1;
+    if (globalFailures >= MAX_PASSCODE_FAILURES) {
       recordPasscodeFailure(
         this.ctx.storage.sql,
         this.sessionId,
@@ -2463,7 +2665,30 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       );
       return false;
     }
-    recordPasscodeFailure(this.ctx.storage.sql, this.sessionId, failures, null, now);
+    recordPasscodeFailure(this.ctx.storage.sql, this.sessionId, globalFailures, null, now);
+    // Per-IP primary lock: only this address is locked, so one source cannot
+    // lock out every viewer/listener of the session.
+    const ipLocked = this.registerFailure("passcode", ipHash, ipFailure, now, {
+      windowMs: PASSCODE_WINDOW_MS,
+      maxFailures: MAX_PASSCODE_IP_FAILURES,
+      lockoutMs: PASSCODE_IP_LOCKOUT_MS,
+    });
+    if (ipLocked && ipHash !== null) {
+      this.logger.warn("passcode_ip_locked", {
+        sessionId: this.sessionId,
+        ipHashPrefix: SessionDurableObject.ipHashPrefix(ipHash),
+        failedAttempts: MAX_PASSCODE_IP_FAILURES,
+      });
+    }
+    if (ipLocked) {
+      this.closeWithError(
+        ws,
+        "passcode_locked",
+        "too many failed passcode attempts; retry later",
+        CLOSE_CODES.unauthorized,
+      );
+      return false;
+    }
     this.closeWithError(
       ws,
       "passcode_invalid",

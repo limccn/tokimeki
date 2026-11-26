@@ -40,6 +40,21 @@
   "observability": {
     "enabled": true
   },
+  // v1.7 R1: per-IP limit for GET /ws/* WebSocket upgrade attempts. The policy
+  // lives here (not in code); the Worker only passes `{ key: cf-connecting-ip }`.
+  // 30/60s/IP is a starting point for the low-traffic production line; tune it
+  // here. `namespace_id` must stay unique per rate-limit policy (self-host
+  // deployments that add their own binding should pick a different id).
+  "ratelimits": [
+    {
+      "name": "TOKIMEKI_WS_IP_LIMIT",
+      "namespace_id": "3001",
+      "simple": {
+        "limit": 30,
+        "period": 60
+      }
+    }
+  ],
   // Static no-JWT onboarding page; the directory is relative to this config.
   "assets": {
     "directory": "../../packages/onboarding-site/dist",
@@ -76,6 +91,7 @@
   //   TOKIMEKI_SESSION_MAX_MESSAGES_PER_SECOND default 0 (off) inbound WS messages per active session
   //   TOKIMEKI_MAX_CLIENTS_PER_SESSION default 8
   //   TOKIMEKI_MAX_LISTENERS           default 8 read-only snapshot-only clients
+  //   TOKIMEKI_WS_IP_LIMIT             (ratelimits binding above) per-IP /ws limit; absent = fail-open
   //   TOKIMEKI_ICE_TRANSPORT_POLICY    all | relay (default all)
   //   TOKIMEKI_STUN_URLS               default stun:stun.cloudflare.com:3478
   //   TOKIMEKI_TURN_PROVIDER           auto | coturn | cloudflare | none (default auto)

@@ -1,7 +1,7 @@
 import { isValidSessionId, PROTOCOL_VERSION } from "@limccn/tokimeki-protocol";
 
 import { isMasterTokenValid } from "./auth.js";
-import type { RelayEnv } from "./env.js";
+import { type RelayEnv, wsIpRateLimit } from "./env.js";
 import {
   type HostCredentialSelection,
   type HostJwtClaims,
@@ -24,6 +24,27 @@ import { describeTurn } from "./turn.js";
 export { SessionDurableObject } from "./session-do.js";
 
 const SERVICE_NAME = "tokimeki-relay";
+/** Suggested client retry delay for an edge rate-limit rejection. */
+const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
+/** Cloudflare sets `cf-connecting-ip`; bound the value used as a bucket key. */
+const MAX_RATE_LIMIT_KEY_LENGTH = 128;
+
+/**
+ * Trusted client IP for per-IP rate limits.
+ *
+ * Only the Cloudflare edge header is used. A client-supplied
+ * `x-tokimeki-client-ip` / `x-real-ip` is never trusted: the Worker strips the
+ * internal header and re-injects this value for the DO. When the edge header
+ * is missing (local `wrangler dev`, non-Cloudflare deployments) the caller
+ * fails open instead of sharing an empty bucket key.
+ */
+function trustedClientIp(request: Request): string | null {
+  const raw = request.headers.get("cf-connecting-ip")?.trim() ?? "";
+  if (raw.length === 0) {
+    return null;
+  }
+  return raw.slice(0, MAX_RATE_LIMIT_KEY_LENGTH);
+}
 
 /**
  * Parsed `TOKIMEKI_NAMESPACE_TOKENS`, cached by raw secret value.
@@ -453,6 +474,40 @@ export default {
     }
     const hostNamespace = auth.outcome === "host" ? auth.auth.hostNamespace : null;
 
+    // v1.7 R1: per-IP edge limit for every upgrade that would reach the
+    // SessionDO. It runs after the host/JWT/role checks so invalid host
+    // credentials and JWKS failures are rejected (401/503) before consuming a
+    // bucket, and it runs before the DO fetch so a limited request never opens
+    // a socket or writes session state. The limit policy lives in
+    // `[[ratelimits]]` in the Wrangler config, not in code.
+    const clientIp = trustedClientIp(request);
+    const wsIpLimit = wsIpRateLimit(env);
+    if (clientIp === null) {
+      // Missing edge IP (local dev / non-Cloudflare): fail open, never use an
+      // empty key that would put every client into one shared bucket.
+      logger.warn("ws_rate_limit_no_ip", { path: url.pathname });
+    } else if (wsIpLimit === undefined) {
+      logger.error("ws_rate_limit_binding_missing", { path: url.pathname });
+    } else {
+      try {
+        const outcome = await wsIpLimit.limit({ key: clientIp });
+        if (!outcome.success) {
+          logger.warn("ws_ip_rate_limited", { sessionId, role });
+          return new Response("rate limited\n", {
+            status: 429,
+            headers: {
+              "content-type": "text/plain; charset=utf-8",
+              "cache-control": "no-store",
+              "retry-after": String(RATE_LIMIT_RETRY_AFTER_SECONDS),
+            },
+          });
+        }
+      } catch {
+        // A broken binding must not take the relay down; fail open and log.
+        logger.error("ws_rate_limit_unavailable", { sessionId });
+      }
+    }
+
     const headers = new Headers(request.headers);
     // A viewer/listener passcode is the one client-supplied security value the
     // DO needs; copy it into a trusted header after stripping the client one.
@@ -469,6 +524,12 @@ export default {
     // The DO only trusts these two after the Worker verified a Session JWT.
     headers.delete("x-tokimeki-session-claim");
     headers.delete("x-tokimeki-session-scope");
+    // The trusted client IP is an internal header only; strip a forged value
+    // and re-inject the edge-supplied address for the DO's per-IP counters.
+    headers.delete("x-tokimeki-client-ip");
+    if (clientIp !== null) {
+      headers.set("x-tokimeki-client-ip", clientIp);
+    }
     // Authorization is only ever relevant to the JWT path, and the DO never
     // reads it. In disabled JWT mode it is left untouched (v1.1 behavior).
     if (jwtStatus.status !== "disabled") {

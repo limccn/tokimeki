@@ -2,9 +2,15 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import {
+  AUTH_FAILURE_MAX_ROWS,
+  cleanupAuthFailures,
+  clearAuthFailure,
+  ensureAuthFailureSchema,
   ensureRelaySchema,
   insertSessionMetadata,
+  loadAuthFailure,
   loadSessionMetadata,
+  recordAuthFailure,
   setAbsoluteDeadline,
   setRelayBytes,
 } from "../src/storage.js";
@@ -221,5 +227,126 @@ describe("session_meta namespace migration", () => {
     expect(result.updated?.absoluteDeadline).toBe(5_000);
     expect(result.updated?.relayBytes).toBe(1_048_576);
     expect(result.cleared?.absoluteDeadline).toBeNull();
+  });
+});
+
+describe("session_auth_failures", () => {
+  it("is created idempotently by both schema entry points", async () => {
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName("auth-failure-schema"));
+    const result = await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      ensureAuthFailureSchema(sql);
+      ensureAuthFailureSchema(sql);
+      ensureRelaySchema(sql);
+      ensureRelaySchema(sql);
+      return sql
+        .exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_auth_failures'",
+        )
+        .toArray()
+        .map((row) => row.name);
+    });
+    expect(result).toEqual(["session_auth_failures"]);
+  });
+
+  it("round-trips a per-IP counter and clears it", async () => {
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName("auth-failure-roundtrip"));
+    const result = await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      ensureRelaySchema(sql);
+      expect(loadAuthFailure(sql, "s", "opaque_token", "hash-a")).toBeNull();
+      recordAuthFailure(sql, {
+        sessionId: "s",
+        kind: "opaque_token",
+        ipHash: "hash-a",
+        failedAttempts: 3,
+        windowStartedAt: 1_000,
+        lockedUntil: null,
+        updatedAt: 1_500,
+      });
+      const loaded = loadAuthFailure(sql, "s", "opaque_token", "hash-a");
+      // A different kind and a different IP are independent rows.
+      expect(loadAuthFailure(sql, "s", "passcode", "hash-a")).toBeNull();
+      expect(loadAuthFailure(sql, "s", "opaque_token", "hash-b")).toBeNull();
+      clearAuthFailure(sql, "s", "opaque_token", "hash-a");
+      const cleared = loadAuthFailure(sql, "s", "opaque_token", "hash-a");
+      return { loaded, cleared };
+    });
+
+    expect(result.loaded).toEqual({
+      failedAttempts: 3,
+      windowStartedAt: 1_000,
+      lockedUntil: null,
+      updatedAt: 1_500,
+    });
+    expect(result.cleared).toBeNull();
+  });
+
+  it("prunes stale unlocked rows and caps rows per session/kind", async () => {
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName("auth-failure-prune"));
+    const result = await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      ensureRelaySchema(sql);
+      const now = 1_000_000;
+      // One row that has been idle past the window and one active row.
+      recordAuthFailure(sql, {
+        sessionId: "s",
+        kind: "opaque_token",
+        ipHash: "stale",
+        failedAttempts: 1,
+        windowStartedAt: now - 500_000,
+        lockedUntil: null,
+        updatedAt: now - 500_000,
+      });
+      recordAuthFailure(sql, {
+        sessionId: "s",
+        kind: "opaque_token",
+        ipHash: "active",
+        failedAttempts: 1,
+        windowStartedAt: now,
+        lockedUntil: null,
+        updatedAt: now,
+      });
+      // An active lock must survive the stale-row cleanup.
+      recordAuthFailure(sql, {
+        sessionId: "s",
+        kind: "opaque_token",
+        ipHash: "locked",
+        failedAttempts: 10,
+        windowStartedAt: now,
+        lockedUntil: now + 60_000,
+        updatedAt: now - 500_000,
+      });
+      cleanupAuthFailures(sql, "s", "opaque_token", now, 60_000);
+      const afterStale = sql
+        .exec<{ ip_hash: string }>(
+          "SELECT ip_hash FROM session_auth_failures WHERE kind = 'opaque_token' ORDER BY ip_hash",
+        )
+        .toArray()
+        .map((row) => row.ip_hash);
+
+      // Cap: write more distinct IPs than the per-kind row limit.
+      for (let index = 0; index <= AUTH_FAILURE_MAX_ROWS; index += 1) {
+        recordAuthFailure(sql, {
+          sessionId: "s",
+          kind: "passcode",
+          ipHash: `ip-${index}`,
+          failedAttempts: 1,
+          windowStartedAt: now,
+          lockedUntil: null,
+          updatedAt: now + index,
+        });
+      }
+      cleanupAuthFailures(sql, "s", "passcode", now + 1_000, 60_000);
+      const capped = sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM session_auth_failures WHERE kind = 'passcode'",
+        )
+        .toArray();
+      return { afterStale, capped: capped[0]?.count ?? -1 };
+    });
+
+    expect(result.afterStale).toEqual(["active", "locked"]);
+    expect(result.capped).toBe(AUTH_FAILURE_MAX_ROWS);
   });
 });

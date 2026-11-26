@@ -55,8 +55,10 @@ async function execInDo(
 async function expectSessionGone(sessionId: string): Promise<void> {
   const late = await connectWorker(sessionId, { token: SESSION_TOKEN });
   late.send(helloFor(sessionId, "viewer", "viewer-late"));
+  // v1.7 R2: a purged (nonexistent) session returns the same uniform
+  // `unauthorized` as a wrong opaque token; close code stays 4001.
   const error = await late.waitForType("error");
-  expect(error.code).toBe("invalid_session");
+  expect(error.code).toBe("unauthorized");
   expect((await late.waitForClose()).code).toBe(4001);
 }
 

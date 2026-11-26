@@ -302,11 +302,45 @@ JWT 模式非 disabled 时，`X-Tokimeki-Session` 的三段式值按 **Session J
   明文 passcode 不进入 hello/URL/日志。
 - viewer/listener 通过 `X-Tokimeki-Passcode` 提交；SessionDO 用存储的
   salt/iterations 派生并常量时间比较。缺失 `passcode_required`、错误
-  `passcode_invalid`、5 次失败锁定 30s `passcode_locked`、host 验证器不一致
+  `passcode_invalid`、锁定 `passcode_locked`、host 验证器不一致
   `passcode_mismatch`。
+- v1.7 起锁定分为两级：**per-IP 主锁**（同一 IP + session 60 秒内 5 次失败
+  → 锁该 IP 60 秒）与 **per-session 高阈值兜底**（同一 session 60 秒内 50 次
+  失败 → 锁整个 session 60 秒，用于限制分布式来源）。per-IP 锁只拒绝该 IP
+  的 passcode 尝试，其他 IP 的正常 viewer/listener 不受影响；两种锁都返回
+  相同的 `passcode_locked`。正确 passcode 清除 per-IP 与该 session 的失败
+  计数。IP 缺失（本地/非 Cloudflare 环境）时跳过 per-IP 分支，只保留
+  per-session 高阈值。
 - `welcome.capabilities.sessionSecurity.passcode=1` 广告支持；host 发送
   verifier 但 welcome 未广告时 CLI fail-closed。未设置 passcode 的会话行为
   不变。
+
+### 5.1.3 失败锁限与统一 unauthorized（v1.7）
+
+- Worker 对每个通过边缘校验、即将进入 SessionDO 的 `/ws/<session>` upgrade
+  做 **per-IP 限速**（`TOKIMEKI_WS_IP_LIMIT`，策略在部署配置
+  `[[ratelimits]]` 中，建议 30 次/60 秒/IP）。超限返回 HTTP 429 +
+  `Retry-After: 60`（纯文本 body，不进入 DO）。无效 host 凭证、无效
+  Session JWT 与 JWKS `503` 在校验阶段返回，不消耗该桶。`cf-connecting-ip`
+  缺失（本地/非 Cloudflare）或 binding 缺失时 fail-open 并记录日志，不使用
+  空 key；客户端自带的 `x-tokimeki-client-ip` / `x-real-ip` 不被信任。
+- 对 **opaque viewer/listener token**（`sessionClaim === null`），以下三种
+  情况返回字节级相同的 `error{code:"unauthorized"}`（关闭码 4001）与相同
+  文案 `session unavailable; check the session id/token or host status`：
+  1. session 不存在（host 尚未连接或已被清理）；
+  2. session 存在但 token 不匹配；
+  3. 该 IP 因失败次数超限被短暂锁限。
+  这样移除了“session 是否存在”的主要 oracle。Session JWT 与 host 凭证的
+  具体错误（namespace/scope/session 不匹配、host token 不匹配等）保留，
+  因为它们不可枚举。
+- 已存在的 session 按 **IP + session** 记录 opaque token 失败：60 秒固定
+  窗口内 10 次失败后锁该 IP 60 秒；成功认证清除该 IP 的失败行。只有该 IP
+  被锁，其他 IP 使用正确 token 仍可连接。不存在的 session 不创建任何 SQL
+  schema，也不写失败表；这类猜测只由边缘 per-IP 限速兜底。
+- 残余侧信道：per-session open-socket 上限仍返回 HTTP 429，因此已知 session
+  在繁忙时可被观察到“存在且繁忙”；Cloudflare 限速是 per-location、
+  eventually consistent 的尽力而为压制，不是精确计数或“已防爆破”保证。
+  分布式 IP 的 token 猜测仍主要依赖 token 熵（TokiAPI 决定）。
 
 Worker 删除客户端自带的 `x-tokimeki-token` / `x-tokimeki-master` /
 `x-tokimeki-listener` / `x-tokimeki-namespace`（以及非 disabled 模式下的
@@ -321,7 +355,9 @@ token 且未配置 JWT 时仅回退 token 生效。
    `x-tokimeki-role` 头，并移除客户端自带 token、master、listener、namespace
    头（及非 disabled 模式下的 `authorization`）后再转发到 DO。
 3. DO 首次创建会话时保存 `sha256(sessionToken)`；已有会话校验 hash。viewer/observer/agent/listener 不做 master 校验。
-4. 认证失败返回 HTTP 401 或 `error{code:"unauthorized"}` 后关闭。
+4. 认证失败返回 HTTP 401 或 `error{code:"unauthorized"}` 后关闭。对 opaque
+   viewer/listener token，session 不存在、token 不匹配与 per-IP 锁限返回
+   相同的 `unauthorized`（§5.1.3）；Session JWT/host 凭证保留具体错误。
 5. WebSocket 打开后，客户端第一条消息必须是 `hello`。`hello.session` 必须等于 URL session，`hello.role` 必须等于认证角色；`protocolVersion` 若提供必须为 1，缺省按 1 处理。
 6. `hello.clientId` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`，且在同一会话内唯一；重复活跃 clientId 返回 `duplicate_client_id`。例外：host token 校验通过后，host 可替换同 clientId 的陈旧 host socket；若同 clientId 被非 host 占用且当前没有其他在线 host，host 接管并关闭占用者（host-wins）。viewer 默认用 `crypto.randomUUID()` 生成。
 7. 成功认证后 DO 返回 `welcome`，其中包含在线客户端、ICE servers、provider、TTL 与协商 capabilities。
@@ -331,6 +367,11 @@ token 且未配置 JWT 时仅回退 token 生效。
     值均可）；相等时 Worker 返回 HTTP 401。
 11. DO 对非空 token 仍做防御性校验（空 token → 401），并把每个会话的 OPEN socket 数限制为 `maxClients * 2`（含 pending；超限 HTTP 429）。schema 只在该会话首次 host `hello` 时创建。
 12. listener 仍计入 `maxClients`，并额外受 `TOKIMEKI_MAX_LISTENERS`（默认 8）限制；超限返回 `session_full` 并关闭。listener 必须先有 host 会话，不能创建 schema。
+13. Worker 在 host/JWT/角色校验之后、进入 DO 之前对 `/ws/<session>` 做
+    per-IP 限速（`TOKIMEKI_WS_IP_LIMIT`）；超限 HTTP 429 +
+    `Retry-After: 60`。IP/binding 缺失或 binding 异常时 fail-open 并记录
+    `ws_rate_limit_no_ip` / `ws_rate_limit_binding_missing` /
+    `ws_rate_limit_unavailable`；不得用空 key 共享桶。
 
 ### 5.2 标准时序
 
@@ -600,7 +641,7 @@ v2h  = HKDF-Expand(prk, "tokimeki-tunnel-v1/viewer-to-host", 32)
 | `internal` | 未分类内部错误 |
 | `passcode_required` | 会话要求 passcode，但 viewer/listener 未提交 |
 | `passcode_invalid` | passcode 校验失败 |
-| `passcode_locked` | 连续失败触发 30s 锁定 |
+| `passcode_locked` | passcode 连续失败触发锁定（per-IP 5/60s 或 per-session 50/60s，均锁 60s） |
 | `passcode_mismatch` | host 重连提交的 verifier 与已存储值不一致 |
 | `invalid_request` | Agent 请求非法（预留） |
 | `not_found` | Agent 资源不存在（预留） |

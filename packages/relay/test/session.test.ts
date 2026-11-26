@@ -260,8 +260,9 @@ describe("SessionDurableObject", () => {
     const sessionId = "listener-no-session";
     const listener = await connectWorker(sessionId, { token: SESSION_TOKEN, listener: true });
     listener.send(helloFor(sessionId, "listener", "listener-1"));
+    // v1.7 R2: uniform unauthorized for an opaque token; no existence oracle.
     const error = await listener.waitForType("error");
-    expect(error.code).toBe("invalid_session");
+    expect(error.code).toBe("unauthorized");
     const closed = await listener.waitForClose();
     expect(closed.code).toBe(4001);
 
@@ -1065,7 +1066,7 @@ describe("SessionDurableObject", () => {
     const lateViewer = await connectWorker(sessionId, { token: SESSION_TOKEN });
     lateViewer.send(helloFor(sessionId, "viewer", "viewer-2"));
     const error = await lateViewer.waitForType("error");
-    expect(error.code).toBe("invalid_session");
+    expect(error.code).toBe("unauthorized");
     const lateClosed = await lateViewer.waitForClose();
     expect(lateClosed.code).toBe(4001);
   });
