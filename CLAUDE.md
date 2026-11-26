@@ -90,11 +90,22 @@ assets/              README icon
   an opaque token.
 - Session passcode (v1.2-D): host `hello.passcode` carries a PBKDF2-SHA256
   verifier (`{v:1,kdf,salt,iterations,hash}`); `session_passcode` stores it on
-  the first host hello. Viewers/listeners submit `x-tokimeki-passcode`;
-  five failures lock verification for 30 s. Error codes
+  the first host hello. Viewers/listeners submit `x-tokimeki-passcode`.
+  Error codes
   `passcode_required`/`passcode_invalid`/`passcode_locked`/`passcode_mismatch`;
   `welcome.capabilities.sessionSecurity.passcode=1` advertises support and the
   CLI fails closed if a verifier was sent without it.
+- v1.7 rate limiting/lockout: the Worker `GET /ws/*` path calls the optional
+  `TOKIMEKI_WS_IP_LIMIT` `[[ratelimits]]` binding with `{key:
+  cf-connecting-ip}` after host/JWT/role checks and before the DO; over-limit
+  is 429 + `Retry-After: 60`; missing IP/binding/exception fails open with
+  `ws_rate_limit_*` logs; `x-tokimeki-client-ip` is stripped/re-injected and
+  the DO stores only `sha256(ip)`. Opaque viewer/listener token failures are
+  counted per IP+session in `session_auth_failures` (10/60s -> 60s lock;
+  success clears); nonexistent session, wrong token and lock return the same
+  `unauthorized` message/4001 (no existence oracle; no schema for nonexistent
+  sessions). Passcode uses a per-IP 5/60s -> 60s primary lock plus a
+  per-session 50/60s -> 60s backstop (both `passcode_locked`).
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
   host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
@@ -182,7 +193,9 @@ assets/              README icon
   environment/logs.
 - `transport/`: relay client, P2P peer (node-datachannel), fragmentation,
   ICE config/refresh, P2P retry policy, route selector, ICE/TURN config, signal
-  limits.
+  limits. v1.7: six consecutive HTTP 429 upgrade rejections are fatal
+  (`session_full`, exit 1); successful upgrades/non-429 responses reset the
+  count and 503 keeps retrying.
 - `transport/tunnel/`: v1.1 F1/F1.1 TUN profile — HKDF direction keys +
   AES-256-GCM records (`crypto.ts`), selective-repeat ARQ (`arq.ts`), XOR
   parity (`fec.ts`), capability/offer negotiation (`capability.ts`), and the

@@ -166,6 +166,67 @@ Host 认证（v1.2）：
 - JWT `features`/`limits` 仍是预留契约：relay 目前不读取，也没有 per-namespace
   日流量/签发次数的精确聚合。
 
+### per-IP 限速与失败锁限（v1.7）
+
+relay 在 Worker 边缘对每个通过 host/JWT/角色校验、即将进入 SessionDO 的
+`/ws/<session>` WebSocket upgrade 做 per-IP 限速：
+
+- Binding：`TOKIMEKI_WS_IP_LIMIT`（Cloudflare Rate Limiting binding），策略
+  只在 Wrangler `[[ratelimits]]` 中。生产配置
+  `packages/relay/wrangler.jsonc` 使用 `namespace_id: "3001"`、30 次/60 秒/IP；
+  这是起始值，可按预发/生产数据只改配置调整。根 `wrangler.jsonc`（开源
+  Deploy Button）默认**不启用**，只保留注释示例。
+- 超限：HTTP 429 + `Retry-After: 60`，纯文本 `rate limited`，不进入 DO。
+  无效 host 凭证/无效 Session JWT（401）与 JWKS 不可用（503）在校验阶段
+  返回，不消耗桶；因此 JWKS 故障不会被客户端误当成限速。
+- 可信 IP 只来自 Cloudflare 边缘的 `cf-connecting-ip`。客户端自带的
+  `x-tokimeki-client-ip` / `x-real-ip` 一律不信任；Worker 删除内部头后注入
+  边缘 IP，DO 只保存 `sha256(ip)` 并仅用于计数（日志只记录截断哈希前缀）。
+- fail-open：`cf-connecting-ip` 缺失（本地 `wrangler dev`、非 Cloudflare
+  自托管）→ 放行 + `ws_rate_limit_no_ip` warn；binding 缺失 → 放行 +
+  `ws_rate_limit_binding_missing` error；binding 异常 → 放行 +
+  `ws_rate_limit_unavailable` error。**不得**用空 key 让所有请求共享一个桶。
+- 同 zone 的 TokiAPI `/api/tokimeki/ws` 代理由 TokiAPI 把可信入站
+  `cf-connecting-ip` 写入上游 `x-real-ip`，Cloudflare 会把它反映为 relay 的
+  `cf-connecting-ip`，因此 relay 仍按真实 web viewer IP 计数。跨 zone
+  自托管时 relay 只会看到 TokiAPI Worker 的出口 IP，此时以 TokiAPI `/ws`
+  的 per-IP 限速为 web 侧权威限制。
+- opaque session token：已存在的 session 按 IP+session 计数，60 秒内 10 次
+  失败锁定该 IP 60 秒；session 不存在、token 错误与锁限都返回相同的
+  `unauthorized`（移除存在性 oracle）。不存在的 session 不创建 schema，
+  由边缘 per-IP 限速兜底。
+- passcode：per-IP 主锁 5 次/60 秒 → 锁 60 秒；per-session 高阈值兜底
+  50 次/60 秒 → 锁 60 秒；正确 passcode 清除两类计数。
+- 共享 NAT/出口可能误伤正常用户：默认阈值偏宽，必要时只调高部署配置中的
+  `limit`。Cloudflare Rate Limiting 是 per-location、eventually consistent
+  的尽力而为压制，不是精确计数，也不能表述为“已防住爆破”。
+- 回滚：移除 `[[ratelimits]]` binding 或回退 Worker 即恢复到 fail-open/旧
+  行为；DO 新增的 `session_auth_failures` 表是 additive 的，回退旧代码会
+  忽略它。统一 `unauthorized` 是代码行为，回退 relay 版本即可恢复旧文案。
+
+### Cloudflare 边缘加固检查清单（v1.7 R8，v1.4 审计 follow-up）
+
+以下为部署/owner 观察项，不是 relay 代码承诺；生产 zone 变更与 live probe
+需要单独批准。
+
+- **credential-entry HTTPS-only**：no-JWT 站点/凭证输入页所在 origin 必须启用
+  Cloudflare Always Use HTTPS + HSTS（或等价 Redirect Rule）；页面侧应有
+  `window.isSecureContext`/`location.protocol` 守卫（loopback 例外）。
+- **`/ws` 边缘兜底**：若生产套餐/配置无法使用 `[[ratelimits]]`，部署侧必须
+  用 Cloudflare Rate Limiting/WAF 规则覆盖 `GET /ws/*`（建议 30 次/60 秒/IP
+  + pending-connection cap），并保留 `ws_rate_limit_binding_missing` /
+  `ws_ip_rate_limited` 日志。WAF 同为 per-location/eventually consistent，
+  不能替代 relay 的 R1/R2 代码控制。
+- **Static Assets 路由**：保持 `not_found_handling: "none"`、无 SPA fallback；
+  确认 `/ws`、`/healthz`、`/auth/whoami` 不被 assets 响应；assets 使用
+  allowlist/`.assetsignore`，拒绝 stray `_redirects`/`_headers`；deploy/CI
+  必须先跑 `npm run build:site`。
+- **no-JWT token 熵**：v1.4-J 默认高熵 token；legacy 6–8 位数字与高熵 token
+  走同一 R1/R2 路径。边缘限速与锁限是 defense-in-depth，不替代 token 熵。
+- **owner 观察清单**（不做 live probe）：zone 的 Always Use HTTPS/HSTS/
+  Redirect Rule、WAF/Rate Limiting 规则、`TOKIMEKI_SESSION_MAX_TTL_SECONDS`、
+  assets 路由与 `_headers`/`_redirects`；记录到本文件与部署检查表。
+
 ## 4. TURN / STUN（coturn 优先）
 
 选路优先级：
