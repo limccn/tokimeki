@@ -13,6 +13,8 @@ export interface DisplayCapabilityOptions {
   readonly fixed?: { readonly cols: number; readonly rows: number };
   readonly logPanel?: boolean;
   readonly terminalQueries?: "host";
+  /** Advertise `display.resize = 1`: rebuild the fixed grid on `display-size`. */
+  readonly resize?: boolean;
 }
 
 export interface CapabilityOptions {
@@ -53,12 +55,33 @@ export function hostAnswersTerminalQueries(capabilities: Capabilities | undefine
   return capabilities?.display?.terminalQueries === "host";
 }
 
+/**
+ * True when a peer can rebuild its fixed grid after a host `display-size`
+ * message (v1.8 additive `display.resize = 1` capability).
+ */
+export function supportsDisplayResize(capabilities: Capabilities | undefined): boolean {
+  return capabilities?.display?.resize === 1;
+}
+
 /** Capabilities advertised in `hello`. */
 export function buildCapabilities(options: CapabilityOptions): Capabilities {
   // Listeners are relay-only by design: they never negotiate P2P, so they
   // advertise the relay transport and the snapshot-only listener mode.
   const p2p = options.p2p && options.listener !== true;
   const tunnelKeyMode = p2p ? options.tunnelKeyMode : undefined;
+  const display =
+    options.display === undefined
+      ? undefined
+      : {
+          modes: [...options.display.modes],
+          ...(options.display.fixed === undefined ? {} : { fixed: { ...options.display.fixed } }),
+          ...(options.display.logPanel === undefined ? {} : { logPanel: options.display.logPanel }),
+          ...(options.display.terminalQueries === undefined
+            ? {}
+            : { terminalQueries: options.display.terminalQueries }),
+          // Boolean option in code, numeric support marker on the wire.
+          ...(options.display.resize === true ? { resize: 1 } : {}),
+        };
   return {
     protocolVersion: PROTOCOL_VERSION,
     transports: {
@@ -77,14 +100,7 @@ export function buildCapabilities(options: CapabilityOptions): Capabilities {
       formats: ["xterm-serialize", "raw-ring"],
       ...(options.snapshotMaxBytes === undefined ? {} : { maxBytes: options.snapshotMaxBytes }),
     },
-    ...(options.display === undefined
-      ? {}
-      : {
-          display: {
-            ...options.display,
-            modes: [...options.display.modes],
-          },
-        }),
+    ...(display === undefined ? {} : { display }),
     ...(tunnelKeyMode === undefined ? {} : { tunnel: buildTunnelCapability(tunnelKeyMode) }),
     ...(options.listener === true ? { listener: { modes: ["snapshot-only"] } } : {}),
     ...(options.sessionSecurity === true ? { sessionSecurity: { passcode: 1 } } : {}),

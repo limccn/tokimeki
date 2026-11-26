@@ -40,6 +40,10 @@ const ALLOWED_FIELDS = new Set([
   "maxClients",
   "bytes",
   "seq",
+  // v1.8 `display-size` diagnostics: grid dimensions are public session
+  // metadata, never terminal content.
+  "cols",
+  "rows",
   "unackedBytes",
   "reason",
   "state",

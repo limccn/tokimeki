@@ -49,6 +49,7 @@ import {
 } from "../terminal/viewport/index.js";
 import {
   buildCapabilities,
+  supportsDisplayResize,
   supportsFragmentation,
   supportsViewport,
 } from "../transport/capabilities.js";
@@ -71,6 +72,7 @@ import { TUNNEL_FEC_OUTPUT_PAYLOAD_MAX_BYTES } from "../transport/tunnel/fec.js"
 import { TunnelTransport } from "../transport/tunnel/tunnel-transport.js";
 import type { Transport } from "../transport/types.js";
 import { resolveWindowMode } from "../window-policy.js";
+import { resolveDisplayResizeGate } from "./display-resize.js";
 import { HostPty, type PtyExitInfo } from "./host-pty.js";
 import { buildPtyCommand } from "./pty-command.js";
 import {
@@ -261,6 +263,20 @@ class HostSession {
   #startupSize: TerminalSize = { cols: 80, rows: 24 };
   #localSize: TerminalSize = { cols: 80, rows: 24 };
   #latestSize: TerminalSize = { cols: 80, rows: 24 };
+  /**
+   * Capabilities object handed to the RelayClient. It is reused for every
+   * reconnect hello, so the advertised `display.fixed` is kept in sync with a
+   * live fixed-grid resize (otherwise a reconnect would regress late joiners).
+   */
+  #helloCapabilities: Capabilities | null = null;
+  /** True when the relay welcome advertised `display.resize = 1`. */
+  #relaySupportsDisplayResize = false;
+  /** Per viewer/listener `display.resize` support seen in welcome/peer-joined. */
+  readonly #displayResizeSupport = new Map<string, boolean>();
+  /** Fixed resize deferred until the in-flight snapshot pass completes. */
+  #pendingDisplayResize: TerminalSize | null = null;
+  /** Force the next snapshot pass onto the relay (orders it after display-size). */
+  #forceRelaySnapshots = false;
   /**
    * Fixed TUI window gate. When true, viewer/local resizes never reach the PTY;
    * `#viewportEnabled` (local TTY only) additionally renders it locally.
@@ -494,6 +510,11 @@ class HostSession {
       : this.#pty === null
         ? this.#config.windowSize
         : { cols: this.#pty.cols, rows: this.#pty.rows };
+    const displayResizeGate = this.#fixedGeometryEnabled ? this.#displayResizeGate() : null;
+    // The resize editor opens whenever the item exists; a blocked gate is shown
+    // inside the editor so the reason is visible before pressing Enter.
+    this.#menuResizeState.hint =
+      displayResizeGate !== null && !displayResizeGate.ok ? displayResizeGate.reason : undefined;
     const lines = [
       `relay: ${this.#config.relayUrl}`,
       ...(this.#config.namespace === null ? [] : [`namespace: ${this.#config.namespace}`]),
@@ -502,9 +523,13 @@ class HostSession {
       `viewers: ${this.#viewers.size}   listeners: ${this.#listeners.size}`,
       `transport: ${this.#transportLabel()}   relay: ${this.#relayState}`,
       `window: ${window.cols}x${window.rows} (${this.#config.resizePolicy})`,
-      ...(this.#fixedGeometryEnabled
-        ? ["fixed window: live resize requires a host restart (deferred to v1.8)"]
-        : []),
+      ...(displayResizeGate === null
+        ? []
+        : [
+            displayResizeGate.ok
+              ? "fixed window: live resize available"
+              : `fixed window: live resize blocked (${displayResizeGate.reason})`,
+          ]),
       ...(this.#hostedInviteUrl === null ? [] : ["anonymous invite URL: available"]),
     ];
     const items = [
@@ -517,7 +542,7 @@ class HostSession {
       ...(this.#config.logLevel === "debug" && this.#config.logViewRows > 0
         ? [{ id: "open-logs", label: "Open log view (F11)" }]
         : []),
-      ...(this.#fixedGeometryEnabled ? [] : [{ id: "resize", label: "Resize hosted window" }]),
+      { id: "resize", label: "Resize hosted window" },
     ];
     return { title: "TOKIMEKI CONNECTION", lines, items };
   }
@@ -539,13 +564,12 @@ class HostSession {
       return;
     }
     if (this.#fixedGeometryEnabled) {
-      // Viewers learn the fixed grid from the host hello capabilities, and v1
-      // has no wire message to update them live. Applying a new PTY size would
-      // desync existing viewers' mirrors, so fixed-grid live resize is deferred
-      // to the v1.8 protocol work; the menu item is not offered in this mode.
-      this.#logger.warn(
-        "fixed-window resize is not applied live; restart the host with a new TOKIMEKI_WINDOW_SIZE (deferred to v1.8)",
-      );
+      const gate = this.#displayResizeGate();
+      if (!gate.ok) {
+        this.#logger.warn(`fixed-window resize blocked: ${gate.reason}`);
+        return;
+      }
+      this.#requestFixedDisplayResize(next);
       return;
     }
     if (this.#config.resizePolicy === "pinned") {
@@ -559,6 +583,98 @@ class HostSession {
     if (this.#config.resizePolicy === "min") {
       this.#logger.info("min policy may compress the window to fit every writable viewer");
     }
+  }
+
+  /** Current fixed-grid live-resize gate (relay + every viewer/listener). */
+  #displayResizeGate(): ReturnType<typeof resolveDisplayResizeGate> {
+    return resolveDisplayResizeGate({
+      fixedGeometryEnabled: this.#fixedGeometryEnabled,
+      relayReady: this.#client?.isReady === true,
+      relaySupported: this.#relaySupportsDisplayResize,
+      clients: this.#displayResizeClients(),
+    });
+  }
+
+  #displayResizeClients(): Array<{ clientId: string; supported: boolean }> {
+    const clients: Array<{ clientId: string; supported: boolean }> = [];
+    for (const clientId of this.#viewers) {
+      clients.push({ clientId, supported: this.#displayResizeSupport.get(clientId) === true });
+    }
+    for (const clientId of this.#listeners) {
+      clients.push({ clientId, supported: this.#displayResizeSupport.get(clientId) === true });
+    }
+    return clients;
+  }
+
+  /**
+   * Apply now, or defer until the in-flight snapshot pass finishes.
+   *
+   * A snapshot captured at the old grid must not arrive after `display-size`;
+   * waiting for the current pass to complete keeps the new-size snapshot newer
+   * than the control message on the shared relay socket.
+   */
+  #requestFixedDisplayResize(next: TerminalSize): void {
+    if (this.#snapshotInFlight) {
+      this.#pendingDisplayResize = next;
+      this.#logger.info(
+        `fixed display resize ${next.cols}x${next.rows} deferred until the current snapshot completes`,
+      );
+      return;
+    }
+    this.#applyFixedDisplayResize(next);
+  }
+
+  #applyFixedDisplayResize(next: TerminalSize): void {
+    if (this.#closing) return;
+    // Re-check after a deferral: a legacy client may have joined meanwhile.
+    const gate = this.#displayResizeGate();
+    if (!gate.ok) {
+      this.#pendingDisplayResize = null;
+      this.#logger.warn(`fixed-window resize blocked: ${gate.reason}`);
+      return;
+    }
+    const pty = this.#pty;
+    if (
+      sizesEqual(this.#fixedSize, next) &&
+      pty !== null &&
+      pty.cols === next.cols &&
+      pty.rows === next.rows
+    ) {
+      this.#pendingDisplayResize = null;
+      return;
+    }
+    this.#pendingDisplayResize = null;
+    this.#fixedSize = next;
+    if (this.#config.resizePolicy === "pinned") {
+      this.#menuPinnedSize = next;
+    }
+    this.#applyResize();
+    this.#menuResizeState.cols = next.cols;
+    this.#menuResizeState.rows = next.rows;
+    this.#viewport?.resizeLogical(next);
+    // A reconnect hello reuses this object; a stale fixed size would regress
+    // the relay's welcome metadata for late-joining old clients.
+    const display = this.#helloCapabilities?.display;
+    if (display !== undefined) {
+      display.fixed = { cols: next.cols, rows: next.rows };
+    }
+    this.#client?.sendControl({
+      v: PROTOCOL_VERSION,
+      type: "display-size",
+      cols: next.cols,
+      rows: next.rows,
+    });
+    // Order the recovery snapshots after `display-size` on the relay socket;
+    // an old-grid DataChannel snapshot could otherwise arrive first.
+    this.#forceRelaySnapshots = true;
+    this.#snapshotAll();
+    if (this.#listeners.size > 0) {
+      void this.#sendListenerSnapshots();
+    }
+    this.#logger.info(
+      `fixed display resize applied ${next.cols}x${next.rows} ` +
+        `(viewers=${this.#viewers.size}, listeners=${this.#listeners.size})`,
+    );
   }
 
   #createPty(): void {
@@ -715,6 +831,24 @@ class HostSession {
 
   #connectRelay(): void {
     const passcodeVerifier = this.#passcodeVerifier();
+    const capabilities = buildCapabilities({
+      p2p: this.#config.p2p === "auto",
+      snapshotMaxBytes: this.#config.snapshotMaxBytes,
+      sessionSecurity: this.#config.passcode !== null,
+      ...(this.#config.tunnel === "auto" ? { tunnelKeyMode: this.#config.tunnelKeyMode } : {}),
+      ...(this.#fixedGeometryEnabled
+        ? {
+            display: {
+              modes: this.#viewportEnabled ? ["fixed-grid", "viewport"] : ["fixed-grid"],
+              fixed: this.#fixedSize,
+              logPanel: true,
+              terminalQueries: "host",
+              resize: true,
+            },
+          }
+        : {}),
+    });
+    this.#helloCapabilities = capabilities;
     const client = new RelayClient({
       url: this.#config.websocketUrl,
       headers: {
@@ -734,22 +868,7 @@ class HostSession {
       rows: this.#pty?.rows ?? this.#startupSize.rows,
       heartbeatSeconds: this.#config.heartbeatSeconds,
       client: buildClientDescriptor({ platform: this.#platform }),
-      capabilities: buildCapabilities({
-        p2p: this.#config.p2p === "auto",
-        snapshotMaxBytes: this.#config.snapshotMaxBytes,
-        sessionSecurity: this.#config.passcode !== null,
-        ...(this.#config.tunnel === "auto" ? { tunnelKeyMode: this.#config.tunnelKeyMode } : {}),
-        ...(this.#fixedGeometryEnabled
-          ? {
-              display: {
-                modes: this.#viewportEnabled ? ["fixed-grid", "viewport"] : ["fixed-grid"],
-                fixed: this.#fixedSize,
-                logPanel: true,
-                terminalQueries: "host",
-              },
-            }
-          : {}),
-      }),
+      capabilities,
       logger: this.#logger,
     });
     this.#client = client;
@@ -808,14 +927,18 @@ class HostSession {
     // currently connected set below.
     this.#listeners.clear();
     this.#nonViewportViewers.clear();
+    this.#displayResizeSupport.clear();
     this.#stopListenerTimer();
+    this.#relaySupportsDisplayResize = welcome.capabilities?.display?.resize === 1;
     for (const client of welcome.clients) {
       if (client.role === "listener") {
         this.#listeners.add(client.clientId);
+        this.#displayResizeSupport.set(client.clientId, supportsDisplayResize(client.capabilities));
         continue;
       }
       if (client.role !== undefined && client.role !== "viewer") continue;
       this.#viewers.add(client.clientId);
+      this.#displayResizeSupport.set(client.clientId, supportsDisplayResize(client.capabilities));
       if (supportsViewport(client.capabilities)) {
         this.#nonViewportViewers.delete(client.clientId);
       } else {
@@ -832,6 +955,18 @@ class HostSession {
       } else {
         this.#startP2P(client.clientId);
       }
+    }
+    if (this.#fixedGeometryEnabled && this.#relaySupportsDisplayResize) {
+      // A live resize can be applied while the relay socket reconnects. The
+      // dialog below is a no-op for clients already on this grid and repairs
+      // any client that missed the earlier update; the relay filters clients
+      // that never advertised display.resize.
+      this.#client?.sendControl({
+        v: PROTOCOL_VERSION,
+        type: "display-size",
+        cols: this.#fixedSize.cols,
+        rows: this.#fixedSize.rows,
+      });
     }
     if (this.#listeners.size > 0) {
       // A reconnected host must not leave listeners waiting for the first
@@ -866,6 +1001,10 @@ class HostSession {
           // Listeners only get periodic snapshots; no P2P, resize, or entry in
           // the viewer sets.
           this.#listeners.add(message.clientId);
+          this.#displayResizeSupport.set(
+            message.clientId,
+            supportsDisplayResize(message.capabilities),
+          );
           this.#logger.info(
             `listener joined: ${message.clientId} (listeners=${this.#listeners.size})`,
           );
@@ -874,6 +1013,10 @@ class HostSession {
           return;
         }
         this.#viewers.add(message.clientId);
+        this.#displayResizeSupport.set(
+          message.clientId,
+          supportsDisplayResize(message.capabilities),
+        );
         if (supportsViewport(message.capabilities)) {
           this.#nonViewportViewers.delete(message.clientId);
         } else {
@@ -897,6 +1040,7 @@ class HostSession {
         return;
       }
       case "peer-left":
+        this.#displayResizeSupport.delete(message.clientId);
         if (this.#listeners.delete(message.clientId)) {
           this.#logger.info(
             `listener left: ${message.clientId} (listeners=${this.#listeners.size})`,
@@ -934,6 +1078,7 @@ class HostSession {
           // Capability is unknown until peer-joined; be conservative so the
           // host does not race a legacy viewer's terminal query replies.
           this.#nonViewportViewers.add(message.clientId);
+          this.#displayResizeSupport.set(message.clientId, false);
         }
         const size: TerminalSize = { cols: message.cols, rows: message.rows };
         this.#viewerSizes.set(message.clientId, size);
@@ -1625,12 +1770,19 @@ class HostSession {
         }
       }
     }
+    if (!this.#snapshotInFlight && this.#pendingDisplayResize !== null) {
+      // The previous snapshot pass has fully drained; it is now safe to change
+      // the PTY grid so no old-size snapshot can follow `display-size`.
+      this.#applyFixedDisplayResize(this.#pendingDisplayResize);
+    }
     if (this.#pendingSnapshots.size > 0) {
       this.#ensureSnapshotTimer();
     }
   }
 
   async #sendSnapshots(): Promise<void> {
+    const forceRelaySnapshots = this.#forceRelaySnapshots;
+    this.#forceRelaySnapshots = false;
     const targets = [...this.#pendingSnapshots];
     this.#pendingSnapshots.clear();
     if (targets.length === 0) return;
@@ -1655,8 +1807,13 @@ class HostSession {
         const link = this.#p2pLinks.get(target);
         // The TUN profile runs on an unreliable DataChannel; snapshots stay on
         // the relay path (they are the recovery boundary, not tunnel data).
+        // A fixed-grid resize forces the first recovery snapshot onto the relay
+        // so it is ordered after the display-size control message.
         const canSendDirect =
-          link?.peer.isOpen === true && link.supportsFragmentation && link.tunnel === null;
+          !forceRelaySnapshots &&
+          link?.peer.isOpen === true &&
+          link.supportsFragmentation &&
+          link.tunnel === null;
         if (canSendDirect) {
           let directFailed = false;
           try {
@@ -1984,6 +2141,9 @@ class HostSession {
     this.#fragmentationViewers.clear();
     this.#tunnelViewers.clear();
     this.#nonViewportViewers.clear();
+    this.#displayResizeSupport.clear();
+    this.#pendingDisplayResize = null;
+    this.#forceRelaySnapshots = false;
     for (const timer of this.#p2pRetryTimers.values()) {
       clearTimeout(timer);
     }

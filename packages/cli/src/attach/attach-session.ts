@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 
 import {
+  type Capabilities,
   type ClientInfo,
   decodeFrame,
   encodeFrame,
@@ -85,6 +86,8 @@ export interface AttachSessionDeps {
 const RESYNC_THROTTLE_MS = 500;
 /** Pre-switch DC output buffer bound; overflow forces a fresh snapshot. */
 const DC_BUFFER_LIMIT_BYTES = 4_194_304;
+/** Viewer-only fallback when the post-resize snapshot never arrives. */
+const DISPLAY_RESIZE_RESYNC_MS = 1_000;
 
 interface BufferedOutput {
   readonly seq: number;
@@ -134,6 +137,15 @@ class AttachSession {
   #mirror: TerminalMirror | null = null;
   #viewport: LocalViewport | null = null;
   #fixedSize: { cols: number; rows: number } | null = null;
+  /** Host display capability from the last viewport build (query routing). */
+  #hostCapabilities: Capabilities | undefined;
+  /**
+   * A host `display-size` arrived and the mirror/viewport was rebuilt at the
+   * new grid; incremental output is dropped (but still ACKed) until the next
+   * matching snapshot repaints the screen.
+   */
+  #awaitingFixedSnapshot = false;
+  #displayResizeTimer: NodeJS.Timeout | null = null;
   #relayState: ViewportRelayState = "connecting";
   #transportMode: ViewportTransport = "relay";
   /** Logs captured by the viewport sink and replayed after restore. */
@@ -227,6 +239,10 @@ class AttachSession {
               display: {
                 modes: ["viewport"],
                 logPanel: true,
+                // v1.8: this client can rebuild its fixed grid from
+                // `display-size`; the host only live-resizes when every
+                // connected viewer/listener advertises it.
+                resize: true,
               },
             }),
       }),
@@ -389,6 +405,7 @@ class AttachSession {
       this.#logger.warn("host is offline; waiting for it to come online");
     }
     this.#reducer.reset();
+    this.#clearAwaitingFixedSnapshot();
     this.#logger.info(`attached to session ${this.#config.session}`);
     this.#relayState = "ready";
     this.#prepareViewport(welcome.clients);
@@ -438,6 +455,19 @@ class AttachSession {
       return false;
     }
 
+    return this.#createFixedViewport({ cols: fixed.cols, rows: fixed.rows }, host.capabilities);
+  }
+
+  /**
+   * Build the mirror + local viewport for one fixed logical grid.
+   *
+   * Reused by the initial welcome/presence path and by a live host
+   * `display-size` update; the caller owns the previous viewport disposal.
+   */
+  #createFixedViewport(
+    fixed: { cols: number; rows: number },
+    hostCapabilities: Capabilities | undefined,
+  ): boolean {
     this.#disposeViewport();
     const tracker = new ModeTracker();
     const mirror = new TerminalMirror({
@@ -446,12 +476,13 @@ class AttachSession {
       scrollback: 0,
       // New hosts answer terminal queries themselves. Legacy hosts expect the
       // viewer terminal (now the mirror) to answer as INPUT.
-      ...(this.#listener || hostAnswersTerminalQueries(host.capabilities)
+      ...(this.#listener || hostAnswersTerminalQueries(hostCapabilities)
         ? {}
         : { onReply: (data: string) => this.#sendInput(Buffer.from(data, "utf8")) }),
     });
     this.#mirror = mirror;
     this.#fixedSize = { cols: fixed.cols, rows: fixed.rows };
+    this.#hostCapabilities = hostCapabilities;
     this.#viewport = new LocalViewport({
       mirror,
       tracker,
@@ -479,12 +510,89 @@ class AttachSession {
     return true;
   }
 
+  /**
+   * Host changed the session's fixed logical grid (v1.8 `display-size`).
+   *
+   * Rebuild the mirror/viewport at the new size and ignore incremental output
+   * until the host's recovery snapshot arrives; old-grid PTY bytes must not be
+   * rendered into the new mirror. Listeners only receive snapshots and never
+   * request a resync.
+   */
+  #handleDisplaySize(message: { cols: number; rows: number }): void {
+    if (!isTerminalSizeWithinLimits(message.cols, message.rows)) {
+      this.#logger.warn(
+        `ignoring display-size ${message.cols}x${message.rows} outside the cell limit`,
+      );
+      return;
+    }
+    if (
+      this.#fixedSize !== null &&
+      this.#fixedSize.cols === message.cols &&
+      this.#fixedSize.rows === message.rows
+    ) {
+      return;
+    }
+    if (
+      !this.#interactive ||
+      this.#config.windowMode === "off" ||
+      this.#hostCapabilities === undefined
+    ) {
+      // No fixed viewport exists, so there is no stale mirror to rebuild; the
+      // raw terminal already handles the PTY reflow.
+      this.#logger.debug(
+        `host grid changed to ${message.cols}x${message.rows}; no local fixed viewport`,
+      );
+      return;
+    }
+
+    this.#logger.info(
+      `host grid changed to ${message.cols}x${message.rows}; rebuilding the fixed viewport`,
+    );
+    this.#awaitingFixedSnapshot = true;
+    this.#clearDisplayResizeTimer();
+    const created = this.#createFixedViewport(
+      { cols: message.cols, rows: message.rows },
+      this.#hostCapabilities,
+    );
+    if (!created) {
+      this.#awaitingFixedSnapshot = false;
+      return;
+    }
+    if (this.#screenActive) {
+      this.#enterScreen();
+    }
+    if (!this.#listener) {
+      // A dropped relay snapshot would otherwise leave the viewer waiting
+      // forever. Listeners recover from the next periodic snapshot instead.
+      const timer = setTimeout(() => {
+        this.#displayResizeTimer = null;
+        if (!this.#awaitingFixedSnapshot || this.#closing) return;
+        this.#logger.warn("no snapshot after the fixed-grid resize; requesting a resync");
+        this.#requestResync();
+      }, DISPLAY_RESIZE_RESYNC_MS);
+      timer.unref?.();
+      this.#displayResizeTimer = timer;
+    }
+  }
+
+  #clearDisplayResizeTimer(): void {
+    if (this.#displayResizeTimer === null) return;
+    clearTimeout(this.#displayResizeTimer);
+    this.#displayResizeTimer = null;
+  }
+
+  #clearAwaitingFixedSnapshot(): void {
+    this.#awaitingFixedSnapshot = false;
+    this.#clearDisplayResizeTimer();
+  }
+
   #disposeViewport(): void {
     this.#viewport?.dispose();
     this.#mirror?.dispose();
     this.#viewport = null;
     this.#mirror = null;
     this.#fixedSize = null;
+    this.#hostCapabilities = undefined;
   }
 
   #enterScreen(): void {
@@ -581,6 +689,7 @@ class AttachSession {
       this.#restoreTerminal();
       this.#logger.info("relay disconnected; reconnecting");
       this.#reducer.reset();
+      this.#clearAwaitingFixedSnapshot();
       // The relay forgets transport selection across reconnects, so tear the
       // P2P attempt down and let the host re-offer after the next hello.
       this.#disposeP2P("relay reconnecting");
@@ -758,6 +867,9 @@ class AttachSession {
         }
         return;
       }
+      case "display-size":
+        this.#handleDisplaySize(message);
+        return;
       case "presence": {
         // A viewer may attach before the host; presence is how the relay
         // announces the host (and its display.fixed metadata) later.
@@ -976,7 +1088,12 @@ class AttachSession {
   #applyOutput(seq: number, payload: Uint8Array, viaRelay: boolean): void {
     const decision = this.#reducer.classify(seq);
     if (decision === "apply") {
-      this.#writeTerminal(payload);
+      // After a live grid change, old-size PTY bytes must not be written into
+      // the new mirror. The sequence still advances and relay bytes are ACKed
+      // so flow control does not stall; the scheduled snapshot repaints.
+      if (!this.#awaitingFixedSnapshot) {
+        this.#writeTerminal(payload);
+      }
       if (viaRelay) this.#sendAck(seq);
     } else if (decision === "gap") {
       this.#requestResync();
@@ -1050,8 +1167,17 @@ class AttachSession {
   }
 
   #applySnapshot(seq: number, payload: Uint8Array, viaRelay: boolean): void {
+    if (this.#awaitingFixedSnapshot && !viaRelay) {
+      // The host sends the post-resize recovery snapshot over the relay so it
+      // is ordered after `display-size`. A DataChannel snapshot from the
+      // previous grid can still be in flight and arrive later; applying it
+      // into the rebuilt mirror would show the wrong grid.
+      this.#logger.debug(`ignoring p2p snapshot (seq=${seq}) while awaiting the resize snapshot`);
+      return;
+    }
     const lastSeq = this.#reducer.lastSeq;
-    if (isStaleSnapshot(lastSeq, seq)) {
+    const stale = isStaleSnapshot(lastSeq, seq);
+    if (stale) {
       // A fallback/retry race can deliver an old DataChannel snapshot after a
       // newer relay snapshot; never clear the screen or move the reducer back.
       this.#logger.debug(`ignoring stale snapshot (seq=${seq}, lastSeq=${lastSeq})`);
@@ -1069,6 +1195,16 @@ class AttachSession {
         `applied snapshot (seq=${seq}, bytes=${payload.byteLength}, ` +
           `via=${viaRelay ? "relay" : "p2p"})`,
       );
+    }
+
+    if (this.#awaitingFixedSnapshot) {
+      this.#clearAwaitingFixedSnapshot();
+      this.#logger.debug(`fixed-grid snapshot received (seq=${seq}, stale=${String(stale)})`);
+      if (stale) {
+        // The rebuilt mirror has no valid screen yet; a fresh snapshot is the
+        // only way to repaint it (listeners recover on the next periodic one).
+        this.#requestResync();
+      }
     }
 
     if (viaRelay) {
@@ -1113,6 +1249,7 @@ class AttachSession {
 
   #cleanup(): void {
     this.#closing = true;
+    this.#clearAwaitingFixedSnapshot();
     if (this.#hostExitTimer !== null) {
       clearTimeout(this.#hostExitTimer);
       this.#hostExitTimer = null;

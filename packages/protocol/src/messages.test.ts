@@ -217,6 +217,7 @@ describe("hello and welcome", () => {
           fixed: { cols: 120, rows: 40 },
           logPanel: true,
           terminalQueries: "host",
+          resize: 1,
           futureField: 1,
         },
       },
@@ -234,6 +235,7 @@ describe("hello and welcome", () => {
       fixed: { cols: 120, rows: 40 },
       logPanel: true,
       terminalQueries: "host",
+      resize: 1,
     });
 
     const encoded = JSON.parse(encodeControlMessage(parsed)) as Record<string, unknown>;
@@ -367,6 +369,7 @@ describe("all v1 control message schemas", () => {
       reason: "ice timeout",
     },
     resize: { v: 1, type: "resize", clientId: "viewer-1", cols: 80, rows: 24 },
+    "display-size": { v: 1, type: "display-size", cols: 132, rows: 43 },
     resync: { v: 1, type: "resync", fromSeq: "0" },
     ack: { v: 1, type: "ack", seq: "41" },
     pause: { v: 1, type: "pause", clientId: "viewer-1" },
@@ -460,6 +463,18 @@ describe("all v1 control message schemas", () => {
         cols: 80,
         rows: MAX_TERMINAL_DIMENSION + 1,
       }),
+    ).toThrow();
+    expect(() => parseControlMessage({ v: 1, type: "display-size", cols: 0, rows: 43 })).toThrow();
+    expect(() =>
+      parseControlMessage({
+        v: 1,
+        type: "display-size",
+        cols: 80,
+        rows: MAX_TERMINAL_DIMENSION + 1,
+      }),
+    ).toThrow();
+    expect(() =>
+      parseControlMessage({ v: 1, type: "display-size", cols: 10_000, rows: 10_000 }),
     ).toThrow();
     expect(() =>
       parseControlMessage({

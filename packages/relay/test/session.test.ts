@@ -1,4 +1,4 @@
-﻿import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { decodeFrame, encodeFrame, MAX_SIGNAL_PAYLOAD_BYTES } from "@limccn/tokimeki-protocol";
 import { describe, expect, it } from "vitest";
 
@@ -131,6 +131,172 @@ describe("SessionDurableObject", () => {
     host.close();
     viewer.close();
     secondViewer.close();
+  });
+
+  it("broadcasts display-size from the host only to supporting viewers/listeners", async () => {
+    const sessionId = "display-size-update";
+    const host = await connectWorker(sessionId, {
+      hostToken: MASTER_TOKEN,
+      token: SESSION_TOKEN,
+    });
+    host.send(
+      helloFor(sessionId, "host", "host-1", {
+        capabilities: {
+          display: {
+            modes: ["fixed-grid"],
+            fixed: { cols: 120, rows: 40 },
+            resize: 1,
+          },
+        },
+      }),
+    );
+    await host.waitForType("welcome");
+    // The test config caps clients at 3; this scenario needs a host plus a
+    // supporting viewer/listener, a legacy viewer, an observer, and a late
+    // joiner in the same session.
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    await runInDurableObject(stub, (_instance: unknown, state: DurableObjectState) => {
+      state.storage.sql.exec("UPDATE session_meta SET max_clients = 10");
+    });
+
+    const viewer = await connectWorker(sessionId, { token: SESSION_TOKEN });
+    viewer.send(
+      helloFor(sessionId, "viewer", "viewer-1", {
+        capabilities: { display: { modes: ["viewport"], resize: 1 } },
+      }),
+    );
+    const viewerWelcome = await viewer.waitForType("welcome");
+    expect(
+      (viewerWelcome.capabilities as { display?: { resize?: number } } | undefined)?.display
+        ?.resize,
+    ).toBe(1);
+    const initialHost = (viewerWelcome.clients as Array<Record<string, unknown>>).find(
+      (client) => client.clientId === "host-1",
+    );
+    expect(initialHost?.capabilities).toMatchObject({
+      display: { fixed: { cols: 120, rows: 40 } },
+    });
+
+    const legacy = await connectWorker(sessionId, { token: SESSION_TOKEN });
+    legacy.send(
+      helloFor(sessionId, "viewer", "legacy-1", {
+        capabilities: { display: { modes: ["viewport"] } },
+      }),
+    );
+    await legacy.waitForType("welcome");
+
+    const listener = await connectWorker(sessionId, { token: SESSION_TOKEN, listener: true });
+    listener.send(
+      helloFor(sessionId, "listener", "listener-1", {
+        capabilities: { display: { modes: ["viewport"], resize: 1 } },
+      }),
+    );
+    await listener.waitForType("welcome");
+
+    const observer = await connectDirect(sessionId, { role: "observer" });
+    observer.send(
+      helloFor(sessionId, "observer", "observer-1", {
+        capabilities: { display: { resize: 1 } },
+      }),
+    );
+    await observer.waitForType("welcome");
+
+    const tablesBefore = await runInDurableObject(stub, async (_instance: unknown, state) =>
+      state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .toArray()
+        .map((row) => row.name)
+        .sort(),
+    );
+
+    host.send({ v: 1, type: "display-size", cols: 132, rows: 43 });
+
+    const viewerUpdate = await viewer.waitForType("display-size");
+    expect(viewerUpdate).toMatchObject({ cols: 132, rows: 43 });
+    const listenerUpdate = await listener.waitForType("display-size");
+    expect(listenerUpdate).toMatchObject({ cols: 132, rows: 43 });
+    await sleep(100);
+    expect(legacy.controls.some((message) => message.type === "display-size")).toBe(false);
+    expect(observer.controls.some((message) => message.type === "display-size")).toBe(false);
+    expect(host.controls.some((message) => message.type === "display-size")).toBe(false);
+
+    // The host attachment is rewritten so a hibernation wake keeps the new
+    // size and `welcome.clients` reports it to late joiners.
+    const storedFixed = await runInDurableObject(
+      stub,
+      async (_instance: unknown, state: DurableObjectState) => {
+        for (const socket of state.getWebSockets()) {
+          const attachment = socket.deserializeAttachment() as
+            | {
+                kind?: string;
+                clientId?: string;
+                capabilities?: { display?: { fixed?: { cols: number; rows: number } } };
+              }
+            | undefined;
+          if (attachment?.kind === "active" && attachment.clientId === "host-1") {
+            return attachment.capabilities?.display?.fixed ?? null;
+          }
+        }
+        return null;
+      },
+    );
+    expect(storedFixed).toEqual({ cols: 132, rows: 43 });
+
+    const tablesAfter = await runInDurableObject(stub, async (_instance: unknown, state) =>
+      state.storage.sql
+        .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .toArray()
+        .map((row) => row.name)
+        .sort(),
+    );
+    expect(tablesAfter).toEqual(tablesBefore);
+
+    const late = await openViewer(sessionId, "late-1");
+    const lateWelcome = late.controls.find((message) => message.type === "welcome");
+    const lateHost = (lateWelcome?.clients as Array<Record<string, unknown>> | undefined)?.find(
+      (client) => client.clientId === "host-1",
+    );
+    expect(lateHost?.capabilities).toMatchObject({
+      display: { fixed: { cols: 132, rows: 43 } },
+    });
+
+    host.close();
+    viewer.close();
+    legacy.close();
+    listener.close();
+    observer.close();
+    late.close();
+  });
+
+  it("rejects display-size from viewers/listeners and invalid sizes", async () => {
+    const sessionId = "display-size-role";
+    const host = await openHost(sessionId);
+    const viewer = await openViewer(sessionId, "viewer-1");
+    viewer.send({ v: 1, type: "display-size", cols: 100, rows: 30 });
+    const viewerError = await viewer.waitFor(
+      (message) => message.type === "error" && String(message.message).includes("display-size"),
+    );
+    expect(viewerError.code).toBe("invalid_role");
+
+    const listener = await openListener(sessionId, "listener-1");
+    listener.send({ v: 1, type: "display-size", cols: 100, rows: 30 });
+    const listenerError = await listener.waitFor(
+      (message) => message.type === "error" && String(message.message).includes("display-size"),
+    );
+    expect(listenerError.code).toBe("invalid_role");
+
+    // The schema rejects an over-limit grid before it reaches the routing code.
+    host.send({ v: 1, type: "display-size", cols: 10_000, rows: 10_000 });
+    const sizeError = await host.waitFor(
+      (message) => message.type === "error" && message.code === "invalid_message",
+    );
+    expect(sizeError.code).toBe("invalid_message");
+    await sleep(100);
+    expect(viewer.controls.some((message) => message.type === "display-size")).toBe(false);
+
+    host.close();
+    viewer.close();
+    listener.close();
   });
 
   it("rejects duplicate client ids", async () => {

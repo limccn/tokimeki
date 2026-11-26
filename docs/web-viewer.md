@@ -70,7 +70,35 @@ missing/incorrect passcode yields `passcode_required`/`passcode_invalid`/
 8. Reconnect: exponential backoff 1/2/4…15 s, max 5; **re-attach before every
    new WebSocket**; attach 410 → invalid-link.
 
-## 5. Cross-repo e2e
+## 5. Fixed-grid live resize compatibility (v1.8)
+
+Tokimeki 0.1.9 adds an additive host-only `display-size` control message and a
+`display.resize` capability. The relay only forwards `display-size` to
+viewers/listeners that advertised `capabilities.display.resize = 1`, and it
+stores the new size in the host's `welcome.clients[]` entry so late joiners read
+the current grid.
+
+- The TokiAPI web viewer in this release does **not** advertise
+  `display.resize` and does not handle `display-size`. This is a supported
+  v1.8 behavior: the host's F12 live resize is blocked while a web viewer is
+  connected (the host reports the blocking client), and the web viewer keeps
+  rendering the grid it learned at attach time.
+- A web viewer that joins **after** a resize gets the updated
+  `welcome.clients[].capabilities.display.fixed` and renders the new grid
+  without any change.
+- The proxy already passes unknown text control frames through unchanged, so
+  `display-size` reaches the browser once the browser opts in; the proxy must
+  not strip or rewrite it.
+- Cross-repo follow-up (TokiAPI, not required for 0.1.9): advertise
+  `display: { modes: ["viewport"], resize: 1 }` in the viewer/listener hello,
+  validate `display-size`, resize the xterm.js/FitAddon logical grid, ignore
+  incremental `OUTPUT` until the next matching `SNAPSHOT_TO`, and (viewers
+  only) request a resync if the snapshot does not arrive. Listeners stay
+  read-only and wait for the periodic snapshot.
+
+No relay or tokimeki CLI change is needed for a future TokiAPI opt-in.
+
+## 6. Cross-repo e2e
 
 `scripts/e2e/v1.2-cross-repo.mjs` (tokimeki) drives the whole chain against
 local servers:
