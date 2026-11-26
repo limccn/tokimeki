@@ -57,11 +57,10 @@ it. Uninstall leaves ~/.tokimeki/ user data untouched unless the user asks.
 
 ## Notes
 
-- Distribution gate: the skill is currently on `develop` and
-  `release/0.1.7`/`v0.1.7`. The default-branch command above becomes available
-  after the maintainer merges `release/0.1.7` into `main`; until then, use the
-  repository at the `v0.1.7` tag (or a local checkout) as the skills source.
-  Local discovery is verified with `npx skills add . --list`.
+- Distribution gate: the skill is on `main` (0.1.7) and in the `v0.1.7` tag,
+  so the default-branch command above works. The `v0.1.8` tag carries the same
+  skill; merging `release/0.1.8` updates `main`. Local discovery is verified
+  with `npx skills add . --list`.
 
 - There is no registry short name. `npx skills add tokimeki` is invalid; use
   `limccn/tokimeki`.

@@ -33,6 +33,16 @@ import type { RelayConnectionState, RelayFatalError } from "./relay-types.js";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+/**
+ * Consecutive HTTP 429 upgrade rejections tolerated before giving up.
+ *
+ * A full session or an IP rate limit usually clears on its own; six attempts
+ * span roughly 30 s of exponential backoff. Unlimited retries keep a rejected
+ * client reconnecting forever, so the sixth consecutive 429 is fatal
+ * (`session_full`, exit 1). Any successful upgrade (or any non-429 response)
+ * resets the count, so a 503/JWKS outage keeps the old retry behavior.
+ */
+const MAX_CONSECUTIVE_RATE_LIMITS = 6;
 
 export interface RelayClientOptions {
   readonly url: string;
@@ -110,6 +120,8 @@ export class RelayClient {
   #ready = false;
   #fatal = false;
   #attempt = 0;
+  /** Consecutive HTTP 429 upgrade rejections; reset by any other outcome. */
+  #consecutiveRateLimits = 0;
   #reconnectTimer: NodeJS.Timeout | null = null;
   #handshakeTimer: NodeJS.Timeout | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
@@ -271,6 +283,8 @@ export class RelayClient {
 
     socket.on("open", () => {
       if (this.#socket !== socket) return;
+      // A successful upgrade ends any 429 streak even before `welcome`.
+      this.#consecutiveRateLimits = 0;
       this.#sendHello(socket);
       this.#handshakeTimer = setTimeout(() => {
         if (this.#socket === socket && !this.#ready) {
@@ -284,9 +298,27 @@ export class RelayClient {
       if (this.#socket !== socket) return;
       const status = response.statusCode ?? 0;
       if (status === 401 || status === 403) {
+        this.#consecutiveRateLimits = 0;
         response.resume();
         this.#handleFatal("unauthorized", `relay rejected the connection (HTTP ${status})`);
         return;
+      }
+      if (status === 429) {
+        this.#consecutiveRateLimits += 1;
+        if (this.#consecutiveRateLimits >= MAX_CONSECUTIVE_RATE_LIMITS) {
+          response.resume();
+          this.#handleFatal(
+            "session_full",
+            `relay rejected the WebSocket upgrade (HTTP 429) after ` +
+              `${MAX_CONSECUTIVE_RATE_LIMITS} consecutive attempts; the session may be ` +
+              "full or this IP is rate-limited; retry later",
+          );
+          return;
+        }
+      } else {
+        // 503 (jwks_unavailable) and other upgrade failures keep the existing
+        // unlimited retry policy; a non-429 response breaks the 429 streak.
+        this.#consecutiveRateLimits = 0;
       }
       this.#logger.warn(`relay rejected the WebSocket upgrade (HTTP ${status})`);
       response.resume();
@@ -396,6 +428,7 @@ export class RelayClient {
       }
       this.#ready = true;
       this.#attempt = 0;
+      this.#consecutiveRateLimits = 0;
       this.#lastInboundAt = Date.now();
       this.#lastError = null;
       this.#startHeartbeat();

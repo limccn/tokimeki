@@ -32,6 +32,12 @@ export interface RelayEnv {
   readonly TOKIMEKI_MAX_CLIENTS_PER_SESSION?: string;
   /** Independent limit for read-only listeners (default 8). */
   readonly TOKIMEKI_MAX_LISTENERS?: string;
+  /**
+   * Optional Cloudflare rate-limit binding for `/ws` WebSocket upgrade
+   * attempts (v1.7 R1). The policy lives in `[[ratelimits]]` in the Wrangler
+   * config, never in code. Missing binding = fail-open with an error log.
+   */
+  readonly TOKIMEKI_WS_IP_LIMIT?: RateLimit;
   readonly TOKIMEKI_STUN_URLS?: string;
   readonly TOKIMEKI_TURN_PROVIDER?: string;
   readonly TOKIMEKI_COTURN_URLS?: CoturnUrlConfig;
@@ -163,6 +169,25 @@ export function maxClientsPerSession(env: RelayEnv): number {
  */
 export function maxListenersPerSession(env: RelayEnv): number {
   return parsePositiveInt(env.TOKIMEKI_MAX_LISTENERS, DEFAULT_MAX_LISTENERS);
+}
+
+/**
+ * Shape-check the optional `TOKIMEKI_WS_IP_LIMIT` binding.
+ *
+ * Wrangler `vars` are plain strings, so a var accidentally named like the
+ * binding must not crash every upgrade. An absent or malformed binding means
+ * the per-IP edge limit is disabled (fail-open, logged by the Worker).
+ */
+export function wsIpRateLimit(env: Pick<RelayEnv, "TOKIMEKI_WS_IP_LIMIT">): RateLimit | undefined {
+  const binding: unknown = env.TOKIMEKI_WS_IP_LIMIT;
+  if (
+    typeof binding === "object" &&
+    binding !== null &&
+    typeof (binding as { limit?: unknown }).limit === "function"
+  ) {
+    return binding as RateLimit;
+  }
+  return undefined;
 }
 
 /** ICE transport policy advertised in `welcome`; defaults to `all`. */

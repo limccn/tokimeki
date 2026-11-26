@@ -340,6 +340,7 @@ function hostEnv() {
     env.TOKIMEKI_COTURN_SECRET = "e2e-dummy-coturn-secret";
     env.TOKIMEKI_TURN_API_TOKEN = "e2e-dummy-turn-api-token";
     env.TOKIMEKI_TURN_CREDENTIAL = "e2e-dummy-turn-credential";
+    env.TOKIMEKI_ATTACH_URL = "https://e2e.invalid/#t-dummy";
   }
   return env;
 }

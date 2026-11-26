@@ -6,6 +6,52 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-26
+
+v1.7 hardening: opt-in slow-P2P fallback and send pacing, relay per-IP edge
+limits, opaque-token and passcode lockouts, uniform unauthorized for opaque
+viewer/listener tokens, and a bounded CLI 429 retry policy. No wire-protocol
+change.
+
+### Added
+
+- Host: opt-in `TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC` returns only the affected
+  viewer to the relay when a ready P2P/TUN link has at least 64 KiB buffered
+  and drains below the configured rate over a 3 s window.
+- Host: opt-in `TOKIMEKI_SEND_PACE_BYTES_PER_SEC` paces snapshots and OUTPUT
+  above 1024 payload bytes with a process-wide token bucket, small-OUTPUT
+  priority, an 8 s per-snapshot floor, and 1 MiB/256 KiB queue bounds.
+- Relay: optional `TOKIMEKI_WS_IP_LIMIT` edge binding (30/60s/IP) for `/ws`
+  upgrades; 429 + `Retry-After: 60`; fail-open with logs when the binding or
+  edge IP is absent.
+- Relay: per-IP opaque-token failure lock (10/60s -> 60 s) on existing
+  sessions; success clears the counter.
+- Relay: per-IP passcode main lock (5/60s -> 60 s) plus a per-session high
+  threshold (50/60s -> 60 s) for distributed guessing.
+- CLI: six consecutive HTTP 429 upgrade rejections become a fatal
+  `session_full` (exit 1); 503/JWKS retries keep the existing policy.
+- TokiAPI (separate deployment): dedicated `/api/tokimeki/ws` rate-limit bucket
+  (`TOKIMEKI_WS_LIMIT`) and trusted `x-real-ip` forwarding to the relay.
+
+### Changed
+
+- Opaque viewer/listener token errors are now a uniform `unauthorized`
+  (nonexistent session, wrong token, and IP lock); the session-existence
+  oracle is removed. Session JWT and host errors keep their specific messages.
+- The per-session passcode lock is now a high-threshold fallback; a single
+  source can no longer lock every viewer after five failures.
+- Deployment docs cover the new binding, fail-open behavior, NAT caveats,
+  rollback, HTTPS/HSTS/WAF, and Static Assets route checks.
+
+### Security
+
+- Failed-auth counters store only `sha256(client IP)`; logs never include raw
+  IPs, tokens, passcodes, verifiers, or terminal content.
+- Relay rate limiting is best-effort (per-location, eventually consistent);
+  it is not described as “brute-force proof”.
+- The relay still sees terminal bytes by design; P2P/TURN change the transport,
+  not the trust model.
+
 ## [0.1.7] - 2026-11-24
 
 Security hardening for v1.4/v1.5 code across the CLI, relay, onboarding site,

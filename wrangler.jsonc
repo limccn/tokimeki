@@ -6,6 +6,17 @@
   "observability": {
     "enabled": true
   },
+  // Optional v1.7 per-IP limit for GET /ws/* upgrades. It is intentionally NOT
+  // enabled in this open-source/Deploy Button config: Cloudflare plan support
+  // varies, and the Worker fails open (with a logged error) when the binding is
+  // absent. To enable it, uncomment and pick your own unique namespace_id:
+  // "ratelimits": [
+  //   {
+  //     "name": "TOKIMEKI_WS_IP_LIMIT",
+  //     "namespace_id": "3001",
+  //     "simple": { "limit": 30, "period": 60 }
+  //   }
+  // ],
   // Static no-JWT onboarding page (packages/onboarding-site). Existing files
   // are served from assets; non-asset paths (/ws/*, /healthz, /auth/*) fall
   // through to the Worker. No SPA fallback, so assets never swallow relay APIs.

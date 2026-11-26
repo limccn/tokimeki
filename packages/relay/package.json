@@ -1,6 +1,6 @@
 {
   "name": "@limccn/tokimeki-relay",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "type": "module",
   "description": "Cloudflare Worker + Durable Object relay for tokimeki terminal sessions",
@@ -14,7 +14,7 @@
     "test": "vitest run --config vitest.config.ts && vitest run --config vitest.namespace.config.ts && vitest run --config vitest.jwt.config.ts && vitest run --config vitest.passcode.config.ts && vitest run --config vitest.quotas.config.ts"
   },
   "dependencies": {
-    "@limccn/tokimeki-protocol": "0.1.7"
+    "@limccn/tokimeki-protocol": "0.1.8"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261112.1"

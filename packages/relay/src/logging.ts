@@ -55,6 +55,11 @@ const ALLOWED_FIELDS = new Set([
   "exitCode",
   "signal",
   "fallback",
+  // v1.7 rate-limit / auth-failure diagnostics. Never a token, passcode, or
+  // raw client IP: `ipHashPrefix` is a truncated SHA-256 hex prefix.
+  "path",
+  "ipHashPrefix",
+  "failedAttempts",
 ]);
 
 function parseLogLevel(raw: string | undefined): LogLevel {

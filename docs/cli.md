@@ -277,6 +277,8 @@ Useful host variables:
 | `TOKIMEKI_SCROLLBACK_LINES` | `1000` | Headless screen scrollback |
 | `TOKIMEKI_SNAPSHOT_MAX_BYTES` | `262144` | Snapshot size budget |
 | `TOKIMEKI_LISTENER_SNAPSHOT_MS` | `1000` | Read-only listener snapshot interval (250–60000 ms) |
+| `TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC` | — (off) | v1.7 slow-P2P fallback: when a ready P2P/TUN link buffers at least 64 KiB, return only that viewer to the relay if its 3 s drain rate stays below this many bytes/s; unset/`0` disables |
+| `TOKIMEKI_SEND_PACE_BYTES_PER_SEC` | — (off) | v1.7 host send pacing: snapshots and OUTPUT frames above 1024 bytes share this byte rate; smaller OUTPUT is queued first; unset/`0` keeps today's immediate writes |
 | `TOKIMEKI_TUNNEL` | `off` | `auto` runs the P2P-only AEAD/ARQ tunnel |
 | `TOKIMEKI_TUNNEL_FEC` | `off` | `xor` emits AEAD parity for single-loss recovery |
 | `TOKIMEKI_TUNNEL_SECRET` | — | Optional >=16-byte shared secret for relay-blind tunnel keys |
@@ -322,14 +324,20 @@ as a listener automatically; a viewer invite combined with `--listen` exits 2.
 TokiAPI **Session JWT** issued by an invite (`POST /api/tokimeki/attach/cli`).
 The CLI treats both as opaque values; the relay verifies the JWT and skips the
 opaque hash comparison. If the host set `TOKIMEKI_PASSCODE`, viewers must also
-set it (sent as `X-Tokimeki-Passcode`); wrong passcodes lock verification for
-30 seconds after five failures.
+set it (sent as `X-Tokimeki-Passcode`); wrong passcodes lock the failing IP for
+60 seconds after five failures, with a per-session 50-failures/60-seconds
+backstop for distributed sources.
 
 - **Config envelope:** the host's `viewer config` JSON can be passed as
   `TOKIMEKI_CONFIG` instead of setting `TOKIMEKI_RELAY_URL`,
   `TOKIMEKI_SESSION`, and `TOKIMEKI_SESSION_TOKEN` separately.
 - **Disconnect/reconnect:** the host PTY stays alive; a reconnecting viewer
-  requests a fresh snapshot.
+  requests a fresh snapshot. The reconnect backoff is 1 s..30 s with jitter.
+  A relay that rejects the WebSocket upgrade with HTTP 429 is retried at most
+  six times consecutively; the sixth consecutive 429 is fatal (`session_full`,
+  exit 1) with a “session may be full or rate-limited, retry later” message.
+  A successful upgrade or any non-429 response resets the count, so `503`
+  (for example `jwks_unavailable`) keeps the previous unlimited retry policy.
 - **Multiple viewers:** all viewers share control. With a fixed TUI window,
   attaching or resizing a viewer never changes the host PTY; each viewer only
   changes its own local viewport.
@@ -431,6 +439,38 @@ retired `TOKIMEKI_NAMESPACE_TOKEN` key) still exit 2 before doctor runs.
    no usable TURN means timeout + relay fallback.
 4. Relay fallback is always available; control/signaling always use the relay.
 
+### Slow-P2P fallback and send pacing (v1.7, default off)
+
+Two host-side switches control what happens after a DataChannel completes ICE
+but the path is slow. Both are disabled unless their environment variable is
+set to a positive integer; invalid values log a warning and disable the option
+without aborting the host.
+
+- **Slow-P2P fallback (`TOKIMEKI_P2P_DRAIN_BYTES_PER_SEC`).** Once a viewer's
+  P2P link is `ready` and relay output for it is suppressed, the host samples
+  its send buffer every 250 ms. The buffer is `bufferedAmount` for the reliable
+  DataChannel or `pendingBytes` for the TUN profile. Below 64 KiB the link is
+  treated as idle and stays on P2P. At 64 KiB or more the host opens a 3 s
+  window and computes `drained = startBuffered + bytesWritten - endBuffered`.
+  If the resulting rate is below the configured value, only that viewer gets
+  the existing `transport failed` message and a fresh relay snapshot; the P2P
+  pause reason is released. A slow but idle P2P link is not returned.
+- **Send pacing (`TOKIMEKI_SEND_PACE_BYTES_PER_SEC`).** The host charges every
+  encoded snapshot and every OUTPUT frame above 1024 payload bytes against a
+  process-wide token bucket holding one second of the configured rate. OUTPUT
+  payloads of 1024 bytes or less go to a priority queue; large OUTPUT keeps
+  sequence order, so only snapshots can be passed by the priority queue. A
+  viewer that already applied newer OUTPUT treats such a snapshot as stale and
+  requests a resync if it needs the boundary; the host's normal snapshot path
+  recovers it. A snapshot starts within 8 s even at a lower configured rate,
+  staying under the existing 10 s fragment reassembly limit. The pacer queue pauses the shared
+  PTY above 1 MiB and resumes at 256 KiB, in addition to the existing
+  relay/P2P/TUN watermarks. When pacing is off, frames are written immediately
+  as before.
+
+Falling back returns terminal bytes to the Worker relay, which can still see
+them by design; neither switch changes the wire format or adds error codes.
+
 ## TUN profile (v1.1, opt-in)
 
 `TOKIMEKI_TUNNEL=auto` adds an application-layer tunnel for terminal bytes on
@@ -480,9 +520,9 @@ stderr behavior.
 
 | Symptom | Check |
 |---|---|
-| `401 unauthorized` | Host credential matches the relay (master or namespace token), the session prefix is `<namespace>.<slug>` in namespace mode, and host/session tokens differ |
+| `401 unauthorized` | Host credential matches the relay (master or namespace token), the session prefix is `<namespace>.<slug>` in namespace mode, and host/session tokens differ. For viewers this can also mean the session does not exist, the token is wrong, or this IP is temporarily locked after repeated failures |
 | `host_offline` | Host is connected to the same relay/session and still running |
-| `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION` |
+| `session_full` | Increase the relay's `TOKIMEKI_MAX_CLIENTS_PER_SESSION`, or wait: six consecutive HTTP 429 upgrade rejections are retried and then reported as fatal |
 | Viewer shows only part of the TUI | Local terminal is smaller than `TOKIMEKI_WINDOW_SIZE`; enlarge it or set a smaller fixed size at host start. The status bar shows `view:WxH@x,y` and the camera follows the TUI cursor |
 | F12 does not open the connection menu | The menu needs the full-screen host viewport (`TOKIMEKI_WINDOW=off` and headless hosts do not have it). Try `TOKIMEKI_INVITE_KEY=ctrl-]` if the terminal intercepts F12 |
 | F11 does not open the log view | The terminal may intercept F11; the debug F12 menu's “Open log view” item is the fallback. Set `TOKIMEKI_LOG_VIEW_ROWS>0` and `TOKIMEKI_LOG_LEVEL=debug` |

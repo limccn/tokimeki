@@ -46,6 +46,26 @@ export interface SessionPasscodeRecord {
   readonly updatedAt: number;
 }
 
+/**
+ * Failed-auth counter scopes (v1.7).
+ *
+ * `opaque_token` covers viewer/listener session-token guesses on an existing
+ * session; `passcode` covers per-IP passcode failures. Both live in one
+ * bounded table so a session purge removes them with `deleteAll()`.
+ */
+export type AuthFailureKind = "opaque_token" | "passcode";
+
+/** Per-IP failure counter row (never stores the raw client IP). */
+export interface AuthFailureRecord {
+  readonly failedAttempts: number;
+  readonly windowStartedAt: number;
+  readonly lockedUntil: number | null;
+  readonly updatedAt: number;
+}
+
+/** Maximum per-IP rows kept per session and kind. */
+export const AUTH_FAILURE_MAX_ROWS = 64;
+
 export interface TurnCacheEntry {
   readonly payloadJson: string;
   readonly expiresAt: number;
@@ -58,6 +78,21 @@ export interface AgentIdempotencyRecord {
   readonly firstSeenAt: number;
   readonly responseJson: string | null;
 }
+
+const AUTH_FAILURE_SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS session_auth_failures (
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ip_hash TEXT NOT NULL,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    window_started_at INTEGER NOT NULL,
+    locked_until INTEGER,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, kind, ip_hash)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_session_auth_failures_updated
+    ON session_auth_failures (session_id, kind, updated_at)`,
+] as const;
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS session_meta (
@@ -88,6 +123,7 @@ const SCHEMA_STATEMENTS = [
     exit_code INTEGER,
     exit_signal TEXT
   )`,
+  ...AUTH_FAILURE_SCHEMA_STATEMENTS,
   `CREATE TABLE IF NOT EXISTS turn_cache (
     provider TEXT PRIMARY KEY,
     payload_json TEXT NOT NULL,
@@ -178,6 +214,19 @@ export function ensureRelaySchema(sql: SqlStorage): void {
   tryAddColumn(sql, "namespace_id", "TEXT");
   tryAddColumn(sql, "absolute_deadline", "INTEGER");
   tryAddColumn(sql, "relay_bytes", "INTEGER NOT NULL DEFAULT 0");
+}
+
+/**
+ * Narrow, idempotent schema creation for the failed-auth counter table.
+ *
+ * A viewer/listener hello may call this only after `session_meta` already
+ * exists (SEC-01: never create schema for an arbitrary session id). The host
+ * path creates it through `ensureRelaySchema`.
+ */
+export function ensureAuthFailureSchema(sql: SqlStorage): void {
+  for (const statement of AUTH_FAILURE_SCHEMA_STATEMENTS) {
+    sql.exec(statement);
+  }
 }
 
 // A type alias (not an interface) so it satisfies SqlStorage's row-record
@@ -492,6 +541,126 @@ export function clearPasscodeFailures(sql: SqlStorage, sessionId: string, now: n
       WHERE session_id = ?`,
     now,
     sessionId,
+  );
+}
+
+/**
+ * Load one per-IP failed-auth counter row, if present.
+ *
+ * The caller wraps this so a missing/broken table only disables locking and
+ * never turns a wrong token into a successful verification.
+ */
+export function loadAuthFailure(
+  sql: SqlStorage,
+  sessionId: string,
+  kind: AuthFailureKind,
+  ipHash: string,
+): AuthFailureRecord | null {
+  const rows = sql
+    .exec<{
+      failed_attempts: number;
+      window_started_at: number;
+      locked_until: number | null;
+      updated_at: number;
+    }>(
+      `SELECT failed_attempts, window_started_at, locked_until, updated_at
+         FROM session_auth_failures
+        WHERE session_id = ? AND kind = ? AND ip_hash = ?
+        LIMIT 1`,
+      sessionId,
+      kind,
+      ipHash,
+    )
+    .toArray();
+  const row = rows[0];
+  if (row === undefined) return null;
+  return {
+    failedAttempts: row.failed_attempts,
+    windowStartedAt: row.window_started_at,
+    lockedUntil: row.locked_until ?? null,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Insert or replace one per-IP failed-auth counter row. */
+export function recordAuthFailure(
+  sql: SqlStorage,
+  record: {
+    readonly sessionId: string;
+    readonly kind: AuthFailureKind;
+    readonly ipHash: string;
+    readonly failedAttempts: number;
+    readonly windowStartedAt: number;
+    readonly lockedUntil: number | null;
+    readonly updatedAt: number;
+  },
+): void {
+  sql.exec(
+    `INSERT OR REPLACE INTO session_auth_failures
+       (session_id, kind, ip_hash, failed_attempts, window_started_at, locked_until, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    record.sessionId,
+    record.kind,
+    record.ipHash,
+    record.failedAttempts,
+    record.windowStartedAt,
+    record.lockedUntil,
+    record.updatedAt,
+  );
+}
+
+/** Clear one per-IP failed-auth counter row after a successful verification. */
+export function clearAuthFailure(
+  sql: SqlStorage,
+  sessionId: string,
+  kind: AuthFailureKind,
+  ipHash: string,
+): void {
+  sql.exec(
+    "DELETE FROM session_auth_failures WHERE session_id = ? AND kind = ? AND ip_hash = ?",
+    sessionId,
+    kind,
+    ipHash,
+  );
+}
+
+/**
+ * Bound the counter table for one `(session_id, kind)` scope.
+ *
+ * Expired, unlocked rows older than `windowMs` are deleted first; the remaining
+ * rows are capped to the `AUTH_FAILURE_MAX_ROWS` newest IPs so a distributed
+ * guessing source can never grow DO storage without bound.
+ */
+export function cleanupAuthFailures(
+  sql: SqlStorage,
+  sessionId: string,
+  kind: AuthFailureKind,
+  now: number,
+  windowMs: number,
+): void {
+  sql.exec(
+    `DELETE FROM session_auth_failures
+      WHERE session_id = ? AND kind = ? AND updated_at <= ?
+        AND (locked_until IS NULL OR locked_until <= ?)`,
+    sessionId,
+    kind,
+    now - windowMs,
+    now,
+  );
+  sql.exec(
+    `DELETE FROM session_auth_failures
+      WHERE session_id = ? AND kind = ?
+        AND ip_hash NOT IN (
+          SELECT ip_hash FROM session_auth_failures
+           WHERE session_id = ? AND kind = ?
+           ORDER BY updated_at DESC
+           LIMIT ?
+        )`,
+    sessionId,
+    kind,
+    sessionId,
+    kind,
+    AUTH_FAILURE_MAX_ROWS,
   );
 }
 
