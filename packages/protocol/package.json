@@ -1,6 +1,6 @@
 {
   "name": "@limccn/tokimeki-protocol",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
   "description": "Shared wire protocol for tokimeki relay, CLI, and future Go/Rust clients",
   "main": "./dist/index.js",

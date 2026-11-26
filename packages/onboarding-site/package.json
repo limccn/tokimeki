@@ -1,6 +1,6 @@
 {
   "name": "@limccn/tokimeki-onboarding-site",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "description": "Static no-JWT multi-namespace onboarding page for the tokimeki relay",

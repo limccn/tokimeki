@@ -184,8 +184,8 @@ The `0.1.5` CLI adds the user onboarding path:
 - `skills/tokimeki/SKILL.md` with
   `npx skills add limccn/tokimeki --skill tokimeki` (project scope; `-g` for
   global). There is no registry short name. The skill is on `main` (0.1.7) and
-  in the `v0.1.7` tag, so default-branch installation works. The `v0.1.8` tag
-  carries the same skill; merging `release/0.1.8` updates `main`.
+  in the `v0.1.7` tag, so default-branch installation works. The `v0.1.9` tag
+  carries the same skill; merging `release/0.1.9` updates `main`.
 - `docs/agent-install.md` has a copy-paste install prompt (skill + CLI +
   doctor).
 - `@limccn/tokimeki-dsh` is an independent DeepSeek Harness plugin with
@@ -334,16 +334,17 @@ refresh before expiry, and one TURN-provider retry before staying on relay.
 
 ## Status
 
-`0.1.8` — current release. It includes the v1.2 hosted-auth work
+`0.1.9` — current release. It includes the v1.2 hosted-auth work
 (Host/Session JWT, passcode, share-link and web-viewer integration), the
 v1.4 CLI onboarding path/ACP catalog/F12 menu/no-JWT site, the v1.5 agent
 skill plus the independent `@limccn/tokimeki-dsh` plugin, the 0.1.7 security
-hardening, and the v1.7 hardening: opt-in slow-P2P fallback/send pacing,
-relay per-IP edge limits, opaque-token/passcode lockouts, and bounded CLI
-429 retries. Install from
+hardening, the v1.7 hardening (opt-in slow-P2P fallback/send pacing, relay
+per-IP edge limits, opaque-token/passcode lockouts, bounded CLI 429 retries),
+and the v1.8 fixed-grid live resize (`display-size` + `display.resize`
+capability; old clients block live resize while connected). Install from
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) (also mirrored to
 GitHub Packages; see [docs/release.md](docs/release.md)) or read the
-[v0.1.8 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.8).
+[v0.1.9 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.9).
 P2P direct is best-effort; TURN or the Worker relay is the reliable fallback.
 See [CHANGELOG.md](CHANGELOG.md) and [`CLAUDE.md`](CLAUDE.md) for known
 limitations and the v1.1 feature history.

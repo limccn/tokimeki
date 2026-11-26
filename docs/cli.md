@@ -178,7 +178,10 @@ transport/relay state, and the window size. Items:
    TokiAPI anonymous path; memory-only, never saved)
 5. Open the log view (debug mode)
 6. Resize the hosted window (host only; enters an arrow-key editor, Enter
-   applies through the normal resize pipeline)
+   applies through the normal resize pipeline). Fixed TUI windows apply live
+   only when the relay and every connected viewer/listener support
+   `display.resize`; otherwise the editor shows the blocking reason and the
+   PTY is left unchanged.
 
 Viewers/listeners get status, show/hide token, copy viewer config,
 reconnect/resync, and disconnect (local only). Listeners remain read-only and
@@ -205,8 +208,8 @@ For commands listed in `TOKIMEKI_WINDOW_TUI` (default: the 9 ACP commands
 session-level logical grid (`TOKIMEKI_WINDOW_SIZE`, default `120x40`). Viewer
 `resize` messages and local terminal resizes no longer change the hosted PTY;
 the TUI is not laid out again when someone attaches. The F12 host menu can
-resize the window for the session (fixed windows update an in-memory pinned
-size; `latest`/`min` follow their normal policy).
+resize the window for the session (fixed windows update the session-level grid
+live; `latest`/`min` follow their normal policy).
 
 The local terminal is split into:
 
@@ -227,6 +230,33 @@ fallback capacity when the new key is unset.
 `TOKIMEKI_WINDOW=off` restores the legacy raw/resize behavior. A headless host
 (stdout not a TTY) still keeps the PTY fixed; it just does not draw a local
 viewport.
+
+#### Live fixed-grid resize (v1.8, CLI >= 0.1.9)
+
+The F12 menu's “Resize hosted window” editor also works for fixed TUI windows.
+Applying a size updates the hosted PTY, the local viewport, and every connected
+viewer/listener without restarting the host:
+
+- The relay must advertise `display.resize` in `welcome.capabilities`; older
+  relays block live resize (the menu shows the reason).
+- Every currently connected viewer and listener must advertise
+  `display.resize = 1` in its hello. An old client or the TokiAPI web viewer
+  (which does not advertise it yet) blocks the resize while connected; the
+  host logs/prints the blocking client and leaves the PTY unchanged.
+- A late-joining old client still renders correctly: the relay stores the new
+  grid on the host attachment, so its `welcome.clients[].capabilities.display.fixed`
+  already carries the current size.
+- On apply, the host sends `display-size`, then schedules a fresh snapshot for
+  every viewer and listener. Supporting clients rebuild their mirror at the new
+  grid, ignore incremental output until that snapshot arrives (still ACKing
+  relay bytes), and request one resync if the snapshot is missing. Listeners
+  remain read-only and wait for the next periodic snapshot instead.
+- If a snapshot pass is already in flight, the host defers the new size until
+  it completes so an old-grid snapshot cannot arrive after `display-size`.
+
+Focused live e2e (host + two viewers + listener + legacy-client gate):
+`npm run e2e:display-resize` with `TOKIMEKI_RELAY_URL` and a host credential,
+after `npm run build`.
 
 ### Other TUI commands
 
@@ -346,6 +376,12 @@ backstop for distributed sources.
   the fixed grid through a local mirror with a bottom status bar (and a debug
   log panel when enabled). Old hosts or old relays without that metadata fall
   back to legacy raw rendering and the existing resize policy.
+- **Live fixed-grid updates (v1.8):** the viewer advertises
+  `display.resize = 1` (listeners too). When the host sends `display-size`, it
+  rebuilds its mirror/viewport at the new grid, ignores incremental output
+  until the host's recovery snapshot arrives (relay ACKs continue), and
+  requests a resync if no snapshot arrives within about a second. Listeners
+  apply the next periodic snapshot and never send input/resize/ACK/resync.
 - **Small terminals:** the viewport letterboxes the grid when the local
   terminal is larger, and crops with cursor-following when it is smaller.
   Mouse clicks are mapped from local coordinates into the logical grid.
@@ -531,6 +567,7 @@ stderr behavior.
 | `--config sets TOKIMEKI_RELAY_URL without a host credential` | A partial config file would send another layer's token to the file's relay; put the token in the same file or set relay+credential in explicit env |
 | attach share URL returns 401/410/429/503 | Session JWT expired/invalid (410), rate limited (429, back off), provider disabled (503); exchange again rather than looping |
 | Fixed window never activates | Relay must echo `capabilities` in `welcome.clients`; upgrade/redeploy the relay. Old relays fall back to legacy rendering |
+| Fixed window resize is blocked | The relay or a connected viewer/listener does not advertise `display.resize` (old relay/client, or the TokiAPI web viewer); the F12 editor/status line names the reason. Upgrade the relay/client or disconnect it and retry |
 | `tokimeki omp` says unknown command | Add `omp` to `TOKIMEKI_WINDOW_TUI` or use `tokimeki run -- omp` |
 | P2P never opens | Corporate UDP firewall; try TURN or `TOKIMEKI_P2P=off` |
 | Tunnel never activates | Both ends need `TOKIMEKI_TUNNEL=auto`, P2P enabled, and the same key mode (`TOKIMEKI_TUNNEL_SECRET` present on both or absent on both) |

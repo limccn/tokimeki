@@ -14,34 +14,34 @@ GitHub Release.
 
 ## Versioning
 
-- Current release: `0.1.8` (`v0.1.8` tag).
+- Current release: `0.1.9` (`v0.1.9` tag).
 - All four `package.json` files (`package.json`, `packages/protocol`,
   `packages/cli`, `packages/relay`) must use the same version.
 - The CLI and relay dependencies on `@limccn/tokimeki-protocol` are exact
-  versions (`0.1.8`), so protocol is published first.
+  versions (`0.1.9`), so protocol is published first.
 - Use the version helper instead of editing versions by hand:
 
   ```bash
-  npm run release:bump -- 0.1.8   # root + workspaces + exact deps + lockfile
-  npm run release:check -- 0.1.8  # same checks the release workflow runs
+  npm run release:bump -- 0.1.9   # root + workspaces + exact deps + lockfile
+  npm run release:check -- 0.1.9  # same checks the release workflow runs
   ```
 
 ## Release flow (automated)
 
-1. Pick the next patch version for a rolling release (for example `0.1.8`).
-2. Run `npm run release:bump -- 0.1.8`.
+1. Pick the next patch version for a rolling release (for example `0.1.9`).
+2. Run `npm run release:bump -- 0.1.9`.
 3. Move the `[Unreleased]` entries in `CHANGELOG.md` into a dated
-   `## [0.1.8] - YYYY-MM-DD` section and update the compare/release links.
+   `## [0.1.9] - YYYY-MM-DD` section and update the compare/release links.
 4. Update current-release references in `README.md`, `README.zh-CN.md`,
    `CLAUDE.md`, and any other docs that name the current version.
 5. Run the [pre-flight](#pre-flight-local) checks.
-6. Commit the release prep (for example `chore(release): v0.1.8`).
+6. Commit the release prep (for example `chore(release): v0.1.9`).
 7. After explicit maintainer approval, create and push an annotated tag:
 
    ```bash
-   git tag -a v0.1.8 -m "tokimeki 0.1.8"
-   git push origin release/0.1.8
-   git push origin v0.1.8
+   git tag -a v0.1.9 -m "tokimeki 0.1.9"
+   git push origin release/0.1.9
+   git push origin v0.1.9
    ```
 
    The tag must be pushed with `git push`; a tag created only through the
@@ -61,7 +61,7 @@ GitHub Release.
    ```bash
    npm view @limccn/tokimeki-protocol version
    npm view @limccn/tokimeki version
-   gh release view v0.1.8
+   gh release view v0.1.9
    ```
 
    Also check the Actions run and the GitHub Packages pages.
@@ -70,7 +70,7 @@ GitHub Release.
    install it into a clean directory and point the e2e harness at it:
 
    ```bash
-   npm install --prefix /tmp/tokimeki-e2e @limccn/tokimeki@0.1.8 \
+   npm install --prefix /tmp/tokimeki-e2e @limccn/tokimeki@0.1.9 \
      --@limccn:registry=https://registry.npmjs.org
    E2E_CLI_ENTRY=/tmp/tokimeki-e2e/node_modules/@limccn/tokimeki/dist/index.js \
      E2E_P2P_MODE=off \
@@ -106,7 +106,7 @@ GitHub Release.
 ## Pre-flight (local)
 
 ```bash
-npm run release:check -- 0.1.8
+npm run release:check -- 0.1.9
 npm ci
 npm install --package-lock-only --ignore-scripts
 git diff --exit-code -- package-lock.json
@@ -165,11 +165,11 @@ requires GitHub auth even for public packages.
 ## Tag and GitHub Release (manual fallback)
 
 ```bash
-git tag -a v0.1.8 -m "tokimeki 0.1.8"
-git push origin v0.1.8
+git tag -a v0.1.9 -m "tokimeki 0.1.9"
+git push origin v0.1.9
 
-gh release create v0.1.8 \
-  --title "tokimeki 0.1.8" \
+gh release create v0.1.9 \
+  --title "tokimeki 0.1.9" \
   --generate-notes
 ```
 

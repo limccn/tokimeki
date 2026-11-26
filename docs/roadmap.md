@@ -378,12 +378,12 @@ release 发布仍需单独批准。
 为限速做 relay E2E、IPv6 优先。不测量境内网络，也不把社区帖里的速率写成默认值。
 退回 relay 后，relay 仍能看到终端字节。
 
-## v1.8（规划中，2026-11-23 立项）
+## v1.8（fixed resize 随 0.1.9 交付；credential lifecycle 延后）
 
-状态：任务 `.trellis/tasks/11-23-v1-8-credential-lifecycle-hardening`
-（`prd.md` / `design.md` / `implement.md`）已创建，当前为 planning，未启动
-实现。安排在 v1.7 之后、v2 之前。来源：v1.4 设计安全审计的 deferred
-lifecycle 项。
+状态：v1.8 的 fixed-resize follow-up 已随 **0.1.9**（tag `v0.1.9`）交付；
+credential-lifecycle 任务 `.trellis/tasks/11-23-v1-8-credential-lifecycle-hardening`
+（`prd.md` / `design.md` / `implement.md`）仍为 planning，用户 2026-11-26
+决定延后，未启动实现。来源：v1.4 设计安全审计的 deferred lifecycle 项。
 
 目标：补齐凭证与会话的 **生命周期** 安全边界：撤销、过期、轮换、陈旧
 config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
@@ -404,20 +404,25 @@ config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
 
 ### v1.4/v1.5 delivery follow-ups（任务 `11-23-v1-8-v1-4-v1-5-followups`）
 
-- 固定窗口实时 resize：新增 additive `display-size`/capability 刷新路径，
-  更新 relay DO、协议文档/goldens、viewer 重连行为；恢复 F12 fixed 菜单项并补
-  多 viewer e2e。
-- 公开发布 `tokimeki-dsh`（用户 2026-11-24 决定暂缓到 v1.8）：用户创建/授权
-  `limccn/tokimeki-dsh` 公开仓库、配置 `NPM_TOKEN`，推送 `main`/`v0.1.0`，
-  由 CI 发布 npm + GitHub Release；本地源码/测试保留在
-  `D:/Workspace/tokimeki-dsh`（commit `9464dad`）。
-- skill 分发：合并 `release/0.1.6` → `main` 后验证默认分支
-  `npx skills add limccn/tokimeki --skill tokimeki`、卸载与 skills.sh
-  indexing request（best-effort）。
+- 固定窗口实时 resize（已随 0.1.9 发布，任务
+  `11-26-v1-8-fixed-grid-live-resize`）：新增 additive `display-size` 控制消息与
+  `display.resize` capability；relay 只接受 host 发送、更新 host attachment 的
+  `display.fixed` 并只向声明支持的 viewer/listener 广播；CLI host 在 relay 与
+  所有在线 viewer/listener 都支持时才应用（否则提示原因、PTY 不变），应用后
+  发送 `display-size` 并调度新快照；viewer/listener 重建 grid 并等待快照。
+  TokiAPI web viewer 未声明支持，连接期间阻止 live resize，晚加入时从 welcome
+  读取新尺寸；web 端实时支持是后续跨仓任务。协议文档/goldens、`docs/cli.md`、
+  `docs/web-viewer.md` 与多 viewer e2e 已同步。
+- 公开发布 `tokimeki-dsh`：已完成 0.1.0/0.1.1 发布（GitHub Releases +
+  npmjs；0.1.1 放宽 `@deepseek-ai/dsh-tools` peer 以支持 dsh 0.2.2-rc.5），
+  真实 `dsh plugin add` 安装 smoke 通过。
+- skill 分发：默认分支 `npx skills add limccn/tokimeki --skill tokimeki`
+  已验证；skills.sh 收录请求已提交为 `vercel-labs/skills#2849`
+  （best-effort，不承诺时间）。
 - TokiAPI `api/config`/`anon-host`/`attach/cli` 生产 live 复测（200/429/503、
-  TTL、relay wss 绑定）。
-- 清理项：`TOKIMEKI_TOKIAPI_URL` 定位、ACP 检测跨平台 CI、skill 结构/secret
-  扫描脚本。
+  TTL、relay wss 绑定）仍需 anon-host 预算/批准。
+- 清理项：README/agent-install 的 stale main-merge gate 已清理；剩余
+  `TOKIMEKI_TOKIAPI_URL` 定位、ACP 检测跨平台 CI、skill 结构/secret 扫描。
 
 ## v2（独立任务）
 

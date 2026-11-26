@@ -18,10 +18,10 @@ machine. Data can travel over:
 The relay also carries control/signaling, auth, snapshots, ACKs and flow
 control. It is self-hostable on Cloudflare Workers + Durable Objects.
 
-## Release identity (0.1.8)
+## Release identity (0.1.9)
 
-- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.8`.
-- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.8`; the CLI
+- CLI package: `@limccn/tokimeki` (bin `tokimeki`), version `0.1.9`.
+- Protocol package: `@limccn/tokimeki-protocol`, version `0.1.9`; the CLI
   depends on it. Publish protocol **before** the CLI.
 - Relay package `@limccn/tokimeki-relay` is private; deploy with Wrangler, not npm.
 - License: Apache-2.0 (`LICENSE`, `NOTICE`).
@@ -106,6 +106,14 @@ assets/              README icon
   `unauthorized` message/4001 (no existence oracle; no schema for nonexistent
   sessions). Passcode uses a per-IP 5/60s -> 60s primary lock plus a
   per-session 50/60s -> 60s backstop (both `passcode_locked`).
+- v1.8 fixed-grid live resize: the host-only `display-size` control message
+  updates the host attachment's `capabilities.display.fixed` (persisted via
+  `saveAttachment`) and the relay broadcasts only to viewer/listener clients
+  advertising `display.resize = 1`; `welcome` carries the updated fixed grid
+  for late joiners, including old clients. The CLI host offers F12 fixed resize
+  only when the relay and every connected viewer/listener support it; viewers/
+  listeners rebuild the grid and wait for a fresh snapshot. The TokiAPI web
+  viewer does not opt in yet (cross-repo follow-up).
 - `session-do.ts`: one DO per session (`idFromName(sessionId)`); roles
   host/viewer/observer/agent/listener; viewer `INPUT`/`RESYNC_REQ` to host; host
   `OUTPUT` broadcast; `SNAPSHOT_TO` targeted; `signal` only host↔viewer;
@@ -264,8 +272,12 @@ env); self-contained v1.4 onboarding e2e:
 - Production deploy/provider/secret changes need explicit user approval.
 - Scan changes for master/session/TURN secrets before committing.
 
-## Known limitations (0.1.8)
+## Known limitations (0.1.9)
 
+- v1.8 (0.1.9): fixed-grid live resize is covered by a focused local live e2e
+  (two viewers + listener + legacy gate + reconnect); a legacy client connected
+  during a resize blocks it by design, and the TokiAPI web viewer opt-in is a
+  cross-repo follow-up. No long-run/production multi-viewer resize soak.
 - v1.7 (0.1.8): slow-P2P fallback/send pacing and the relay per-IP rate-limit/
   credential-lockout code shipped. Local live e2e covers P2P, relay flow
   control, fixed window, listener, pacing, and the edge 429; cross-NAT

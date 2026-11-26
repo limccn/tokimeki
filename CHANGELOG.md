@@ -6,6 +6,47 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-26
+
+Fixed-grid live resize. No change to the existing viewer -> host `resize`
+message or to P2P/TUN behavior.
+
+### Added
+
+- Protocol: additive `display-size` control message and optional
+  `display.resize` capability. The message is host-only and validated against
+  the existing terminal cell limits.
+- Relay: the host attachment carries the current fixed grid; a host
+  `display-size` updates it, `saveAttachment` persists it across hibernation,
+  and the relay broadcasts only to clients that advertise `display.resize`.
+  `welcome.clients` reports the updated size so late-joining old clients render
+  correctly.
+- CLI host: F12 "Resize hosted window" works for fixed-grid hosts when the
+  relay and every connected viewer/listener advertise `display.resize`; the
+  host resizes the PTY/mirror, sends `display-size`, and schedules fresh
+  snapshots. A snapshot in flight defers the resize to keep the control message
+  ordered before the new-size snapshot.
+- CLI viewer/listener: handle `display-size` by rebuilding the fixed
+  viewport/mirror and waiting for the next snapshot; the listener remains
+  read-only and never sends input/resize/ACK/resync.
+- Focused live e2e: host + two viewers + listener + legacy gate + reconnect
+  (`npm run e2e:display-resize`).
+
+### Compatibility
+
+- Old viewers/listeners do not advertise `display.resize`; the host refuses
+  live fixed resize while they are connected. A late-joining old client reads
+  the updated fixed size from `welcome`.
+- The TokiAPI web viewer does not advertise `display.resize` in this release;
+  the host blocks live resize while it is connected. Live web-viewer support is
+  a separate cross-repo follow-up.
+- No SQL schema change; the relay uses the existing WebSocket attachment.
+
+### Security
+
+- `display-size` carries only dimensions; no token, terminal content, or
+  client input. Logs contain sizes and counts only.
+
 ## [0.1.8] - 2026-11-26
 
 v1.7 hardening: opt-in slow-P2P fallback and send pacing, relay per-IP edge

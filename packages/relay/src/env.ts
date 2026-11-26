@@ -178,7 +178,9 @@ export function maxListenersPerSession(env: RelayEnv): number {
  * binding must not crash every upgrade. An absent or malformed binding means
  * the per-IP edge limit is disabled (fail-open, logged by the Worker).
  */
-export function wsIpRateLimit(env: Pick<RelayEnv, "TOKIMEKI_WS_IP_LIMIT">): RateLimit | undefined {
+export function wsIpRateLimit(env: {
+  readonly TOKIMEKI_WS_IP_LIMIT?: RateLimit;
+}): RateLimit | undefined {
   const binding: unknown = env.TOKIMEKI_WS_IP_LIMIT;
   if (
     typeof binding === "object" &&

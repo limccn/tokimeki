@@ -249,11 +249,11 @@ relay、ICE 凭据到期前自动刷新、TURN provider 失败后重试一次再
 
 ## 状态
 
-`0.1.8` — 当前发布版本。包含 v1.2 托管认证、v1.4 CLI onboarding/ACP/F12 菜单/no-JWT 站点、v1.5 agent skill 与独立 `@limccn/tokimeki-dsh` 插件、0.1.7 安全加固，以及 v1.7 硬化（慢 P2P 退回/发送节奏、relay per-IP 边缘限速、opaque token/passcode 锁限、CLI 429 上限）。
+`0.1.9` — 当前发布版本。包含 v1.2 托管认证、v1.4 CLI onboarding/ACP/F12 菜单/no-JWT 站点、v1.5 agent skill 与独立 `@limccn/tokimeki-dsh` 插件、0.1.7 安全加固、v1.7 硬化（慢 P2P 退回/发送节奏、relay per-IP 边缘限速、opaque token/passcode 锁限、CLI 429 上限），以及 v1.8 固定网格实时 resize（`display-size` + `display.resize` capability；旧客户端连接期间阻止实时 resize）。
 （Host/Session JWT、passcode、分享链接与 Web 终端集成）。从
 [npm](https://www.npmjs.com/package/@limccn/tokimeki) 安装（同时镜像到 GitHub
 Packages，见 [docs/release.md](docs/release.md)），或查看
-[v0.1.8 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.8)。
+[v0.1.9 release notes](https://github.com/limccn/tokimeki/releases/tag/v0.1.9)。
 P2P 直连是尽力而为；TURN 或 Worker relay 是可靠回退。已知限制与 v1.1
 功能演进见 [CHANGELOG.md](CHANGELOG.md) 与 [`CLAUDE.md`](CLAUDE.md)。
 
