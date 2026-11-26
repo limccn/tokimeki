@@ -8,7 +8,7 @@ import {
 } from "@limccn/tokimeki-protocol";
 import { describe, expect, it } from "vitest";
 
-import { buildCapabilities, supportsFragmentation } from "./capabilities.js";
+import { buildCapabilities, supportsDisplayResize, supportsFragmentation } from "./capabilities.js";
 
 describe("buildCapabilities", () => {
   it("advertises fragmentation when P2P is enabled", () => {
@@ -95,6 +95,7 @@ describe("buildCapabilities", () => {
         fixed: { cols: 120, rows: 40 },
         logPanel: true,
         terminalQueries: "host",
+        resize: true,
       },
     });
     expect(host.display).toEqual({
@@ -102,6 +103,7 @@ describe("buildCapabilities", () => {
       fixed: { cols: 120, rows: 40 },
       logPanel: true,
       terminalQueries: "host",
+      resize: 1,
     });
 
     const viewer = buildCapabilities({
@@ -109,6 +111,18 @@ describe("buildCapabilities", () => {
       display: { modes: ["viewport"], logPanel: true },
     });
     expect(viewer.display).toEqual({ modes: ["viewport"], logPanel: true });
+    expect(viewer.display?.resize).toBeUndefined();
+  });
+
+  it("detects only the exact display.resize support marker", () => {
+    const supported = buildCapabilities({
+      p2p: true,
+      display: { modes: ["viewport"], resize: true },
+    });
+    expect(supportsDisplayResize(supported)).toBe(true);
+    expect(supportsDisplayResize(undefined)).toBe(false);
+    expect(supportsDisplayResize({ display: { modes: ["viewport"] } })).toBe(false);
+    expect(supportsDisplayResize({ display: { modes: ["viewport"], resize: 2 } })).toBe(false);
   });
 
   it("advertises the tunnel dialect only when requested and P2P is enabled", () => {

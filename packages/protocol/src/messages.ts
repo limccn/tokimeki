@@ -58,6 +58,11 @@ export const DisplayCapabilitySchema = z
     logPanel: z.boolean().optional(),
     /** Host uses `host` when its mirror answers terminal queries. */
     terminalQueries: z.string().min(1).max(32).optional(),
+    /**
+     * `1` when the peer can rebuild its fixed grid from a `display-size`
+     * message (v1.8 additive capability). Unknown values are ignored.
+     */
+    resize: z.number().int().positive().optional(),
   })
   .superRefine((value, ctx) => {
     if (
@@ -324,6 +329,28 @@ export const ResizeMessageSchema = z
     path: ["cols"],
   });
 
+/**
+ * Host -> relay -> supporting viewers/listeners: the session's fixed logical
+ * grid changed (v1.8 additive message).
+ *
+ * This is the host-authoritative counterpart to `resize` (a viewer's local
+ * terminal size). The relay only forwards it to peers that advertised
+ * `capabilities.display.resize = 1`, and stores the new size on the host
+ * attachment so `welcome.clients[].capabilities.display.fixed` is current for
+ * late-joining clients. No new error code is introduced.
+ */
+export const DisplaySizeMessageSchema = z
+  .looseObject({
+    v: zV1,
+    type: z.literal("display-size"),
+    cols: terminalDimension,
+    rows: terminalDimension,
+  })
+  .refine((value) => isTerminalSizeWithinLimits(value.cols, value.rows), {
+    message: "terminal size exceeds the cell limit",
+    path: ["cols"],
+  });
+
 export const ResyncMessageSchema = z.looseObject({
   v: zV1,
   type: z.literal("resync"),
@@ -433,6 +460,7 @@ export const KNOWN_CONTROL_MESSAGE_TYPES = [
   "signal",
   "transport",
   "resize",
+  "display-size",
   "resync",
   "ack",
   "pause",
@@ -456,6 +484,7 @@ export const KnownControlMessageSchema = z.discriminatedUnion("type", [
   SignalMessageSchema,
   TransportMessageSchema,
   ResizeMessageSchema,
+  DisplaySizeMessageSchema,
   ResyncMessageSchema,
   AckMessageSchema,
   PauseMessageSchema,
@@ -469,7 +498,7 @@ export const KnownControlMessageSchema = z.discriminatedUnion("type", [
 ]);
 
 /**
- * Every control message accepted by protocol v1: the 19 known message types
+ * Every control message accepted by protocol v1: the 20 known message types
  * plus the reserved `agent.*` envelope.
  */
 export const ControlMessageSchema = z.union([KnownControlMessageSchema, AgentMessageSchema]);
@@ -496,6 +525,7 @@ export type PeerLeftMessage = z.infer<typeof PeerLeftMessageSchema>;
 export type SignalMessage = z.infer<typeof SignalMessageSchema>;
 export type TransportMessage = z.infer<typeof TransportMessageSchema>;
 export type ResizeMessage = z.infer<typeof ResizeMessageSchema>;
+export type DisplaySizeMessage = z.infer<typeof DisplaySizeMessageSchema>;
 export type ResyncMessage = z.infer<typeof ResyncMessageSchema>;
 export type AckMessage = z.infer<typeof AckMessageSchema>;
 export type PauseMessage = z.infer<typeof PauseMessageSchema>;

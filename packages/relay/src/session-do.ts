@@ -106,6 +106,9 @@ const RELAY_CAPABILITIES = {
   snapshot: { formats: ["xterm-serialize"], maxBytes: 262_144 },
   listener: { modes: ["snapshot-only"] },
   sessionSecurity: { passcode: 1 },
+  // v1.8 additive: the host may update the session's fixed grid with
+  // `display-size`; peers opt in with `display.resize = 1`.
+  display: { resize: 1 },
 } as const;
 
 /**
@@ -302,6 +305,8 @@ function boundedCapabilities(capabilities: Capabilities | undefined): Capabiliti
       ...(display.terminalQueries === undefined
         ? {}
         : { terminalQueries: display.terminalQueries.slice(0, 32) }),
+      // v1.8: peers advertise display.resize = 1 to receive `display-size`.
+      ...(display.resize === undefined ? {} : { resize: display.resize }),
     },
   };
 }
@@ -1333,6 +1338,9 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
         }
         this.routeResize(ws, att, known);
         break;
+      case "display-size":
+        this.routeDisplaySize(ws, att, known);
+        break;
       case "resync":
         if (att.role !== "viewer") {
           this.sendControl(ws, errorMessage("invalid_role", "only viewers may send resync"));
@@ -1543,6 +1551,56 @@ export class SessionDurableObject extends DurableObject<RelayEnv> {
       sessionId: this.sessionId,
       exitCode: message.exitCode ?? null,
       signal: message.signal ?? null,
+    });
+  }
+
+  /**
+   * The host announces a new fixed logical grid (v1.8).
+   *
+   * Only the host owns the PTY size. The relay stores the new size on the host
+   * attachment (so `welcome.clients[].capabilities.display.fixed` is current for
+   * late joiners, including old clients that never see this message) and fans
+   * the update out only to viewers/listeners that advertised
+   * `display.resize = 1`. Observer/agent clients stay on the control plane.
+   */
+  private routeDisplaySize(
+    ws: WebSocket,
+    att: ActiveAttachment,
+    message: Extract<KnownControlMessage, { type: "display-size" }>,
+  ): void {
+    if (att.role !== "host") {
+      this.sendControl(ws, errorMessage("invalid_role", "only the host may send display-size"));
+      return;
+    }
+    if (!isTerminalSizeWithinLimits(message.cols, message.rows)) {
+      this.sendControl(ws, errorMessage("invalid_message", "terminal size exceeds the cell limit"));
+      return;
+    }
+    const display = att.capabilities?.display;
+    att.capabilities = {
+      ...(att.capabilities ?? {}),
+      display: {
+        ...(display ?? {}),
+        fixed: { cols: message.cols, rows: message.rows },
+      },
+    };
+    this.saveAttachment(ws, att);
+    const targets = this.activeSockets().filter(
+      (socket) =>
+        (socket.att.role === "viewer" || socket.att.role === "listener") &&
+        socket.att.capabilities?.display?.resize === 1,
+    );
+    this.broadcastTo(targets, {
+      v: PROTOCOL_VERSION,
+      type: "display-size",
+      cols: message.cols,
+      rows: message.rows,
+    });
+    this.logger.info("display_size_updated", {
+      sessionId: this.sessionId,
+      cols: message.cols,
+      rows: message.rows,
+      clientCount: targets.length,
     });
   }
 

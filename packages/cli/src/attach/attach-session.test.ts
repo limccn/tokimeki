@@ -191,6 +191,24 @@ function welcomeMessage(): WelcomeMessage {
   };
 }
 
+function fixedGridWelcome(cols = 120, rows = 40): WelcomeMessage {
+  const welcome = welcomeMessage();
+  welcome.clients = [
+    {
+      clientId: "host-1",
+      role: "host",
+      capabilities: {
+        display: {
+          modes: ["fixed-grid", "viewport"],
+          fixed: { cols, rows },
+          terminalQueries: "host",
+        },
+      },
+    },
+  ];
+  return welcome;
+}
+
 async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {
@@ -327,6 +345,103 @@ describe("attach fixed viewport", () => {
 
     await waitFor(() => stdout.text.includes("legacy screen"));
     expect(stdout.text).not.toContain("tokimeki  viewer");
+
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+});
+
+describe("attach fixed-grid live resize", () => {
+  it("advertises display.resize and drops output until the new-grid snapshot", async () => {
+    const { client, transport, stdout, done } = makeSession("viewer");
+    await waitFor(() => client.options.role !== undefined && client.started);
+    expect(client.options.capabilities.display?.resize).toBe(1);
+
+    client.emitWelcome(fixedGridWelcome());
+    const targetId = client.options.clientId;
+    transport.emitFrame(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId,
+        seq: 4,
+        payload: new TextEncoder().encode("initial screen"),
+      }),
+    );
+    await waitFor(() => stdout.text.includes("initial screen"));
+
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "display-size", cols: 132, rows: 43 });
+    transport.emitFrame(
+      encodeFrame({
+        type: "output",
+        seq: 5,
+        payload: new TextEncoder().encode("old-grid-bytes"),
+      }),
+    );
+    // The viewer keeps ACKing relay bytes (flow control) but must not paint
+    // them into the rebuilt mirror.
+    await waitFor(() =>
+      client.controls.some((control) => {
+        const message = control as { type?: string; seq?: string };
+        return message.type === "ack" && message.seq === "5";
+      }),
+    );
+    expect(stdout.text).not.toContain("old-grid-bytes");
+
+    transport.emitFrame(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId,
+        seq: 6,
+        payload: new TextEncoder().encode("new-grid-screen"),
+      }),
+    );
+    await waitFor(() => stdout.text.includes("new-grid-screen"));
+
+    // Incremental output resumes after the snapshot boundary.
+    transport.emitFrame(
+      encodeFrame({
+        type: "output",
+        seq: 7,
+        payload: new TextEncoder().encode("after-resize"),
+      }),
+    );
+    await waitFor(() => stdout.text.includes("after-resize"));
+
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
+    await expect(done).resolves.toBe(0);
+  });
+
+  it("rebuilds a listener grid without sending input, resize, ACK, or resync", async () => {
+    const { client, transport, stdout, done } = makeSession("listener");
+    await waitFor(() => client.options.role !== undefined && client.started);
+    expect(client.options.capabilities.display?.resize).toBe(1);
+
+    client.emitWelcome(fixedGridWelcome());
+    const targetId = client.options.clientId;
+    transport.emitFrame(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId,
+        seq: 4,
+        payload: new TextEncoder().encode("listener initial"),
+      }),
+    );
+    await waitFor(() => stdout.text.includes("listener initial"));
+
+    client.emitMessage({ v: PROTOCOL_VERSION, type: "display-size", cols: 132, rows: 43 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(client.controls).toHaveLength(0);
+
+    transport.emitFrame(
+      encodeFrame({
+        type: "snapshot_to",
+        targetId,
+        seq: 5,
+        payload: new TextEncoder().encode("listener new grid"),
+      }),
+    );
+    await waitFor(() => stdout.text.includes("listener new grid"));
+    expect(client.controls).toHaveLength(0);
 
     client.emitMessage({ v: PROTOCOL_VERSION, type: "host-exited", exitCode: 0 });
     await expect(done).resolves.toBe(0);

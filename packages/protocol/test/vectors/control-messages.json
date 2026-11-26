@@ -296,6 +296,10 @@
       }
     },
     {
+      "name": "display-size",
+      "message": { "v": 1, "type": "display-size", "cols": 132, "rows": 43 }
+    },
+    {
       "name": "resync",
       "message": { "v": 1, "type": "resync", "fromSeq": "41" }
     },

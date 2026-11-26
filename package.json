@@ -20,6 +20,7 @@
     "test:relay": "vitest run --config packages/relay/vitest.config.ts && vitest run --config packages/relay/vitest.namespace.config.ts && vitest run --config packages/relay/vitest.jwt.config.ts && vitest run --config packages/relay/vitest.passcode.config.ts && vitest run --config packages/relay/vitest.quotas.config.ts",
     "test:all": "vitest run && vitest run --config packages/relay/vitest.config.ts && vitest run --config packages/relay/vitest.namespace.config.ts && vitest run --config packages/relay/vitest.jwt.config.ts && vitest run --config packages/relay/vitest.passcode.config.ts && vitest run --config packages/relay/vitest.quotas.config.ts",
     "e2e:v1.4": "npm run build && npm run build:site && node scripts/e2e/v1.4-onboarding-e2e.mjs",
+    "e2e:display-resize": "node scripts/e2e/display-resize-e2e.mjs",
     "lint": "biome check .",
     "format": "biome format --write .",
     "release:bump": "node scripts/release/version.mjs bump",

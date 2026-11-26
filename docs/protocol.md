@@ -22,6 +22,10 @@
 - v1.1 F1 可选扩展：`tunnel` capability 与 `TUNNEL 0x06` 内层 AEAD/ARQ 记录。F1
   首版只在 P2P unreliable/unordered DataChannel 上运行；relay 数据路径保持 v1 帧
   与流控，收到 `TUNNEL`/`TUNNEL_TO` 仍返回 `not_implemented`。未协商时保持 v1 行为。
+- v1.8 追加扩展（0.1.9）：`display-size` 控制消息与 `display.resize` capability，
+  允许固定网格 host 在会话中更新 PTY 尺寸；relay 只转发给声明支持的
+  viewer/listener，并在 `welcome.clients[].capabilities.display.fixed` 中保存新尺寸
+  供晚加入的旧客户端读取。不提升 `v`。
 - v1 只定义、不实现：`TUNNEL_TO` 应用层隧道定向投递、`tunnel`/`peerRelay`
   capabilities 的 relay 行为、Agent 运行时。收到 `TUNNEL_TO` 时返回 `not_implemented`。
 - 破坏性变更必须提升 `v`。向后兼容的新增字段可以保留 `v: 1`；旧实现必须忽略未知字段。
@@ -122,6 +126,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | `signal` | host ↔ viewer（经 DO） | `to`, `from`, `kind`, `payload` | — |
 | `transport` | client → host/DO | `clientId`, `mode`, `state` | `reason`, `via`（预留） |
 | `resize` | viewer → host（经 DO） | `clientId`, `cols`, `rows` | — |
+| `display-size` | host → DO → 支持的 viewer/listener | `cols`, `rows` | — |
 | `resync` | viewer → host（经 DO） | 无 | `fromSeq`（十进制 u64 字符串）、`clientId`（relay 填充） |
 | `ack` | viewer → DO/host | `seq`（十进制 u64 字符串） | — |
 | `pause` | DO → host | `clientId` | — |
@@ -142,6 +147,12 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
   pre-v1.1 relay 不带该字段，host 必须按 viewer 处理（向后兼容）。
 - `hello.client`：可选、User-Agent 式客户端描述：`{ name, version, kind?, platform?, runtime? }`；`name`/`version` 1..64 字符，其余为可选短字符串。不得包含 token、TURN 凭据或终端内容。未知字段必须保留/忽略。
 - `hello.cols` / `hello.rows` / `resize.cols` / `resize.rows`：整数，范围 `1..10000`，且 `cols * rows <= 4_000_000`。
+- `display-size`（v1.8 追加）：host 唯一发送者，表示会话固定逻辑网格变更。
+  `cols`/`rows` 与 `resize` 使用同一尺寸约束；viewer/listener 发送返回
+  `invalid_role`，超限返回 `invalid_message`。relay 将新尺寸写入 host attachment，
+  只广播给在 hello 中声明 `capabilities.display.resize = 1` 的 viewer/listener；
+  observer/agent 与未声明支持的旧客户端不会收到。broadcast 后 host 应调度新快照。
+  该消息不改变 `resize`（viewer 本地终端尺寸）的语义，也不新增错误码。
 - `capabilities`：见 §4.4。
 - `welcome.iceProvider`：`coturn`、`static`、`cloudflare`、`stun`。
 - `welcome.transportPolicy`：`all` 或 `relay`，对应 `TOKIMEKI_ICE_TRANSPORT_POLICY`。
@@ -169,7 +180,7 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 | Key | 字段 | 状态 |
 |---|---|---|
 | `protocolVersion` | number | 可选 |
-| `display` | `modes: string[]`, `fixed?: {cols,rows}`, `logPanel?`, `terminalQueries?` | v0.1.2 固定窗口/视口能力。host 声明 `modes:["fixed-grid"]`（本地渲染时加 `"viewport"`）与 `fixed`；viewer 声明 `modes:["viewport"]`。`fixed` 受单轴 10000 / 4M cell 限制；`terminalQueries:"host"` 表示 host mirror 负责回答终端查询 |
+| `display` | `modes: string[]`, `fixed?: {cols,rows}`, `logPanel?`, `terminalQueries?`, `resize?` | v0.1.2 固定窗口/视口能力。host 声明 `modes:["fixed-grid"]`（本地渲染时加 `"viewport"`）与 `fixed`；viewer 声明 `modes:["viewport"]`。`fixed` 受单轴 10000 / 4M cell 限制；`terminalQueries:"host"` 表示 host mirror 负责回答终端查询。v1.8 追加 `resize: 1`：该 peer 能处理 `display-size` 并重建固定网格 |
 | `transports` | `modes: string[]`, `fragmentation?` | v1 使用 `modes`；v1.1 F0 使用 `fragmentation: {version, maxFrameBytes, maxMessageBytes}` |
 | `snapshot` | `formats: string[]`, `maxBytes` | v1 使用；预期格式含 `xterm-serialize`、`raw-ring` |
 | `tunnel` | `version`, `arq`, `fec[]`, `crypto`, `keyMode`, `maxFrameSize` | v1.1 F1 使用 `version:1`、`arq:"selective-repeat"`、`crypto:"aes-256-gcm"`、`keyMode:"session-token"\|"shared-secret"`、`maxFrameSize:16339`；v1.1 F1.1 的 `fec:["none","xor"]`（XOR 单丢包 parity） |
@@ -183,6 +194,13 @@ v1 的 seq 互通范围是 `0..9007199254740991`（`2^53-1`）。线上字段仍
 中声明会话级固定逻辑窗口；viewer 通过 relay 在 `welcome.clients[]` / `presence.clients[]`
 回显的 `capabilities.display.fixed` 发现它。旧 relay 不回显 capabilities 时，viewer
 必须退回 legacy 直通渲染。旧 viewer 收到 `display` 字段必须忽略。
+
+v1.8 的 `display-size` 也走 `display`：host 在 `hello` 声明 `display.resize: 1`；
+viewer/listener 声明 `display.resize: 1` 才会收到实时更新。relay 在 `welcome`
+的 `capabilities.display.resize` 中广告支持。host 只能在 relay 支持且当前所有
+viewer/listener 都声明支持时应用 live resize；旧客户端连接会阻止 host 应用，
+晚加入的旧客户端仍从更新后的 `welcome.clients[].capabilities.display.fixed`
+按新 grid 渲染。`display.resize` 的未知值忽略，仅值 `1` 视为支持。
 
 `display.terminalQueries:"host"` 表示由 host mirror 回答终端查询。新 viewer 看到该
 字段时不得把本地 mirror 生成的查询回复发给 host；旧 host 没有该字段时，viewer 可
@@ -428,6 +446,12 @@ viewer                     relay / DO                         host
    `SNAPSHOT_TO`，之后按 `TOKIMEKI_LISTENER_SNAPSHOT_MS`（默认 1000ms，250..60000）
    周期发送；不暂停 PTY、不增加 viewer 序号/ACK 状态。listener 清屏后应用快照，
    忽略 `seq < lastSeq` 的旧快照；周期快照自然覆盖丢失的中间画面。
+8. 固定网格 live resize（v1.8）：host 先更新 PTY/mirror，再发送 `display-size`，
+   然后为所有 viewer/listener 调度新快照；该轮恢复快照走 relay（与
+   `display-size` 共享 socket 顺序）。支持 `display.resize` 的 viewer/listener
+   收到 `display-size` 后重建本地 grid，并在匹配的 `SNAPSHOT_TO` 到达前忽略
+   `OUTPUT`（仍正常 ACK relay 字节）。viewer 迟迟收不到快照时可在 1s 后请求
+   `resync`；listener 只等待下一次周期快照，不发送任何请求。
 
 ### 6.3 背压
 
@@ -733,7 +757,7 @@ Envelope：
 | `constants.json` | 版本、帧类型值、角色、传输模式、provider、resize policy、错误码、关闭码、限制、正则 |
 | `frames.json` | 每种二进制帧至少一个合法 hex（含 v1.1 `FRAGMENT`）；含空 payload、u64 最大安全值、64 字节 target、非法 fragment header 等边界；`invalid` 数组给出错误码 |
 | `tunnel-records.json` | v1.1 F1 内层记录固定 layout + AEAD AAD 向量（无真实密钥）；`invalid` 数组给出 `invalid_frame` 边界 |
-| `control-messages.json` | 全部 19 种 v1 控制消息（含 v1.1 listener hello 与带 `role` 的 `peer-joined`）+ 未知 `agent.*` + `not_implemented` 回复 |
+| `control-messages.json` | 全部 20 种 v1 控制消息（含 v1.1 listener hello、带 `role` 的 `peer-joined`、v1.8 `display-size`）+ 未知 `agent.*` + `not_implemented` 回复 |
 | `handshake.json` | hello → welcome → ice-refresh → ice 的完整 transcript |
 
 测试入口：`packages/protocol/src/goldens.test.ts`：
@@ -761,5 +785,6 @@ npm test -- packages/protocol
 - v1.1 F0 使用 capability-gated `FRAGMENT 0x08` 与 P2P `SNAPSHOT`；未声明分片的 v1 peer 仍走 relay 快照，不会收到 fragment。新增帧类型/可选字段保持 `v: 1`；删除字段、改变既有帧布局或语义才提升主版本。
 - v1.1 F2 将 `listener` 激活为只读 snapshot-only 角色，并新增可选 `peer-joined.role`。未带 `role` 的旧 `peer-joined` 按 viewer 处理；旧 relay 对 listener 返回 `not_implemented`，v1.1 客户端必须报错而非降级。v1.1 relay + pre-v1.1 host 时，host 会把 listener 当 viewer 处理并可能尝试被 relay 拒绝的 P2P 信令；完整 listener 服务需要 v1.1 host。新增可选字段/角色保持 `v: 1`。
 - v1.1 F1 增加 capability-gated `tunnel` 与 P2P-only `TUNNEL 0x06` 内层记录。未声明/不匹配的 peer 不建立隧道，继续 v1 P2P/relay；relay 永不转发 TUNNEL。session-token keyMode 可被 relay 推导，只有 shared-secret 模式可声明 relay-blind。新增可选 capability/帧内层保持 `v: 1`。
+- v1.8 增加 host-only `display-size` 与 `display.resize` capability。旧 relay 不返回该 capability 时 host 不发送 `display-size`；旧 viewer/listener 不声明支持时 host 阻止 live resize（避免已连接客户端 grid 失配）。晚加入的旧客户端通过更新后的 `welcome.clients[].capabilities.display.fixed` 按新 grid 渲染。新增可选能力/消息保持 `v: 1`。
 - token、TURN secret、credential、终端内容不得进入日志、错误消息、URL 或 `hello`。
 - 所有长度限制以字节计（UTF-8），除非明确写为字符。

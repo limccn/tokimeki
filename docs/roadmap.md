@@ -404,9 +404,15 @@ config/history 清理，以及 relay/TokiAPI TTL/撤销契约。
 
 ### v1.4/v1.5 delivery follow-ups（任务 `11-23-v1-8-v1-4-v1-5-followups`）
 
-- 固定窗口实时 resize：新增 additive `display-size`/capability 刷新路径，
-  更新 relay DO、协议文档/goldens、viewer 重连行为；恢复 F12 fixed 菜单项并补
-  多 viewer e2e。
+- 固定窗口实时 resize（已实现，0.1.9 任务
+  `11-26-v1-8-fixed-grid-live-resize`）：新增 additive `display-size` 控制消息与
+  `display.resize` capability；relay 只接受 host 发送、更新 host attachment 的
+  `display.fixed` 并只向声明支持的 viewer/listener 广播；CLI host 在 relay 与
+  所有在线 viewer/listener 都支持时才应用（否则提示原因、PTY 不变），应用后
+  发送 `display-size` 并调度新快照；viewer/listener 重建 grid 并等待快照。
+  TokiAPI web viewer 未声明支持，连接期间阻止 live resize，晚加入时从 welcome
+  读取新尺寸；web 端实时支持是后续跨仓任务。协议文档/goldens、`docs/cli.md`、
+  `docs/web-viewer.md` 与多 viewer e2e 已同步。
 - 公开发布 `tokimeki-dsh`（用户 2026-11-24 决定暂缓到 v1.8）：用户创建/授权
   `limccn/tokimeki-dsh` 公开仓库、配置 `NPM_TOKEN`，推送 `main`/`v0.1.0`，
   由 CI 发布 npm + GitHub Release；本地源码/测试保留在
